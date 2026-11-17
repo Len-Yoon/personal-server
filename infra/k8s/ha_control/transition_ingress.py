@@ -11,7 +11,7 @@ from ha_runtime.seven_capture import encoded, parse
 
 from . import caddy_runtime as caddy
 from . import native_stdio_bridge as bridge
-from .native_guest_activation import ServingGeneration, generation_handoff_request
+from .native_guest_activation import ServingGeneration, generation_handoff_request, validate_generation_handoff_identity
 from .native_host_evidence import _public_health
 from .native_windows_ssh import fixed_script
 from .native_windows_activation import (close_previous_transition_service, open_transition_controller, prepare_staged_transition_service,
@@ -270,14 +270,23 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     template = parse(raw)
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
                 and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
-    caddy._need((target_request.binding.plan_sha256, target_request.binding.attempt_id)
-                == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
-                and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
-                "transition_ingress_guest_target_unconfirmed")
     caddy._need(callable(replacement_requests) and callable(generation_handoff_pins)
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
+    pins = generation_handoff_pins(generation)
+    caddy._need(type(pins) is dict and set(pins) == {"pins", "postgres", "activation"},
+                "transition_ingress_controller_unbound")
+    validate_generation_handoff_identity(
+        target_request.binding, generation.primary, pins["pins"], pins["postgres"], pins["activation"],
+        generation, pins["pins"].plan_sha256,
+    )
+    caddy._need((target_request.binding.plan_sha256, target_request.binding.attempt_id)
+                == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
+                and guests.verify_prepared_transition_target(
+                    target_request, generation, target, pins["pins"], pins["activation"].primary_runtime_receipt_sha256,
+                    observer_setup["deadline"],
+                ) is True, "transition_ingress_guest_target_unconfirmed")
     stage_fields = {"approval", "close_previous_service", "preflight_path", "scm_verifier_path"}
     caddy._need(type(stage_service) is dict and set(stage_service) == stage_fields
                 and callable(stage_service["approval"]) and callable(stage_service["close_previous_service"])
@@ -351,9 +360,6 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
 
         def publish_handoff(serving_generation, instance, limit):
             nonlocal activation_request
-            pins = generation_handoff_pins(serving_generation)
-            caddy._need(type(pins) is dict and set(pins) == {"pins", "postgres", "activation"},
-                        "transition_ingress_controller_unbound")
             request = generation_handoff_request(
                 target_request.binding, replacement_observe.sequence + 1, serving_generation,
                 instance, replay_floor, **pins,

@@ -58,13 +58,14 @@ class TransitionIngressTests(unittest.TestCase):
             controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
             replacement_requests=lambda _: (replacement, observe),
-            generation_handoff_pins=lambda _: {"pins": None, "postgres": None, "activation": None},
+            generation_handoff_pins=lambda _: {"pins": SimpleNamespace(plan_sha256="2"*64), "postgres": None,
+                "activation": SimpleNamespace(primary_runtime_receipt_sha256="a"*64)},
             stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
                                                                         "action": "ha-transition",
                                                                         "authority_kind": "installed-runtime"}),
                            "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
-            guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True),
+            guests=SimpleNamespace(verify_prepared_transition_target=MagicMock(return_value=True),
                                    publish_generation_handoff=MagicMock(return_value="6"*64),
                                    activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)),
@@ -86,7 +87,8 @@ class TransitionIngressTests(unittest.TestCase):
             steps.append("ingress")
             return None, None, {}
 
-        with patch.object(transition_ingress, "generation_handoff_request", return_value=handoff), \
+        with patch.object(transition_ingress, "validate_generation_handoff_identity"), \
+                patch.object(transition_ingress, "generation_handoff_request", return_value=handoff), \
                 patch.object(transition_ingress, "validate_transition_approval") as validate_approval, \
                 patch.object(transition_ingress, "fixed_script"), \
                 patch.object(transition_ingress, "stage_approved_transition_service",
@@ -101,11 +103,11 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
                 patch.object(transition_ingress, "switch_ingress", side_effect=switch_routes) as switch:
-            args["guests"].verify_transition_target.return_value = False
+            args["guests"].verify_prepared_transition_target.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
-            args["guests"].verify_transition_target.return_value = True
+            args["guests"].verify_prepared_transition_target.return_value = True
             validate_approval.side_effect = TransitionBlocked("approval invalid")
             with self.assertRaisesRegex(TransitionBlocked, "approval invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)

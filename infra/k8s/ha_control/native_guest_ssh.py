@@ -2,7 +2,7 @@
 
 import base64
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import hmac
 import ipaddress
@@ -325,7 +325,7 @@ class GuestSshDispatcher:
         bridge._need(type(request) is bridge.Request and request.verb not in
                      {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
                       bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
-                      bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_TRANSITION_TARGET},
+                      bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -338,6 +338,24 @@ class GuestSshDispatcher:
         receipt = self._dispatch(request, deadline)
         bridge._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256),
                      "guest_ssh_transition_target_unconfirmed")
+        return True
+
+    def verify_prepared_transition_target(self, request, generation, target, pins, runtime_receipt_sha256, deadline):
+        """Bind the original target request to a fresh stopped-runtime observation."""
+        generation.validate()
+        error = "guest_ssh_prepared_generation_unbound"
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_TRANSITION_TARGET
+                     and request.binding == self.binding and request.node == generation.primary
+                     and target == self.guests[request.node].host and bridge._hash(runtime_receipt_sha256)
+                     and pins.node == request.node and pins.generation == generation.epoch
+                     and pins.installation_id == request.args.get("installation_id"), error)
+        bridge._args(request.verb, request.node, dict(request.args))
+        observation = replace(request, verb=bridge.GUEST_VERIFY_PREPARED_GENERATION, args={
+            "runtime": asdict(pins), "runtime_receipt_sha256": runtime_receipt_sha256,
+            "target_sha256": bridge._digest(target.encode("ascii")),
+        })
+        receipt = self._dispatch(observation, deadline)
+        bridge._need(receipt.status == "PASS" and receipt.receipt_sha256 == runtime_receipt_sha256, error)
         return True
 
     def publish_generation_handoff(self, request, generation, instance, replay_floor, deadline):

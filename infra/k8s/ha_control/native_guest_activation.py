@@ -70,12 +70,12 @@ class ServingGeneration:
 INITIAL_GENERATION = ServingGeneration("A", 1, 1, 2)
 
 
-def validate_generation_handoff_pins(binding, node, pins, pg, activation, generation, floor, effects_plan_sha256):
+def validate_generation_handoff_identity(binding, node, pins, pg, activation, generation, effects_plan_sha256):
     pins.validate()
     pg.validate()
     activation.validate()
     generation.validate()
-    _need(type(floor) is int and 0 < floor < 2**64 and generation.epoch > 1
+    _need(generation.epoch > 1
           and pins.node == generation.primary == node and pins.primary_node == node
           and pins.generation == generation.epoch and pins.attempt_id == binding.attempt_id
           and pins.boot_sha256 == binding.boot(node) and pins.plan_sha256 == effects_plan_sha256
@@ -83,6 +83,11 @@ def validate_generation_handoff_pins(binding, node, pins, pg, activation, genera
           and all(getattr(pins, field) == getattr(pg, field) for field in (
               "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "system_id", "cluster", "postgres_id",
           )), "guest_generation_handoff_unbound")
+
+
+def validate_generation_handoff_pins(binding, node, pins, pg, activation, generation, floor, effects_plan_sha256):
+    _need(type(floor) is int and 0 < floor < 2**64, "guest_generation_handoff_unbound")
+    validate_generation_handoff_identity(binding, node, pins, pg, activation, generation, effects_plan_sha256)
 
 
 def generation_handoff_request(binding, sequence, generation, instance, replay_floor, *, pins, postgres, activation):

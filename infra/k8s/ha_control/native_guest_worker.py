@@ -26,7 +26,7 @@ from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
-    GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -44,6 +44,7 @@ VERBS = {
     GUEST_PUBLISH_GENERATION,
     GUEST_TRANSITION_TARGET,
     GUEST_VERIFY_GENERATION,
+    GUEST_VERIFY_PREPARED_GENERATION,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -779,6 +780,28 @@ def observe_generation_activation(request):
     return Receipt("PASS", pin)
 
 
+def verify_prepared_generation(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    pins = runtime.RuntimePins(**request.args["runtime"])
+    pins.validate()
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    _need(pins.node == pins.primary_node == request.node and pins.generation > 1
+          and pins.attempt_id == request.binding.attempt_id and pins.boot_sha256 == request.binding.boot(request.node),
+          "guest_generation_prepared_unbound")
+    spec, values = _read_json(stage / "guest-spec.json")
+    _need(_digest(spec) == pins.spec_sha256 and type(values["guest_ip"]) is str
+          and _digest(values["guest_ip"].encode("ascii")) == request.args["target_sha256"],
+          "guest_generation_prepared_unbound")
+    _, installation = _read_json(restore.INSTALLATION)
+    _need(installation["installation_id"] == pins.installation_id and installation["node"] == request.node
+          and installation["source_commit"] == pins.release["source_commit"], "guest_generation_prepared_unbound")
+    pin = runtime._inspect_prepared(pins, stage, stage / "runtime-intent.json", stage / "runtime-prepared.json")
+    _need(pin == request.args["runtime_receipt_sha256"]
+          and _digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_generation_prepared_unbound")
+    return Receipt("PASS", pin)
+
+
 def verify_live_generation(request):
     _need(os.geteuid() == 0, "guest_worker_root_required")
     stage = ROOT / request.binding.attempt_id
@@ -819,6 +842,8 @@ def handle(request, assert_windows_current=None):
                 return replacement_standby(request)
             if request.verb == GUEST_PUBLISH_GENERATION:
                 return publish_generation_handoff(request)
+            if request.verb == GUEST_VERIFY_PREPARED_GENERATION:
+                return verify_prepared_generation(request)
             if request.verb == GUEST_VERIFY_GENERATION:
                 return verify_live_generation(request)
             if request.verb == GUEST_OBSERVE_GENERATION:
