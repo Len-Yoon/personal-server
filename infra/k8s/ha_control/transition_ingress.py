@@ -297,7 +297,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          observer_setup, controller_setup, assert_legacy_closed,
                          guests, target_request,
                          replacement_manifest_sha256, generation_handoff_pins, stage_service,
-                         preflight_replacement, attach_replacement_network, resume_rejoin=None,
+                         isolated_replacement, attach_replacement_network, resume_rejoin=None,
                          prepare_guest_runtime=False, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
@@ -315,7 +315,10 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
                 and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
     caddy._need(bridge._hash(replacement_manifest_sha256) and callable(generation_handoff_pins)
-                and callable(preflight_replacement) and callable(attach_replacement_network)
+                and type(isolated_replacement) is dict
+                and {"endpoint", "known_hosts"} <= set(isolated_replacement)
+                and set(isolated_replacement) <= {"endpoint", "known_hosts", "jump", "jump_known_hosts"}
+                and callable(attach_replacement_network)
                 and callable(getattr(attach_replacement_network, "preflight", None))
                 and type(prepare_guest_runtime) is bool
                 and (resume_rejoin is None or type(resume_rejoin) is dict
@@ -340,6 +343,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     caddy._need(type(target_request.sequence) is int and 0 < target_request.sequence <= bridge.MAX_REQUESTS - 15
                 and bridge._hash(replacement_vm.get("installation_id"))
                 and replacement_vm.get("node") == generation.partner, "transition_replacement_scope_invalid")
+    preflight_replacement = guests.isolated_replacement_preflight(generation.partner, **isolated_replacement)
     preflight = bridge.Request(
         target_request.binding, generation.partner, bridge.GUEST_PREFLIGHT_REPLACEMENT, target_request.sequence + 1,
         secrets.token_hex(32), {"bootstrap_manifest_sha256": replacement_manifest_sha256,

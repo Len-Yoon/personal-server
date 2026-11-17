@@ -315,6 +315,7 @@ class GuestSshDispatcher:
         else:
             self.known_hosts = {key: Path(known_hosts) for key in ('jump', *bridge.NODES)}
         self.binding, self.jump, self.guests = binding, jump, dict(guests)
+        self.launcher_sha256 = launcher_sha256
         self.command = shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', BOOTSTRAP, WORKER, launcher_sha256))
         self.run = run
         self.lock = threading.Lock()
@@ -329,6 +330,32 @@ class GuestSshDispatcher:
                       bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
+
+    def isolated_replacement_preflight(self, node, *, endpoint, known_hosts, jump=None, jump_known_hosts=None):
+        """Build a preflight-only connection with the same replacement host key."""
+        error = "guest_ssh_isolated_replacement_unbound"
+        bridge._need(node in self.guests and type(endpoint) is SshEndpoint, error)
+        serving = self.guests[node]
+        bridge._need(endpoint.host_fingerprint == serving.host_fingerprint
+                     and endpoint.identity_fingerprint == serving.identity_fingerprint, error)
+        if jump is None:
+            bridge._need(jump_known_hosts is None and endpoint.host != serving.host, error)
+            jump, jump_known_hosts = self.jump, self.known_hosts["jump"]
+        else:
+            bridge._need(type(jump) is SshEndpoint and jump_known_hosts is not None
+                         and jump.host.lower() != self.jump.host.lower()
+                         and jump.host_fingerprint != self.jump.host_fingerprint, error)
+        isolated = GuestSshDispatcher(
+            self.binding, jump=jump, guests=self.guests | {node: endpoint},
+            known_hosts=self.known_hosts | {node: Path(known_hosts), "jump": Path(jump_known_hosts)},
+            launcher_sha256=self.launcher_sha256, run=self.run,
+        )
+
+        def verify(request, deadline):
+            bridge._need(type(request) is bridge.Request and request.node == node, error)
+            return isolated.preflight_replacement_standby(request, deadline)
+
+        return verify
 
     def assert_serving_endpoints(self, pg_nodes):
         """Bind subsequent SSH requests to both approved PostgreSQL hosts."""

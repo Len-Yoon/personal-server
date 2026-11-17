@@ -18,7 +18,7 @@ from ha_control.windows import WindowsFence
 from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_execution, transition_ingress
 from ha_control import wsl_writer_proof
 from ha_control.native_guest_activation import ServingGeneration
-from ha_control.native_guest_ssh import GuestSshDispatcher
+from ha_control.native_guest_ssh import GuestSshDispatcher, SshEndpoint
 from ha_control.native_replacement_network import WindowsReplacementNetwork
 
 
@@ -80,6 +80,43 @@ class ServingEndpointTests(unittest.TestCase):
                 dispatcher.assert_serving_endpoints(changed)
 
 
+    def test_isolated_transport_requires_the_pinned_guest_key_and_different_route(self):
+        bridge = transition_ingress.bridge
+        binding = bridge.Binding(*(letter * 64 for letter in "abcde"))
+
+        def endpoint(host, alias, fingerprint, user="root"):
+            return SshEndpoint(host, 22, user, alias, Path("/key"), "SHA256:" + "A" * 43,
+                               "SHA256:" + fingerprint * 43)
+
+        jump = endpoint("jump.example", "jump", "J", user="operator")
+        guests = {"A": endpoint("192.168.40.11", "guest-a", "A"),
+                  "B": endpoint("192.168.40.12", "guest-b", "B")}
+        dispatcher = GuestSshDispatcher(binding, jump=jump, guests=guests, known_hosts="/hosts",
+                                        launcher_sha256="f" * 64)
+        isolated = replace(guests["A"], host="192.168.41.11")
+        for unbound in (guests["A"], replace(isolated, host_fingerprint=guests["B"].host_fingerprint)):
+            with self.assertRaisesRegex(bridge.BridgeRejected, "isolated_replacement_unbound"):
+                dispatcher.isolated_replacement_preflight("A", endpoint=unbound, known_hosts="/isohosts")
+        other_jump = endpoint("private-jump.example", "private-jump", "K", user="operator")
+        self.assertTrue(callable(dispatcher.isolated_replacement_preflight(
+            "A", endpoint=guests["A"], known_hosts="/isohosts", jump=other_jump, jump_known_hosts="/isojump",
+        )))
+        with self.assertRaisesRegex(bridge.BridgeRejected, "isolated_replacement_unbound"):
+            dispatcher.isolated_replacement_preflight(
+                "A", endpoint=guests["A"], known_hosts="/isohosts", jump=jump, jump_known_hosts="/isojump",
+            )
+        verify = dispatcher.isolated_replacement_preflight("A", endpoint=isolated, known_hosts="/isohosts")
+        request = bridge.Request(binding, "A", bridge.GUEST_PREFLIGHT_REPLACEMENT, 2, "1"*64, {})
+        with patch.object(GuestSshDispatcher, "preflight_replacement_standby", autospec=True, return_value=True) as call:
+            self.assertTrue(verify(request, 90))
+            connection, sent, deadline = call.call_args.args
+            self.assertIsNot(connection, dispatcher)
+            self.assertEqual((connection.binding, connection.guests["A"], sent, deadline),
+                             (binding, isolated, request, 90))
+            with self.assertRaisesRegex(bridge.BridgeRejected, "isolated_replacement_unbound"):
+                verify(replace(request, node="B"), 90)
+
+
 class TransitionIngressTests(unittest.TestCase):
     def test_observer_and_apps_precede_external_route_switch(self):
         from ha_runtime.seven_capture import encoded
@@ -128,9 +165,10 @@ class TransitionIngressTests(unittest.TestCase):
                                                                         "authority_kind": "installed-runtime"}),
                            "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
-            preflight_replacement=MagicMock(return_value=True),
+            isolated_replacement={"endpoint": "isolated", "known_hosts": "fixture"},
             attach_replacement_network=MagicMock(side_effect=lambda *_a, **_kw: steps.append("attach") or True),
             guests=SimpleNamespace(assert_serving_endpoints=MagicMock(return_value=True),
+                                   isolated_replacement_preflight=MagicMock(return_value=MagicMock(return_value=True)),
                                    verify_prepared_transition_target=MagicMock(return_value=True),
                                    preflight_replacement_standby=MagicMock(
                                        side_effect=lambda *_: steps.append("serving-preflight") or True),
@@ -138,6 +176,7 @@ class TransitionIngressTests(unittest.TestCase):
                                    activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
             target_request=SimpleNamespace(binding=MagicMock(**execution.spec, **{"fields.return_value":execution.spec}), sequence=1),
         )
+        isolated_probe = args["guests"].isolated_replacement_preflight.return_value
         args["attach_replacement_network"].preflight.return_value = True
         stage = "7"*64
         handoff = transition_ingress.bridge.Request(
@@ -187,15 +226,15 @@ class TransitionIngressTests(unittest.TestCase):
             args["attach_replacement_network"].preflight.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)
-            args["preflight_replacement"].assert_not_called()
+            isolated_probe.assert_not_called()
             stage_service.assert_not_called()
             args["attach_replacement_network"].preflight.return_value = True
-            args["preflight_replacement"].return_value = False
+            isolated_probe.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "replacement_scope_invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             stage_service.assert_not_called()
-            args["preflight_replacement"].return_value = True
+            isolated_probe.return_value = True
             validate_approval.side_effect = TransitionBlocked("approval invalid")
             with self.assertRaisesRegex(TransitionBlocked, "approval invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)
@@ -229,7 +268,7 @@ class TransitionIngressTests(unittest.TestCase):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify",
                                      "fence-proof", "attach", "fence-proof"])
-            isolated_request = args["preflight_replacement"].call_args.args[0]
+            isolated_request = isolated_probe.call_args.args[0]
             serving_request, deadline = serving_preflight.call_args.args
             self.assertEqual(deadline, 50)
             self.assertNotEqual(serving_request.nonce, isolated_request.nonce)
