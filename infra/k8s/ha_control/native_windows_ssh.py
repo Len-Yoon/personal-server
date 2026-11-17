@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -46,8 +47,9 @@ class WindowsSsh:
     @contextmanager
     def live_authority_session(self, deadline):
         """Pre-authenticate one private SSH transport and run separate read commands on it."""
+        temporary_root = '/private/tmp' if sys.platform == 'darwin' else '/tmp'
         with self._connection(deadline, cutover=True) as (argv, stamps), \
-                tempfile.TemporaryDirectory(prefix='ha-mux-', dir='/private/tmp') as directory:
+                tempfile.TemporaryDirectory(prefix='ha-mux-', dir=temporary_root) as directory:
             socket = Path(directory) / 'c'
             base = (*argv[:-2], '-S', str(socket))
             alias = argv[-1]
