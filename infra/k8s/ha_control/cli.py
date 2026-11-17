@@ -134,6 +134,25 @@ def run(args):
                                target="B" if p["node"] == "A" else "A", timeline=p["timeline"])
             backend.bind(Journal(journal).read())
             return {"status": "PASS", "phase": "fencing", "authority_opened": False}
+        if args.command == "check-lease-closed":
+            from types import SimpleNamespace
+            if (p.get("profile") != "enforced-vm-v1" or p["generation"] < 2
+                    or "windows_transition_observer" not in p):
+                raise TransitionBlocked("transition_db_closure_unconfirmed")
+            timeline = p.get("transition_service_start", {}).get("target_timeline")
+            if type(timeline) is not int or timeline <= p["timeline"]:
+                raise TransitionBlocked("transition_db_closure_unconfirmed")
+            with exclusive(journal.with_suffix(".lock")):
+                state = Journal(journal).read()
+                backend.bind(state)
+                generation = SimpleNamespace(
+                    epoch=p["generation"], partner=state["old"], primary=state["target"],
+                    timeline=timeline, revision=p["generation"],
+                )
+                proof = backend.observe_transition_lease_closed(
+                    backend.fence_adapter.plan_sha256, generation, time.monotonic() + 8,
+                )
+                return {"status": "PASS", **proof}
         backend.bind(Journal(journal).read())
         if args.command == "stage-rejoin":
             if p.get("profile") != "enforced-vm-v1":
@@ -180,7 +199,7 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "stage-rejoin",
-                                            "check-rejoin", "transition-serve", "transition-rearm"))
+                                            "check-rejoin", "transition-serve", "transition-rearm", "check-lease-closed"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")

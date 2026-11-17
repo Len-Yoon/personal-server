@@ -920,6 +920,24 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(update.args[1], ("synthetic", 7, 9, "B", "A", 2, ["B"], "B", "AS"))
         self.assertIsNotNone(self.backend.validated)
 
+    def test_cli_checks_only_the_plan_bound_closed_lease(self):
+        journal = self.root / "journal"
+        journal.mkdir()
+        Journal(journal / "controller-state.json").save(self.state)
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_transition_observer={},
+                            transition_service_start={"target_timeline": 2})
+        backend.fence_adapter.plan_sha256 = "a"*64
+        backend.observe_transition_lease_closed.return_value = {"generation": 7}
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="check-lease-closed")
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"):
+            self.assertEqual(cli.run(args), {"status": "PASS", "generation": 7})
+        pin, generation, _ = backend.observe_transition_lease_closed.call_args.args
+        self.assertEqual((pin, generation.primary, generation.partner, generation.timeline), ("a"*64, "B", "A", 2))
+        backend.renew.assert_not_called()
+        backend.open.assert_not_called()
+
     def test_transition_closure_observes_each_node_and_rejects_wrong_role(self):
         generation = ServingGeneration("B", 7, 2, 9)
         self.backend.plan["profile"] = "enforced-vm-v1"

@@ -90,7 +90,7 @@ def render_args(values):
             or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(values['service_name']))
             or not re.fullmatch(r'S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}', str(values['service_sid']))
             or values['mode'] not in {'authenticate', 'initialize', 'advance', 'serve', 'stage-rejoin',
-                                      'check-rejoin', 'transition-serve', 'transition-rearm'}):
+                                      'check-rejoin', 'transition-serve', 'transition-rearm', 'check-lease-closed'}):
         deny()
     for key in ARGS_KEYS:
         value = values[key]

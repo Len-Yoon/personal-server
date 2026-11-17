@@ -661,7 +661,10 @@ class PgBackend:
                 or self.fence_adapter.plan_sha256 != plan_sha256
                 or self.plan["generation"] != generation.epoch or self.plan["node"] != generation.partner):
             _deny("transition_db_closure_unconfirmed")
-        generation.validate()
+        if (generation.primary not in ("A", "B") or generation.primary == generation.partner
+                or type(generation.timeline) is not int or generation.timeline <= self.plan["timeline"]
+                or type(generation.revision) is not int or generation.revision < generation.epoch):
+            _deny("transition_db_closure_unconfirmed")
         while time.monotonic() < deadline:
             proofs = {}
             for node in ("A", "B"):
