@@ -74,14 +74,23 @@ class DeploymentAdmission:
             if time.monotonic() >= deadline:
                 raise TransitionBlocked("deployment_admission_disable_unconfirmed")
             time.sleep(1)
-        while not self._closed(deadline):
+        while not self._closed(deadline, acquiring=True):
             if time.monotonic() >= deadline:
                 raise TransitionBlocked("deployment_admission_runs_not_settled")
             time.sleep(1)
 
-    def _closed(self, deadline):
-        if self.state(deadline=deadline) != "disabled_manually":
+    def _closed(self, deadline, *, acquiring=False):
+        def disabled():
+            if self.state(deadline=deadline) == "disabled_manually":
+                return True
+            if acquiring:
+                # Until the first full closure proof, conflicting reads can
+                # reflect the acknowledged disable still propagating.
+                return False
             raise TransitionBlocked("deployment_admission_reopened")
+
+        if not disabled():
+            return False
         first = self._run_page(1, deadline)
         total = first["total_count"]
         page_count = max(1, (total + 99) // 100)
@@ -111,9 +120,7 @@ class DeploymentAdmission:
                         return False
         if len(ids) != total:
             raise TransitionBlocked("deployment_admission_runs_unconfirmed")
-        if self.state(deadline=deadline) != "disabled_manually":
-            raise TransitionBlocked("deployment_admission_reopened")
-        return True
+        return disabled()
 
     def _run_page(self, number, deadline):
         try:
