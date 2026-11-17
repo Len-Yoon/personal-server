@@ -301,6 +301,32 @@ class NativeCaptureHeartbeatTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(errors, [])
 
+    def test_late_heartbeat_reads_same_ack_without_replay(self):
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*("abcdef"[i] * 64 for i in range(5)))
+        channel = MagicMock()
+        received = threading.Event()
+        heartbeat_deadlines = []
+
+        def answer(deadline):
+            request = channel.write.call_args.args[0]
+            if request["kind"] == "open":
+                return request | {"kind": "opened", "server_nonce": "7" * 64}
+            heartbeat_deadlines.append(deadline)
+            if len(heartbeat_deadlines) == 1:
+                raise bridge.BridgeRejected("bridge_deadline_exceeded")
+            received.set()
+            return request | {"kind": "heartbeat_ack"}
+
+        channel.read.side_effect = answer
+        client = bridge.Client(channel, binding)
+        with client.keepalive():
+            self.assertTrue(received.wait(2))
+        self.assertEqual(channel.write.call_count, 2)
+        self.assertEqual(client.heartbeat, 1)
+        self.assertEqual(client.sequence, 0)
+        self.assertEqual(heartbeat_deadlines[1] - heartbeat_deadlines[0], bridge.HEARTBEAT_ACK_GRACE)
+
     def test_unbound_heartbeat_poisoned_before_next_guest_request(self):
         bridge = native_stdio_bridge
         binding = bridge.Binding(*("abcdef"[i] * 64 for i in range(5)))
