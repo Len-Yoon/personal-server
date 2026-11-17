@@ -24,7 +24,7 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
-    ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GUEST_RESTORE_READBACK,
+    ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
     MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -36,6 +36,7 @@ VERBS = {
     "preflight", "begin_receive", "finish_receive", "restore", "prepare_runtime", "verify_closed",
     "assert_activation_closed", "activate", "assert_live", "observe_restore", "observe_rollback",
     GUEST_RESTORE_READBACK,
+    GUEST_START_REPLACEMENT,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -618,11 +619,57 @@ class GuestWorker:
         return handlers[self.request.verb]()
 
 
+def start_replacement_standby(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    boot = request.binding.boot(request.node)
+    _need(_digest(restore.BOOT_ID.read_bytes()) == boot, "guest_worker_boot_changed")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    _, grant = _read_json(stage / "replacement-standby-input.json")
+    installation = grant.get("installation_id")
+    _need(_hash(installation) and _matches(grant, {
+        "schema_version": 1, "binding": request.binding.fields(), "node": request.node,
+        "installation_id": installation, **request.args,
+    }), "guest_replacement_start_not_bound")
+    _, installed = _read_json(restore.INSTALLATION)
+    bundle = stage / "replacement-bootstrap"
+    runtime._directory(bundle, 0)
+    manifest = runtime._read(bundle / "manifest.json", 0, {0o400, 0o444})
+    _need(_digest(manifest) == request.args["bootstrap_manifest_sha256"], "guest_replacement_manifest_unconfirmed")
+    spec = json.loads(runtime._read(bundle / "lock.json", 0, {0o400, 0o444}), object_pairs_hook=_pairs,
+                      parse_constant=_reject_constant)
+    source = "B" if request.node == "A" else "A"
+    _need(all(installed[key] == spec[key] for key in ("node", "installation_id", "source_commit"))
+          and spec["node"] == request.node and spec["installation_id"] == installation
+          and spec["plan_sha256"] == request.binding.plan_sha256
+          and spec["primary_node"] == spec["source_node"] == source, "guest_replacement_installation_changed")
+    bootstrap = bundle / "bootstrap.py"
+    pinned_code = runtime._read(bootstrap, 0, {0o400, 0o444, 0o500, 0o555})
+    index = json.loads(manifest, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+    _need(_digest(pinned_code) == index["files"]["bootstrap.py"], "guest_replacement_bootstrap_unconfirmed")
+    runner = (
+        "import sys\n"
+        "sys.argv.pop(0)\n"
+        "__file__ = sys.argv[0]\n"
+        "exec(compile(sys.stdin.buffer.read(), __file__, 'exec'))\n"
+    )
+    result = subprocess.run(("/usr/bin/python3", "-I", "-B", "-S", "-c", runner, str(bootstrap), "start-replacement-standby",
+                             "--bundle", str(bundle), "--manifest-sha256", request.args["bootstrap_manifest_sha256"],
+                             "--boot-sha256", boot), input=pinned_code, capture_output=True, check=False, timeout=75,
+                            env={"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C"})
+    _need(result.returncode == 0 and _matches(json.loads(result.stdout), {
+        "status": "PASS", "standby_start_requested": True, "writer_authority_issued": False,
+    }), "guest_replacement_start_unconfirmed")
+    return Receipt("PASS", _digest(_bytes(_scope(request) | {"args": request.args, "installation_id": installation})))
+
+
 def handle(request, assert_windows_current=None):
     try:
         _need(type(request) is Request and request.verb in VERBS, "guest_worker_request_scope")
         _args(request.verb, request.node, request.args)
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
+            if request.verb == GUEST_START_REPLACEMENT:
+                return start_replacement_standby(request)
             return GuestWorker(request).dispatch(descriptor, assert_windows_current)
     except (TransitionBlocked, BridgeRejected, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         return Receipt("UNKNOWN")

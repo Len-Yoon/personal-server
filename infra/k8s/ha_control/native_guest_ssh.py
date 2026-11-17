@@ -322,6 +322,25 @@ class GuestSshDispatcher:
         self.inflight = False
 
     def __call__(self, request, deadline, *, assert_windows_current=None):
+        bridge._need(type(request) is bridge.Request and request.verb != bridge.GUEST_START_REPLACEMENT,
+                     'guest_ssh_replacement_guard_required')
+        return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
+
+    def start_replacement_standby(self, request, deadline, *, assert_rejoin_current):
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_START_REPLACEMENT
+                     and request.binding == self.binding and isinstance(request.args, Mapping)
+                     and callable(assert_rejoin_current),
+                     'guest_ssh_request_unbound')
+        bridge._args(request.verb, request.node, dict(request.args))
+        stage = request.args['rejoin_stage_sha256']
+        bridge._need(bridge._hash(stage) and assert_rejoin_current(deadline) == stage,
+                     'guest_ssh_replacement_guard_required')
+        receipt = self._dispatch(request, deadline)
+        bridge._need(receipt.status == 'PASS' and assert_rejoin_current(deadline) == stage,
+                     'guest_ssh_replacement_start_unconfirmed')
+        return receipt
+
+    def _dispatch(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.binding == self.binding
                      and type(request.sequence) is int and 0 < request.sequence <= bridge.MAX_REQUESTS
                      and bridge._hash(request.nonce) and isinstance(request.args, Mapping), 'guest_ssh_request_unbound')

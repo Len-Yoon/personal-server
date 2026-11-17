@@ -1,5 +1,6 @@
 """Explicit native Windows controller commands; never automatically promote."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -97,7 +98,11 @@ def run(args):
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
             state = control.advance(stop_at_rejoin=True)
-            return {"status": "PASS", "phase": state["phase"], "authority_opened": False}
+            scope = {"plan_sha256": backend.fence_adapter.plan_sha256,
+                     "state": {key: value for key, value in state.items() if key != "attempts"}}
+            proof = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            return {"status": "PASS", "phase": state["phase"], "authority_opened": False,
+                    "rejoin_stage_sha256": proof}
         if args.command == "advance":
             state = control.advance()
             return {"status": "PASS", "phase": state["phase"], "lease_requires_serve": state["phase"] == "ready"}

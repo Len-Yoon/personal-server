@@ -33,6 +33,56 @@ def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
+class ReplacementStandbyBridgeTests(unittest.TestCase):
+    def test_worker_runs_only_boot_and_stage_bound_standby_package(self):
+        bridge, worker = native_stdio_bridge, native_guest_worker
+        boot, code = b"replacement boot", b"pinned bootstrap program"
+        manifest = encoded({"files": {"bootstrap.py": sha(code)}})
+        binding = bridge.Binding("a"*64, "b"*64, "c"*64, sha(boot), "d"*64)
+        request = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 1, "e"*64, {
+            "bootstrap_manifest_sha256": sha(manifest), "rejoin_stage_sha256": "f"*64,
+        })
+        installed = {"node": "A", "source_commit": "1"*40, "installation_id": "2"*64}
+        grant = {"schema_version": 1, "binding": binding.fields(), "node": "A",
+                 "installation_id": installed["installation_id"], **request.args}
+        lock = installed | {"primary_node": "B", "source_node": "B", "plan_sha256": binding.plan_sha256}
+        reply = encoded({"status": "PASS", "standby_start_requested": True, "writer_authority_issued": False})
+        boot_file = MagicMock()
+        boot_file.read_bytes.return_value = boot
+        with patch.object(worker.os, "geteuid", return_value=0), patch.object(worker.restore, "BOOT_ID", boot_file), \
+                patch.object(worker.runtime, "_directory"), patch.object(worker, "_read_json") as read, \
+                patch.object(worker.runtime, "_read") as read_file, patch.object(worker.subprocess, "run") as run:
+            read.side_effect = [(b"grant", grant | {"rejoin_stage_sha256": "0"*64})]
+            with self.assertRaisesRegex(TransitionBlocked, "guest_replacement_start_not_bound"):
+                worker.start_replacement_standby(request)
+            run.assert_not_called()
+            read.side_effect = [(b"grant", grant), (b"installation", installed)]
+            read_file.side_effect = [manifest, encoded(lock), code]
+            run.return_value = SimpleNamespace(returncode=0, stdout=reply)
+            self.assertEqual(worker.start_replacement_standby(request).status, "PASS")
+            self.assertEqual(run.call_args.args[0][0], "/usr/bin/python3")
+            self.assertEqual(run.call_args.args[0][-1], sha(boot))
+            self.assertEqual(run.call_args.kwargs["input"], code)
+
+    def test_dispatch_requires_current_windows_and_db_stage_around_start(self):
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*("abcdef"[i]*64 for i in range(5)))
+        request = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 1, "1"*64, {
+            "bootstrap_manifest_sha256": "2"*64, "rejoin_stage_sha256": "3"*64,
+        })
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        dispatcher.binding = binding
+        guard = MagicMock(side_effect=["3"*64, "4"*64])
+        with patch.object(dispatcher, "_dispatch", return_value=bridge.Receipt("PASS", "5"*64)) as dispatch:
+            with self.assertRaisesRegex(bridge.BridgeRejected, "guest_ssh_replacement_guard_required"):
+                dispatcher(request, 100)
+            dispatch.assert_not_called()
+            with self.assertRaisesRegex(bridge.BridgeRejected, "guest_ssh_replacement_start_unconfirmed"):
+                dispatcher.start_replacement_standby(request, 100, assert_rejoin_current=guard)
+            dispatch.assert_called_once_with(request, 100)
+            self.assertEqual(guard.call_count, 2)
+
+
 class NativeGuestActivationTests(unittest.TestCase):
     def test_start_accepts_docker_oom_default_without_accepting_contract_drift(self):
         activation = native_guest_activation
