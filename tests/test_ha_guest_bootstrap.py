@@ -42,6 +42,24 @@ def pg_archive(path, *, arch='amd64', major='17', altered=False):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_replacement_start_rejects_primary_and_unbound_boot_before_engine_access(self):
+        value = fixture()
+        value.update(schema_version=3, primary_node="A", source_node=None)
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp).resolve()
+            manifest = bundle/"manifest.json"
+            manifest.write_text("{}")
+            with patch.object(B.os, "geteuid", return_value=0), patch.object(B.os, "uname") as uname, patch.object(
+                B, "verify", return_value=(value, {}),
+            ), patch.object(B, "standby_docker") as command:
+                uname.return_value.machine = "x86_64"
+                with self.assertRaisesRegex(B.BootstrapError, "replacement_standby_direction_required"):
+                    B.start_replacement_standby(bundle, B.digest(manifest), "0"*64)
+                value.update(primary_node="B", source_node="B")
+                with self.assertRaisesRegex(B.BootstrapError, "replacement_standby_boot_mismatch"):
+                    B.start_replacement_standby(bundle, B.digest(manifest), "invalid")
+                command.assert_not_called()
+
     def test_lock_is_exact_offline_and_rejects_mutable_or_foreign_inputs(self):
         self.assertEqual(B.validate(fixture()),fixture())
         changes = [lambda v:v.update(node='C'),lambda v:v.update(unknown=True),lambda v:v.update(pg_b=v['pg_a']),
