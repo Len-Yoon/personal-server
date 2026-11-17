@@ -1528,6 +1528,38 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
         self.assertTrue(runner.call_args.args[0][4].endswith('/disable'))
 
+    def test_admission_acquisition_waits_for_consistent_closure_without_replaying_disable(self):
+        from ha_control.deployment_admission import DeploymentAdmission
+
+        states = iter((
+            'active', 'disabled_manually', 'active',
+            'disabled_manually', 'active',
+            'disabled_manually', 'disabled_manually',
+            'active',
+        ))
+        run = dict(id=1, workflow_id=123, status='completed')
+
+        def github(args, **kwargs):
+            endpoint = args[4]
+            if endpoint.endswith('/disable'):
+                return SimpleNamespace(stdout=b'')
+            if '/runs?' in endpoint:
+                result = dict(total_count=1, workflow_runs=[run])
+            else:
+                result = dict(id=123, path='.github/workflows/deploy-n100.yml', state=next(states))
+            return SimpleNamespace(stdout=json.dumps(result))
+
+        runner = MagicMock(side_effect=github)
+        admission = DeploymentAdmission('owner/repo', 123, '/usr/bin/gh', runner=runner)
+        with patch('ha_control.deployment_admission.time.sleep') as sleep:
+            admission.close()
+            with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_reopened'):
+                admission.assert_closed()
+        self.assertEqual(sleep.call_count, 2)
+        endpoints = [call.args[0][4] for call in runner.call_args_list]
+        self.assertEqual(sum(endpoint.endswith('/disable') for endpoint in endpoints), 1)
+        self.assertEqual(sum('/runs?' in endpoint for endpoint in endpoints), 2)
+
     def test_parallel_admission_scan_rejects_duplicate_across_pages(self):
         from ha_control.deployment_admission import DeploymentAdmission
 
