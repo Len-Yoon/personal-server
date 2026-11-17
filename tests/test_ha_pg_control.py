@@ -920,6 +920,27 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(update.args[1], ("synthetic", 7, 9, "B", "A", 2, ["B"], "B", "AS"))
         self.assertIsNotNone(self.backend.validated)
 
+    def test_transition_closure_observes_each_node_and_rejects_wrong_role(self):
+        generation = ServingGeneration("B", 7, 2, 9)
+        self.backend.plan["profile"] = "enforced-vm-v1"
+        self.backend.fence_adapter.plan_sha256 = "a"*64
+        rows = {
+            node: ("ha_" + node, "123", node == "A", "synthetic", 7, "B", "A", 2, 10, True)
+            for node in ("A", "B")
+        }
+        connections = {node: MagicMock() for node in rows}
+        for node, row in rows.items():
+            connections[node].execute.return_value.fetchone.return_value = row
+        with patch.object(self.backend, "_connection", side_effect=lambda node: nullcontext(connections[node])):
+            proof = self.backend.observe_transition_lease_closed("a"*64, generation, time.monotonic()+5)
+            self.assertEqual(set(proof["node_proofs"]), {"A", "B"})
+            self.assertNotEqual(proof["node_proofs"]["A"], proof["node_proofs"]["B"])
+            for connection in connections.values():
+                connection.execute.assert_any_call("SET TRANSACTION READ ONLY")
+            connections["B"].execute.return_value.fetchone.return_value = rows["A"]
+            with self.assertRaisesRegex(TransitionBlocked, "db_closure_unconfirmed"):
+                self.backend.observe_transition_lease_closed("a"*64, generation, time.monotonic()+5)
+
     def test_transition_renewal_needs_observed_legacy_closure_before_pg_write(self):
         self.backend.plan["windows_transition_observer"] = {}
         rejected = MagicMock(side_effect=ValueError("observer unavailable"))

@@ -655,6 +655,41 @@ class PgBackend:
                 or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
             _deny("rejoin_primary_authority_not_closed")
 
+    def observe_transition_lease_closed(self, plan_sha256, generation, deadline):
+        """Read both authenticated cluster members until the exact lease has expired."""
+        if (self.plan.get("profile") != "enforced-vm-v1"
+                or self.fence_adapter.plan_sha256 != plan_sha256
+                or self.plan["generation"] != generation.epoch or self.plan["node"] != generation.partner):
+            _deny("transition_db_closure_unconfirmed")
+        generation.validate()
+        while time.monotonic() < deadline:
+            proofs = {}
+            for node in ("A", "B"):
+                if time.monotonic() >= deadline:
+                    _deny("transition_db_closure_unconfirmed")
+                with self._connection(node) as connection, connection.transaction():
+                    connection.execute("SET TRANSACTION READ ONLY")
+                    row = connection.execute(
+                        "SELECT current_setting('cluster_name'), system_identifier::text, pg_is_in_recovery(), "
+                        "c.cluster, c.epoch, c.primary_node, c.partner, c.timeline, c.revision, "
+                        "COALESCE(c.expires_at <= clock_timestamp(), false) "
+                        "FROM pg_control_system(), ha.control c WHERE c.singleton=1"
+                    ).fetchone()
+                expected = ("ha_" + node, str(self.plan["system_id"]), node == generation.partner,
+                            self.plan["cluster"], generation.epoch, generation.primary, generation.partner,
+                            generation.timeline)
+                if (not row or len(row) != 10 or
+                        any(type(actual) is not type(wanted) or actual != wanted
+                            for actual, wanted in zip(row[:8], expected, strict=True))
+                        or type(row[8]) is not int or row[8] < generation.revision or type(row[9]) is not bool):
+                    _deny("transition_db_closure_unconfirmed")
+                if row[9]:
+                    proofs[node] = hashlib.sha256(json.dumps([plan_sha256, *row], separators=(",", ":")).encode()).hexdigest()
+            if len(proofs) == 2 and time.monotonic() < deadline:
+                return {"plan_sha256": plan_sha256, "generation": generation.epoch, "node_proofs": proofs}
+            time.sleep(max(0, min(0.2, deadline - time.monotonic())))
+        _deny("transition_db_closure_unconfirmed")
+
     def assert_rejoin_pending(self, state):
         self.bind(state)
         if state["phase"] != "rejoining" or not self.fenced(state):
