@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 
 from . import native_guest_ssh as ssh, native_stdio_bridge as bridge
 
@@ -35,10 +36,57 @@ class WindowsSsh:
             config = ssh._ssh_config(Path(directory), endpoint, None, {endpoint.alias: host})
             bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
             options = _CUTOVER_KEEPALIVE if cutover else ()
-            yield (ssh.SSH, '-F', str(config), *options, '-T', endpoint.alias)
+            yield (ssh.SSH, '-F', str(config), *options, '-T', endpoint.alias), stamps
             bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
 
     def powershell(self, source, deadline):
+        with self._connection(deadline) as (argv, _):
+            return self._powershell(argv, source, deadline)
+
+    @contextmanager
+    def live_authority_session(self, deadline):
+        """Pre-authenticate one private SSH transport and run separate read commands on it."""
+        with self._connection(deadline, cutover=True) as (argv, stamps), \
+                tempfile.TemporaryDirectory(prefix='ha-mux-', dir='/private/tmp') as directory:
+            socket = Path(directory) / 'c'
+            base = (*argv[:-2], '-S', str(socket))
+            alias = argv[-1]
+            env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
+            with subprocess.Popen((*base, '-M', '-N', alias), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env) as master:
+                try:
+                    while not socket.is_socket():
+                        bridge._need(master.poll() is None, 'native_windows_authority_session_unconfirmed')
+                        time.sleep(min(0.025, bridge._remaining(deadline)))
+                    try:
+                        status = subprocess.run((*base, '-O', 'check', alias), stdin=subprocess.DEVNULL,
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                env=env, timeout=bridge._remaining(deadline), check=False)
+                    except subprocess.TimeoutExpired:
+                        raise bridge.BridgeRejected('bridge_deadline_exceeded') from None
+                    bridge._need(status.returncode == 0 and master.poll() is None,
+                                 'native_windows_authority_session_unconfirmed')
+
+                    def powershell(source, boundary_deadline):
+                        bridge._need(master.poll() is None, 'native_windows_authority_session_unconfirmed')
+                        bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
+                        # If the socket is lost, OpenSSH must not fall back to a new direct connection.
+                        command = (*base, '-o', 'ProxyCommand=/usr/bin/false', '-T', alias)
+                        result = self._powershell(command, source, boundary_deadline)
+                        bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
+                        return result
+
+                    yield powershell
+                finally:
+                    if master.poll() is None:
+                        master.terminate()
+                        try:
+                            master.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            master.kill()
+
+    @staticmethod
+    def _powershell(argv, source, deadline):
         bridge._need(type(source) is str and 0 < len(source.encode('utf-8')) <= 131072,
                      'native_windows_ssh_source_size')
         payload = gzip.compress(source.encode('utf-8'), mtime=0)
@@ -56,8 +104,7 @@ class WindowsSsh:
         )
         encoded = base64.b64encode(loader.encode('utf-16-le')).decode('ascii')
         command = f'{POWERSHELL} -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}'
-        with self._connection(deadline) as argv:
-            response = ssh._exchange((*argv, command), payload, deadline)
+        response = ssh._exchange((*argv, command), payload, deadline)
         try:
             result = json.loads(response, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
         except (ValueError, UnicodeError):
@@ -86,7 +133,7 @@ class WindowsSsh:
                    f'{source_root} {source_sha256} {boot_sha256} {uid} {manifest_path} '
                    f'--config {config_path} --config-sha256 {config_sha256}')
         bridge._need(len(command) <= 7900, 'native_wsl_launcher_command_too_long')
-        with self._connection(deadline, cutover=True) as argv:
+        with self._connection(deadline, cutover=True) as (argv, _):
             process = subprocess.Popen((*argv, command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
             try:
