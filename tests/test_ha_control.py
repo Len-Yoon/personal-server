@@ -266,7 +266,7 @@ class TransitionIngressTests(unittest.TestCase):
     def test_rejoin_resume_matches_exact_recorded_controller_and_parameters(self):
         controller = {"plan_sha256": "c"*64}
         parameters = {"PlanSha256": "c"*64, "ApprovalSha256": "d"*64}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             execution = SimpleNamespace(directory=Path(directory).resolve(),
                                         spec={"plan_sha256": "a"*64, "attempt_id": "b"*64})
             bind = transition_ingress._bind_rejoin_controller
@@ -341,7 +341,7 @@ class TransitionIngressTests(unittest.TestCase):
             bridge.BridgeRejected("rejoin not yet visible"), bridge.Receipt("PASS", "6" * 64),
         ]
         stage, sync = MagicMock(return_value=pin), MagicMock()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             execution = SimpleNamespace(directory=Path(directory).resolve(), spec=binding.fields())
             call = (execution, guests, ServingGeneration("B", 2, 2, 2), target, start, observe, "a"*64, stage, sync, 90)
             with self.assertRaisesRegex(bridge.BridgeRejected, "rejoin not yet visible"):
