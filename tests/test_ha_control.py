@@ -80,7 +80,7 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
-                patch.object(transition_ingress, "switch_ingress", side_effect=lambda *a, **kw: steps.append("ingress")) as switch:
+                patch.object(transition_ingress, "switch_ingress", side_effect=lambda *a, **kw: steps.append("ingress") or (None, None, {})) as switch:
             args["guests"].verify_transition_target.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)
@@ -108,6 +108,45 @@ class TransitionIngressTests(unittest.TestCase):
             args["activate_guest"] = lambda *_: steps.append("guest")
             transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
+
+    def test_roundtrip_uses_verified_b_service_routes_and_closure_for_return(self):
+        switcher = transition_ingress
+        gen_b, gen_a = ServingGeneration("B", 2, 2, 3), ServingGeneration("A", 3, 3, 4)
+        windows = object()
+        starter = SimpleNamespace(windows=windows, start_sha256="e"*64)
+        next_starter = SimpleNamespace(windows=windows, start_sha256="e"*64, attempted=False)
+        prior = {"starter": starter, "root": "prior-root", "live_sha256": "c"*64, "old_vm_id": "prior-old-vm"}
+        observer_binding = {"runtime_sha256": "f"*64, "callback_config": b"callback",
+                            "callback_config_sha256": "1"*64}
+        first = switcher.CompletedTransition(
+            "B-route", "B-relay", {}, {"plan": b"B"}, {"PlanSha256": "d"*64}, gen_b, observer_binding,
+        )
+        second = switcher.CompletedTransition("A-route", "A-relay", {}, {}, {}, gen_a)
+        failover = {"execution": SimpleNamespace(spec={"attempt_id": "a"*64}), "controller_setup": prior,
+                    "generation": gen_b, "target": "B", "previous_runtime_sha256": "0"*64,
+                    "legacy_plan": "2"*64, "legacy_attempt": "3"*64}
+        returning = {"execution": SimpleNamespace(spec={"attempt_id": "b"*64}),
+                     "controller_setup": prior | {"starter": next_starter},
+                     "generation": gen_a, "target": "A", "previous_runtime_sha256": "0"*64,
+                     "legacy_plan": "2"*64, "legacy_attempt": "3"*64,
+                     "previous_callback": b"callback", "previous_callback_sha256": "1"*64,
+                     "stage_service": {"approval": MagicMock(), "preflight_path": "pf", "scm_verifier_path": "scm"}}
+        prepare = MagicMock(return_value=returning)
+
+        def return_leg(**options):
+            self.assertEqual((options["previous"], options["relay"]), (first.active, first.relay))
+            options["stage_service"]["close_previous_service"](second.controller, gen_a, 90)
+            return second
+
+        with patch.object(switcher, "switch_with_observer", side_effect=[first, second]) as run, \
+                patch.object(switcher, "close_previous_transition_service") as close:
+            run.side_effect = lambda **options: first if options["generation"] == gen_b else return_leg(**options)
+            self.assertEqual(switcher.switch_roundtrip(None, None, "A-route", "A-relay",
+                                                      failover=failover, prepare_return=prepare), (first, second))
+        prepare.assert_called_once_with(first)
+        close.assert_called_once_with(starter, first.controller, first.parameters, gen_b, second.controller, gen_a,
+                                      previous_root="prior-root", previous_attempt="a"*64, previous_old_vm_id="prior-old-vm",
+                                      live_sha256="c"*64, deadline=90)
 
     def test_rejoin_resume_matches_exact_recorded_controller_and_parameters(self):
         controller = {"plan_sha256": "c"*64}

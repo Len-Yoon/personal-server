@@ -1,6 +1,6 @@
 """Switch both public routes for one independently verified serving generation."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Mapping
 import os
 import secrets
@@ -14,7 +14,7 @@ from . import native_stdio_bridge as bridge
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
 from .native_windows_ssh import fixed_script
-from .native_windows_activation import (open_transition_controller, prepare_staged_transition_service,
+from .native_windows_activation import (close_previous_transition_service, open_transition_controller, prepare_staged_transition_service,
                                         prepare_transition_observer_plan, stage_approved_transition_service,
                                         validate_transition_approval)
 from .transition_execution import observer_callback_config
@@ -219,6 +219,17 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
     return pin, current_stage, synchronized
 
 
+@dataclass(frozen=True)
+class CompletedTransition:
+    active: object
+    relay: object
+    receipt: dict
+    controller: dict
+    parameters: dict
+    generation: ServingGeneration
+    observer_binding: dict | None = None
+
+
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
@@ -253,6 +264,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and "prepare_service" not in controller_setup,
                 "transition_ingress_controller_unbound")
     with execution.guard(main, car):
+        observer_binding = None
         deadline = min(observer_setup["deadline"], controller_setup["deadline"])
         if resume_rejoin is None:
             binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
@@ -260,7 +272,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                                                          assert_legacy_closed=assert_legacy_closed)
             callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
                                                 generation.primary, replacement_vm, observer_release)
-            controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
+            observer_binding = binding | callback
+            controller = prepare_transition_observer_plan(**observer_setup, binding=observer_binding)
             approval = stage_service["approval"](controller, generation, deadline)
             validate_transition_approval(controller, approval)
             fixed_script("windows-ha-stage-initial-activation.ps1", observer_setup["stage_sha256"], {})
@@ -315,7 +328,57 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         with open_transition_controller(controller, generation, attempt=execution.spec["attempt_id"],
                                         **(controller_setup | {"prepare_service": same_service})) as (assert_guard, guest_boundary):
             activate_guest(generation, target, guest_boundary)
-            return switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
+            active, next_relay, receipt = switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
                                   expected_mtls_sha256=expected_mtls_sha256, assert_guard=assert_guard,
                                   verify_guest=verify_guest, verify_public=verify_public)
+            return CompletedTransition(active, next_relay, receipt, controller, parameters, generation, observer_binding)
+
+
+def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
+    """Run A→B, then derive B→A from the verified serving generation."""
+    error = "transition_roundtrip_unbound"
+    caddy._need(type(failover) is dict and callable(prepare_return)
+                and type(failover.get("generation")) is ServingGeneration
+                and failover["generation"].primary == "B" and failover.get("resume_rejoin") is None,
+                error)
+    failover["generation"].validate()
+    first = switch_with_observer(main=main, car=car, previous=previous, relay=relay, **failover)
+    caddy._need(type(first) is CompletedTransition and first.generation == failover["generation"]
+                and type(first.observer_binding) is dict, error)
+    returned = prepare_return(first)
+    prior = failover["controller_setup"]
+    old_starter = prior["starter"]
+    caddy._need(type(returned) is dict and type(returned.get("generation")) is ServingGeneration
+                and type(returned.get("stage_service")) is dict
+                and "close_previous_service" not in returned["stage_service"]
+                and set(returned["stage_service"]) == {"approval", "preflight_path", "scm_verifier_path"}
+                and type(returned.get("controller_setup")) is dict and "starter" in returned["controller_setup"]
+                and returned.get("resume_rejoin") is None,
+                error)
+    new_starter = returned["controller_setup"]["starter"]
+    caddy._need(new_starter is not old_starter and new_starter.windows is old_starter.windows
+                and new_starter.start_sha256 == old_starter.start_sha256 and new_starter.attempted is False,
+                error)
+    generation = returned["generation"]
+    generation.validate()
+    caddy._need(generation.primary == "A" and generation.epoch == first.generation.epoch + 1
+                and generation.timeline == first.generation.timeline + 1
+                and returned["execution"].spec["attempt_id"] != failover["execution"].spec["attempt_id"]
+                and returned["target"] != failover["target"]
+                and all(returned[key] == failover[key] for key in
+                        ("previous_runtime_sha256", "legacy_plan", "legacy_attempt"))
+                and returned["previous_callback"] == first.observer_binding["callback_config"]
+                and returned["previous_callback_sha256"] == first.observer_binding["callback_config_sha256"],
+                error)
+
+    def close_previous(controller, successor, deadline):
+        return close_previous_transition_service(
+            prior["starter"], first.controller, first.parameters, first.generation, controller, successor,
+            previous_root=prior["root"], previous_attempt=failover["execution"].spec["attempt_id"],
+            previous_old_vm_id=prior["old_vm_id"], live_sha256=prior["live_sha256"], deadline=deadline,
+        )
+
+    returned = returned | {"stage_service": returned["stage_service"] | {"close_previous_service": close_previous}}
+    second = switch_with_observer(main=main, car=car, previous=first.active, relay=first.relay, **returned)
+    return first, second
