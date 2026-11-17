@@ -52,7 +52,10 @@ class TransitionIngressTests(unittest.TestCase):
             controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
             replacement_requests=lambda _: (replacement, None),
-            stage_service={"approval": lambda *_: b"installed-approval", "previous_args_sha256": "4"*64,
+            stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
+                                                                        "action": "ha-transition",
+                                                                        "authority_kind": "installed-runtime"}),
+                           "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
             activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
@@ -64,7 +67,9 @@ class TransitionIngressTests(unittest.TestCase):
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
         prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
-        with patch.object(transition_ingress, "stage_approved_transition_service",
+        with patch.object(transition_ingress, "validate_transition_approval") as validate_approval, \
+                patch.object(transition_ingress, "fixed_script"), \
+                patch.object(transition_ingress, "stage_approved_transition_service",
                           side_effect=lambda *_a, **_kw: steps.append("stage") or prepared) as stage_service, \
                 patch.object(transition_ingress, "prepare_staged_transition_service",
                              side_effect=lambda *_a, **_kw: steps.append("verify") or prepared), \
@@ -81,21 +86,28 @@ class TransitionIngressTests(unittest.TestCase):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             args["guests"].verify_transition_target.return_value = True
+            validate_approval.side_effect = TransitionBlocked("approval invalid")
+            with self.assertRaisesRegex(TransitionBlocked, "approval invalid"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer"])
+            stage_service.assert_not_called()
+            steps.clear()
+            validate_approval.side_effect = None
             stage_service.side_effect = TransitionBlocked("publication unconfirmed")
             with self.assertRaisesRegex(TransitionBlocked, "publication unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)
-            self.assertEqual(steps, ["runtime", "observer"])
+            self.assertEqual(steps, ["runtime", "observer", "close-prior"])
             switch.assert_not_called()
             steps.clear()
             stage_service.side_effect = lambda *_a, **_kw: steps.append("stage") or prepared
             with self.assertRaisesRegex(RuntimeError, "guest failed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             switch.assert_not_called()
-            self.assertEqual(steps, ["runtime", "observer", "stage", "verify", "rejoin", "controller", "lease", "guest"])
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest"])
             steps.clear()
             args["activate_guest"] = lambda *_: steps.append("guest")
             transition_ingress.switch_with_observer(*routes, **args)
-            self.assertEqual(steps, ["runtime", "observer", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 
     def test_rejoin_resume_matches_exact_recorded_controller_and_parameters(self):
         controller = {"plan_sha256": "c"*64}

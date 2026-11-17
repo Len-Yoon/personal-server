@@ -13,8 +13,10 @@ from . import caddy_runtime as caddy
 from . import native_stdio_bridge as bridge
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
+from .native_windows_ssh import fixed_script
 from .native_windows_activation import (open_transition_controller, prepare_staged_transition_service,
-                                        prepare_transition_observer_plan, stage_approved_transition_service)
+                                        prepare_transition_observer_plan, stage_approved_transition_service,
+                                        validate_transition_approval)
 from .transition_execution import observer_callback_config
 
 
@@ -243,9 +245,9 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
-    stage_fields = {"approval", "previous_args_sha256", "preflight_path", "scm_verifier_path"}
+    stage_fields = {"approval", "close_previous_service", "preflight_path", "scm_verifier_path"}
     caddy._need(type(stage_service) is dict and set(stage_service) == stage_fields
-                and callable(stage_service["approval"]) and bridge._hash(stage_service["previous_args_sha256"])
+                and callable(stage_service["approval"]) and callable(stage_service["close_previous_service"])
                 and all(type(stage_service[key]) is str and stage_service[key] for key in
                         ("preflight_path", "scm_verifier_path"))
                 and "prepare_service" not in controller_setup,
@@ -260,11 +262,15 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                                                 generation.primary, replacement_vm, observer_release)
             controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
             approval = stage_service["approval"](controller, generation, deadline)
+            validate_transition_approval(controller, approval)
+            fixed_script("windows-ha-stage-initial-activation.ps1", observer_setup["stage_sha256"], {})
+            previous_args_sha256 = stage_service["close_previous_service"](controller, generation, deadline)
+            caddy._need(bridge._hash(previous_args_sha256), "transition_ingress_controller_unbound")
             staged = stage_approved_transition_service(
                 controller_setup["starter"], controller, generation, approval, root=controller_setup["root"],
                 attempt=execution.spec["attempt_id"], old_vm_id=controller_setup["old_vm_id"],
                 stage_sha256=observer_setup["stage_sha256"], manifest_sha256=observer_setup["manifest_sha256"],
-                previous_args_sha256=stage_service["previous_args_sha256"], preflight_path=stage_service["preflight_path"],
+                previous_args_sha256=previous_args_sha256, preflight_path=stage_service["preflight_path"],
                 scm_verifier_path=stage_service["scm_verifier_path"], deadline=deadline,
             )
             parameters = prepare_staged_transition_service(

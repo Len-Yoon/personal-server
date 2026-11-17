@@ -115,6 +115,42 @@ class TransitionServiceStartTests(unittest.TestCase):
         starter.observe_closure_check.assert_called_once_with(controller, {}, deadline)
         starter.restore_closure_args.assert_not_called()
 
+    def test_successor_needs_exact_prior_identity_and_closed_database_lease(self):
+        from ha_control.native_windows_activation import close_previous_transition_service
+
+        service, image, pin = "N100HA_" + "1"*24 + "_controller", "2"*64, "3"*64
+        scope = {"service_name": service, "service_sid": "S-1-5-80-1-2-3-4-5", "service_image_sha256": pin}
+        common = {"profile": "enforced-vm-v1", "cluster": "fixture", "system_id": "system",
+                  "installation_id": "4"*64, "windows_enforced": scope,
+                  "transition_service_start": {"service_image_path_sha256": image, "lease_closure_check": True, "target_timeline": 2}}
+
+        def controller(**fields):
+            raw = json.dumps(common | fields).encode()
+            return {"plan": raw, "plan_sha256": hashlib.sha256(raw).hexdigest()}
+
+        prior, successor = ServingGeneration("B", 2, 2, 3), ServingGeneration("A", 3, 3, 4)
+        fields = {"node": "B", "timeline": 2, "generation": 3, "source_lease_close_required": True}
+        starter = MagicMock()
+        previous = controller(timeline=1)
+        params = {"PlanPath": r"fixture\plan.json", "PlanSha256": previous["plan_sha256"]}
+        args = (starter, previous, params, prior)
+        kwargs = {"previous_root": "fixture", "previous_attempt": "5"*64, "previous_old_vm_id": "fixture",
+                  "live_sha256": "6"*64, "deadline": time.monotonic()+10}
+        prefix = "ha_control.native_windows_activation."
+        with patch(prefix + "_transition_authority_scope", return_value=("legacy", service, image, "", "")), \
+                patch(prefix + "fixed_script"), patch(prefix + "settle_transition_controller") as settle:
+            with self.assertRaisesRegex(BridgeRejected, "predecessor_unconfirmed"):
+                close_previous_transition_service(*args, controller(**(fields | {"cluster": "other"})), successor, **kwargs)
+            settle.assert_not_called()
+            settle.side_effect = BridgeRejected("lease still active")
+            with self.assertRaisesRegex(BridgeRejected, "lease still active"):
+                close_previous_transition_service(*args, controller(**fields), successor, **kwargs)
+            starter.verify_prepared.assert_not_called()
+            settle.side_effect = None
+            starter.verify_prepared.return_value = {"serving_args_sha256": pin}
+            self.assertEqual(close_previous_transition_service(*args, controller(**fields), successor, **kwargs), pin)
+            starter.verify_prepared.assert_called_once_with(previous, params, kwargs["deadline"])
+
     def test_settlement_never_reads_db_until_exact_service_is_stopped(self):
         starter = MagicMock()
         controller = {"plan_sha256": "a"*64}
@@ -322,10 +358,13 @@ class TransitionObserverPublicationTests(unittest.TestCase):
     def test_publish_transition_plan_binds_supplied_approval_before_transport(self):
         from ha_control.native_windows_activation import publish_transition_plan
 
-        raw = b'{"generation":2}'
+        raw = json.dumps({"generation": 2, "profile": "enforced-vm-v1", "source_commit": "a"*40,
+                          "installation_id": "c"*64, "windows_enforced": {"policy_sha256": "d"*64}}).encode()
         plan_pin = hashlib.sha256(raw).hexdigest()
         controller = {"plan": raw, "plan_sha256": plan_pin}
-        values = {"plan_sha256": plan_pin, "action": "ha-transition", "authority_kind": "installed-runtime"}
+        values = {"plan_sha256": plan_pin, "action": "ha-transition", "authority_kind": "installed-runtime",
+                  "schema_version": 3, "profile": "enforced-vm-v1", "source_commit": "a"*40,
+                  "installation_id": "c"*64, "policy_sha256": "d"*64, "installed_at": "2026-11-17T00:00:00Z"}
         approval = json.dumps(values).encode()
         root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
         script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"

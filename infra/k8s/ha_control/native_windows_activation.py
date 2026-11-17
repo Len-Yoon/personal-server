@@ -3,6 +3,7 @@
 import base64
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import re
 import secrets
 from subprocess import TimeoutExpired
@@ -612,25 +613,50 @@ def _transition_authority_scope(controller, generation, root, attempt, old_vm_id
     return observer["legacy_plan_sha256"], service, image, python_path, old_disk_paths_sha256
 
 
-def publish_transition_plan(windows, controller, approval, *, root, stage_sha256, manifest_sha256, deadline):
-    """Publish only the supplied approved plan bytes and exact installed approval."""
+def validate_transition_approval(controller, approval):
     error = "native_transition_plan_publication_unconfirmed"
-    bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
-                 and type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
+    bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
                  and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 49152
                  and bridge._digest(controller["plan"]) == controller["plan_sha256"]
-                 and type(approval) is bytes and 0 < len(approval) <= 4096
-                 and bridge._hash(manifest_sha256), error)
+                 and type(approval) is bytes and 0 < len(approval) <= 4096, error)
     try:
-        policy = json.loads(approval, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+        plan, policy = (json.loads(raw, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+                        for raw in (controller["plan"], approval))
     except (ValueError, UnicodeError, RecursionError):
         raise bridge.BridgeRejected(error) from None
-    bridge._need(type(policy) is dict and policy.get("plan_sha256") == controller["plan_sha256"]
-                 and policy.get("action") == "ha-transition" and policy.get("authority_kind") == "installed-runtime", error)
+    expected = {"schema_version": 3, "profile": "enforced-vm-v1", "action": "ha-transition",
+                "authority_kind": "installed-runtime", "plan_sha256": controller["plan_sha256"]}
+    bridge._need(type(plan) is dict and plan.get("profile") == expected["profile"]
+                 and type(plan.get("generation")) is int and plan["generation"] >= 2
+                 and type(plan.get("windows_enforced")) is dict and type(policy) is dict, error)
+    installed = policy.get("installed_at")
+    expected |= {"installation_id": plan.get("installation_id"), "source_commit": plan.get("source_commit"),
+                 "policy_sha256": plan["windows_enforced"].get("policy_sha256"), "installed_at": installed}
+    bridge._need(bridge._hash(expected["installation_id"]) and bridge._hash(expected["policy_sha256"])
+                 and type(expected["source_commit"]) is str and re.fullmatch(r"[a-f0-9]{40}", expected["source_commit"])
+                 and type(installed) is str
+                 and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z", installed)
+                 and bridge._matches(policy, expected), error)
+
+    try:
+        installed_at = datetime.fromisoformat(installed[:-1] + "+00:00")
+    except ValueError:
+        raise bridge.BridgeRejected(error) from None
+    bridge._need(installed_at < datetime.now(timezone.utc), error)
+
     bundle = bridge._bytes({"plan": base64.b64encode(controller["plan"]).decode("ascii"),
                             "approval": base64.b64encode(approval).decode("ascii")})
     data = base64.b64encode(bundle).decode("ascii")
     bridge._need(len(data) <= 65536, error)
+    return bundle, data
+
+
+def publish_transition_plan(windows, controller, approval, *, root, stage_sha256, manifest_sha256, deadline):
+    """Publish only the supplied approved plan bytes and exact installed approval."""
+    error = "native_transition_plan_publication_unconfirmed"
+    bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
+                 and bridge._hash(manifest_sha256), error)
+    bundle, data = validate_transition_approval(controller, approval)
     source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
         "InputPath": root + r"\plan.json", "InputSha256": bridge._digest(bundle),
         "ExpectedSourceManifestSha256": manifest_sha256, "PublishTransitionPlan": True,
@@ -865,6 +891,58 @@ def settle_transition_controller(starter, controller, parameters, started, gener
                  "native_transition_db_closure_unconfirmed")
     bridge._remaining(deadline)
     return proof
+
+
+def close_previous_transition_service(
+    starter, previous, previous_parameters, previous_generation, controller, generation, *,
+    previous_root, previous_attempt, previous_old_vm_id, live_sha256, deadline,
+):
+    """Settle the exact prior controller and read the argument pin for its successor."""
+    _, service, image, _, _ = _transition_authority_scope(
+        previous, previous_generation, previous_root, previous_attempt, previous_old_vm_id,
+    )
+    generation.validate()
+    error = "native_transition_predecessor_unconfirmed"
+    bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
+                 and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 1048576
+                 and bridge._digest(controller["plan"]) == controller["plan_sha256"], error)
+    policy = json.loads(previous["plan"])
+    try:
+        successor = json.loads(controller["plan"], object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise bridge.BridgeRejected(error) from None
+    bridge._need(type(successor) is dict and successor.get("profile") == "enforced-vm-v1"
+                 and type(successor.get("windows_enforced")) is dict and type(successor.get("transition_service_start")) is dict
+                 and successor.get("cluster") == policy["cluster"] and successor.get("system_id") == policy["system_id"]
+                 and successor.get("installation_id") == policy["installation_id"]
+                 and generation.partner == previous_generation.primary
+                 and generation.epoch == previous_generation.epoch + 1
+                 and generation.timeline == previous_generation.timeline + 1
+                 and successor.get("timeline") == previous_generation.timeline
+                 and successor.get("generation") == generation.epoch and successor.get("node") == generation.partner
+                 and successor.get("source_lease_close_required") is True
+                 and successor["windows_enforced"].get("service_name") == service
+                 and successor["windows_enforced"].get("service_sid") == policy["windows_enforced"]["service_sid"]
+                 and successor["windows_enforced"].get("service_image_sha256") == policy["windows_enforced"]["service_image_sha256"]
+                 and successor["transition_service_start"].get("service_image_path_sha256") == image, error)
+
+    pins = policy["transition_service_start"]
+    bridge._need(type(previous_parameters) is dict and previous_parameters.get("PlanPath") == previous_root + r"\plan.json"
+                 and previous_parameters.get("PlanSha256") == previous["plan_sha256"]
+                 and pins.get("lease_closure_check") is True
+                 and type(pins.get("target_timeline")) is int and pins["target_timeline"] == previous_generation.timeline
+                 and type(policy.get("timeline")) is int and policy["timeline"] < previous_generation.timeline, error)
+    fixed_script("windows-ha-cutover-live-authority.ps1", live_sha256, {})
+
+    def observe_closed(plan, current_generation, limit):
+        return observe_transition_db_closed(
+            starter, plan, previous_parameters, current_generation,
+            live_sha256=live_sha256, root=previous_root, deadline=limit,
+        )
+
+    settle_transition_controller(starter, previous, previous_parameters, None, previous_generation, observe_closed, deadline)
+    verified = starter.verify_prepared(previous, previous_parameters, deadline)
+    return verified["serving_args_sha256"]
 
 
 @contextmanager
