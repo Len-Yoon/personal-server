@@ -1,6 +1,6 @@
 # Prepare the initial Windows observer and one installed controller approval.
 param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
-      [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go)
+      [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -221,6 +221,22 @@ try {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)
+    if ($PublishTransitionObserverConfig) {
+        if (-not $Go -or $IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) { throw 'initial_stage_observer' }
+        Assert-Pin $RuntimeSha256
+        Assert-ReservedLeaf $InputPath $root ('transition-observer-config-' + $InputSha256 + '.json')
+        $raw = [Convert]::FromBase64String($IntentBase64)
+        if ($raw.Length -gt 4096 -or (Digest $raw) -cne $InputSha256) { throw 'initial_stage_observer' }
+        $config = ConvertFrom-Json -InputObject ($encoding.GetString($raw))
+        Assert-Pin $config.vm_b_installation_id
+        if ($config.source_manifest_sha256 -cne $ExpectedSourceManifestSha256 -or
+            $config.runtime_sha256 -cne $RuntimeSha256) { throw 'initial_stage_observer' }
+        Assert-ReservedLeaf $config.vm_observer_path $root
+        $null = Read-Protected $config.vm_observer_path $config.vm_observer_sha256 65536
+        Assert-Absent $InputPath
+        [ordered]@{transition_observer_config_sha256=(Write-New $InputPath $raw)} | ConvertTo-Json -Compress
+        return
+    }
     $bootstrap = ConvertFrom-Json -InputObject ($encoding.GetString((Read-Protected $InputPath $InputSha256 1048576)))
     Assert-Fields $bootstrap @('schema_version','attempt_id','legacy_plan_sha256','plan_template','observer','callback_template','paths')
     Assert-One $bootstrap.schema_version

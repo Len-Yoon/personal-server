@@ -18,10 +18,36 @@ sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_guest_activation import ServingGeneration
-from ha_control.native_windows_activation import WindowsActivationLease, WindowsTransitionLease
+from ha_control.native_windows_activation import (
+    WindowsActivationLease, WindowsTransitionLease, publish_transition_observer_config,
+)
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
 from ha_control import cli, scm_pg_auth_probe
+
+
+class TransitionObserverPublicationTests(unittest.TestCase):
+    def test_native_publication_binds_expected_location_and_rejects_uncertain_receipt(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        raw = b'{"fixture":true}\n'
+        pin = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": raw, "callback_config_sha256": pin, "runtime_sha256": "a"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        path = root + rf"\transition-observer-config-{pin}.json"
+        windows = MagicMock()
+        windows.powershell.side_effect = [{"transition_observer_config_sha256": pin}, {"blocked": "initial_stage_observer"}]
+
+        self.assertEqual(publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, 40), path)
+        source, deadline = windows.powershell.call_args.args
+        self.assertIn("-InputPath '" + path + "'", source)
+        self.assertIn("-PublishTransitionObserverConfig -Go", source)
+        self.assertEqual(deadline, 40)
+        with self.assertRaisesRegex(BridgeRejected, "config_unconfirmed"):
+            publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, 40)
+        with self.assertRaisesRegex(BridgeRejected, "config_invalid"):
+            publish_transition_observer_config(windows, root, stage_pin, binding | {"callback_config": b"changed"}, "b"*64, 40)
+        self.assertEqual(windows.powershell.call_count, 2)
 
 
 class InitialServiceRetirementTests(unittest.TestCase):

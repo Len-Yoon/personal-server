@@ -206,6 +206,28 @@ class WindowsActivationLease:
         return result['retirement_sha256']
 
 
+def publish_transition_observer_config(windows, root, stage_sha256, binding, manifest_sha256, deadline):
+    """Publish the exact callback config through the existing protected Windows stage."""
+    raw = binding["callback_config"]
+    pin = binding["callback_config_sha256"]
+    runtime = binding["runtime_sha256"]
+    bridge._need(type(raw) is bytes and 0 < len(raw) <= 4096 and bridge._digest(raw) == pin
+                 and all(bridge._hash(value) for value in (stage_sha256, runtime, manifest_sha256))
+                 and type(root) is str and re.fullmatch(
+                     r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root),
+                 "native_transition_observer_config_invalid")
+    path = root + rf"\transition-observer-config-{pin}.json"
+    source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
+        "InputPath": path, "InputSha256": pin, "ExpectedSourceManifestSha256": manifest_sha256,
+        "RuntimeSha256": runtime, "IntentBase64": base64.b64encode(raw).decode("ascii"),
+        "PublishTransitionObserverConfig": True, "Go": True,
+    })
+    result = windows.powershell(source, deadline)
+    bridge._need(result == {"transition_observer_config_sha256": pin},
+                 "native_transition_observer_config_unconfirmed")
+    return path
+
+
 class WindowsTransitionLease:
     """Sample the running Windows controller and the remaining writer exclusions."""
 
