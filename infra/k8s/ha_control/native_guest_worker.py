@@ -25,7 +25,7 @@ from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
-    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
+    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -43,6 +43,7 @@ VERBS = {
     GUEST_OBSERVE_GENERATION,
     GUEST_PUBLISH_GENERATION,
     GUEST_PREPARE_GENERATION,
+    GUEST_OBSERVE_PREPARATION,
     GUEST_TRANSITION_TARGET,
     GUEST_VERIFY_GENERATION,
     GUEST_VERIFY_PREPARED_GENERATION,
@@ -700,8 +701,7 @@ def _checked_generation_handoff(request, raw, handoff):
     return pins, pg, activation_pins, generation, floor
 
 
-def prepare_generation(request, assert_windows_current):
-    _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
+def _generation_preparation_scope(request):
     pins = runtime.RuntimePins(**request.args["runtime"])
     pg = restore.RestorePins(**request.args["postgres"])
     generation = activation.ServingGeneration(**request.args["generation"])
@@ -709,6 +709,26 @@ def prepare_generation(request, assert_windows_current):
     runtime._directory(stage, 0)
     _need(pins.node == request.node and pins.attempt_id == request.binding.attempt_id
           and pins.boot_sha256 == request.binding.boot(request.node), "guest_generation_prepared_unbound")
+    return pins, pg, generation, stage
+
+
+def observe_generation_preparation(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    pins, pg, generation, stage = _generation_preparation_scope(request)
+    pins.validate()
+    pg.validate()
+    generation.validate()
+    _need(generation.epoch > 1 and pins.node == pins.primary_node == generation.primary
+          and pins.generation == generation.epoch and pg.postgres_id == pins.postgres_id
+          and pg.installation_id == pins.installation_id and pg.boot_sha256 == pins.boot_sha256
+          and pg.source_commit == pins.release["source_commit"], "guest_generation_prepared_unbound")
+    pin = runtime._inspect_prepared(pins, stage, stage / "runtime-intent.json", stage / "runtime-prepared.json")
+    return Receipt("PASS", pin)
+
+
+def prepare_generation(request, assert_windows_current):
+    _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
+    pins, pg, generation, stage = _generation_preparation_scope(request)
     result = runtime.prepare_generation_runtime(
         pins, pg, stage, generation, int(request.args["source_fence_wal"], 16),
         assert_windows_rejoin=assert_windows_current,
@@ -873,6 +893,8 @@ def handle(request, assert_windows_current=None):
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
                 return replacement_standby(request)
+            if request.verb == GUEST_OBSERVE_PREPARATION:
+                return observe_generation_preparation(request)
             if request.verb == GUEST_PREPARE_GENERATION:
                 return prepare_generation(request, assert_windows_current)
             if request.verb == GUEST_PUBLISH_GENERATION:

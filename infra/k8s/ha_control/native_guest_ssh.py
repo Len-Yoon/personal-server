@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import selectors
 import shlex
 import signal
@@ -324,7 +325,7 @@ class GuestSshDispatcher:
     def __call__(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.verb not in
                      {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
-                      bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
+                      bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_OBSERVE_PREPARATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
                       bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
@@ -373,6 +374,18 @@ class GuestSshDispatcher:
                      and request.args["source_fence_wal"] == f"{replay_floor:016x}", error)
         result = self._dispatch(request, deadline, assert_windows_current=assert_rejoin)
         bridge._need(result.status == "PASS" and bridge._hash(result.receipt_sha256), error)
+        return result.receipt_sha256
+
+    def observe_generation_preparation(self, request, deadline, *, assert_rejoin):
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_PREPARATION
+                     and callable(assert_rejoin), "guest_ssh_prepare_generation_unbound")
+        before, after = bridge.PREPARATION_OBSERVATION_BOUNDARIES
+        bridge._need(bridge._hash(assert_rejoin(secrets.token_hex(32), before, deadline)),
+                     "guest_ssh_prepare_generation_unbound")
+        result = self._dispatch(request, deadline)
+        bridge._need(bridge._hash(assert_rejoin(secrets.token_hex(32), after, deadline))
+                     and result.status == "PASS" and bridge._hash(result.receipt_sha256),
+                     "guest_ssh_prepare_generation_unbound")
         return result.receipt_sha256
 
     def publish_generation_handoff(self, request, generation, instance, replay_floor, deadline):

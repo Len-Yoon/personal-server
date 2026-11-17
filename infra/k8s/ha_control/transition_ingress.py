@@ -235,7 +235,7 @@ def _prepare_target_generation(guests, binding, sequence, generation, pins, stag
     })
 
     def current_rejoin(challenge, boundary, limit):
-        caddy._need(bridge._hash(challenge) and boundary in bridge.PREPARATION_BOUNDARIES,
+        caddy._need(bridge._hash(challenge) and boundary in bridge.PREPARATION_BOUNDARIES + bridge.PREPARATION_OBSERVATION_BOUNDARIES,
                     "transition_replacement_scope_invalid")
         assert_legacy_closed()
         observed = check_sync(limit)
@@ -249,7 +249,12 @@ def _prepare_target_generation(guests, binding, sequence, generation, pins, stag
             "challenge": challenge, "boundary": boundary, "observation": observed,
         }))
 
-    pin = guests.prepare_generation_runtime(request, generation, stage, replay_floor, deadline, assert_rejoin=current_rejoin)
+    try:
+        pin = guests.prepare_generation_runtime(request, generation, stage, replay_floor, deadline, assert_rejoin=current_rejoin)
+    except (bridge.BridgeRejected, TimeoutExpired, OSError):
+        observation = replace(request, verb=bridge.GUEST_OBSERVE_PREPARATION, sequence=request.sequence + 1,
+                              nonce=secrets.token_hex(32))
+        pin = guests.observe_generation_preparation(observation, deadline, assert_rejoin=current_rejoin)
     caddy._need(bridge._hash(pin), "transition_ingress_activation_unconfirmed")
     return pins | {"activation": replace(pins["activation"], primary_runtime_receipt_sha256=pin)}
 
@@ -383,12 +388,12 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
 
         publish_sequence = replacement_observe.sequence + 1
         if prepare_guest_runtime:
-            caddy._need(publish_sequence < bridge.MAX_REQUESTS - 8, "transition_ingress_controller_unbound")
+            caddy._need(publish_sequence <= bridge.MAX_REQUESTS - 10, "transition_ingress_controller_unbound")
             pins = _prepare_target_generation(
                 guests, target_request.binding, publish_sequence, generation, pins, stage, replay_floor, deadline,
                 check_sync=check_sync, assert_legacy_closed=assert_legacy_closed,
             )
-            publish_sequence += 1
+            publish_sequence += 2  # Reserve a sequence for an uncertain preparation readback.
 
         def same_service(plan, serving_generation, limit):
             caddy._need(plan == controller and serving_generation == generation,

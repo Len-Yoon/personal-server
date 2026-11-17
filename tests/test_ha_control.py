@@ -176,6 +176,26 @@ class TransitionIngressTests(unittest.TestCase):
                 check_sync=sync, assert_legacy_closed=legacy,
             )
 
+        guests.reset_mock()
+        guests.prepare_generation_runtime.side_effect = OSError("response lost")
+        sync.return_value = settled
+
+        def readback(request, deadline, *, assert_rejoin):
+            self.assertEqual(request.verb, bridge.GUEST_OBSERVE_PREPARATION)
+            self.assertEqual(request.sequence, 5)
+            for boundary in bridge.PREPARATION_OBSERVATION_BOUNDARIES:
+                self.assertTrue(bridge._hash(assert_rejoin("2"*64, boundary, deadline)))
+            return "9"*64
+
+        guests.observe_generation_preparation.side_effect = readback
+        recovered = switcher._prepare_target_generation(
+            guests, binding, 4, generation, pins, stage, 8, float("inf"),
+            check_sync=sync, assert_legacy_closed=legacy,
+        )
+        self.assertEqual(recovered["activation"].primary_runtime_receipt_sha256, "9"*64)
+        guests.prepare_generation_runtime.assert_called_once()
+        guests.observe_generation_preparation.assert_called_once()
+
     def test_lost_activation_is_followed_only_by_fresh_readback(self):
         bridge = transition_ingress.bridge
         guests = MagicMock()
