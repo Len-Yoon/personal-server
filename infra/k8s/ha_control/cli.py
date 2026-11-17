@@ -90,7 +90,10 @@ def rejoin_stage_receipt(backend, state):
     scope = {"plan_sha256": backend.fence_adapter.plan_sha256,
              "state": {key: value for key, value in state.items() if key != "attempts"}}
     proof = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return {"status": "PASS", "phase": state["phase"], "authority_opened": False, "rejoin_stage_sha256": proof}
+    result = {"status": "PASS", "phase": state["phase"], "authority_opened": False, "rejoin_stage_sha256": proof}
+    if "source_fence_wal" in state:
+        result["source_fence_wal"] = f"{state['source_fence_wal']:016x}"
+    return result
 
 
 def write_transition_closure_receipt(journal, proof):

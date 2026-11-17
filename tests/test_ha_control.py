@@ -24,7 +24,7 @@ class TransitionIngressTests(unittest.TestCase):
         from ha_runtime.seven_capture import encoded
 
         generation = ServingGeneration("B", 2, 2, 2)
-        candidate = encoded({"generation": 2, "node": "A"})
+        candidate = encoded({"generation": 2, "node": "A", "source_lease_close_required": True})
         steps = []
         execution = MagicMock()
         execution.publish_observer_runtime.side_effect = lambda **_: steps.append("runtime") or {"runtime": True}
@@ -74,7 +74,7 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress, "prepare_staged_transition_service",
                              side_effect=lambda *_a, **_kw: steps.append("verify") or prepared), \
                 patch.object(transition_ingress, "_bind_rejoin_controller"), \
-                patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, MagicMock(), MagicMock())), \
+                patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, 8, MagicMock(), MagicMock())), \
                 patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
                 patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
@@ -164,15 +164,16 @@ class TransitionIngressTests(unittest.TestCase):
 
     def test_windows_rejoin_resume_never_dispatches_stage_rejoin(self):
         starter = MagicMock()
-        stage = {"rejoin_stage_sha256": "f"*64}
+        stage = {"rejoin_stage_sha256": "f"*64, "source_fence_wal": "0000000000000008"}
         starter.run_rejoin.return_value = stage
         controller, parameters = {"plan": b"fixture"}, {"PlanSha256": "a"*64}
         for resume, first_mode in ((False, "stage-rejoin"), (True, "observe-rejoin-stage")):
             starter.reset_mock()
-            pin, current, synchronized = transition_ingress._windows_rejoin(
+            pin, floor, current, synchronized = transition_ingress._windows_rejoin(
                 starter, controller, parameters, live_sha256="b"*64, root="fixture", deadline=90, resume=resume,
             )
             self.assertEqual(pin, stage["rejoin_stage_sha256"])
+            self.assertEqual(floor, 8)
             self.assertEqual(current(80), pin)
             self.assertEqual(synchronized(70), stage)
             expected = [first_mode, "observe-rejoin-stage", "check-rejoin"]
@@ -186,10 +187,22 @@ class TransitionIngressTests(unittest.TestCase):
             else:
                 starter.restore_rejoin_args.assert_not_called()
 
+    def test_windows_rejoin_rejects_changed_source_wal_on_either_read(self):
+        starter = MagicMock()
+        stage = {"rejoin_stage_sha256": "f"*64, "source_fence_wal": "0000000000000008"}
+        starter.run_rejoin.return_value = stage
+        _, _, current, synchronized = transition_ingress._windows_rejoin(
+            starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90, resume=False,
+        )
+        starter.run_rejoin.return_value = stage | {"source_fence_wal": "0000000000000007"}
+        for observe in (current, synchronized):
+            with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_unconfirmed"):
+                observe(80)
+
     def test_rejoin_resume_before_stage_restores_initialize_without_replaying_it(self):
         starter = MagicMock()
         starter.rejoin_stage_intent_present.return_value = False
-        starter.run_rejoin.return_value = {"rejoin_stage_sha256": "f"*64}
+        starter.run_rejoin.return_value = {"rejoin_stage_sha256": "f"*64, "source_fence_wal": "0000000000000008"}
         controller, parameters = {"plan": b"fixture"}, {"PlanSha256": "a"*64}
         transition_ingress._windows_rejoin(
             starter, controller, parameters, live_sha256="b"*64, root="fixture", deadline=90, resume=True,

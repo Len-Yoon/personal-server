@@ -356,10 +356,14 @@ class GuestSshDispatcher:
         bridge._need(callable(check_synchronized), 'guest_ssh_replacement_guard_required')
         receipt = self.observe_replacement_standby(request, deadline, assert_rejoin_current=assert_rejoin_current)
         result = check_synchronized(deadline)
-        bridge._need(bridge._matches(result, {
+        expected = {
             'status': 'PASS', 'phase': 'rejoining', 'authority_opened': False, 'standby_rejoined': True,
             'rejoin_stage_sha256': request.args['rejoin_stage_sha256'],
-        }), 'guest_ssh_replacement_replication_unconfirmed')
+        }
+        if type(result) is dict and 'source_fence_wal' in result:
+            bridge._need(bridge._wal_pin(result['source_fence_wal']), 'guest_ssh_replacement_replication_unconfirmed')
+            expected['source_fence_wal'] = result['source_fence_wal']
+        bridge._need(bridge._matches(result, expected), 'guest_ssh_replacement_replication_unconfirmed')
         return receipt
 
     def _replacement(self, request, deadline, verb, assert_rejoin_current):

@@ -208,15 +208,21 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
         else:
             run("initialize", init_id, deadline)
         staged = run("stage-rejoin", stage_id, deadline)
-    pin = staged["rejoin_stage_sha256"]
+    pin, wal = staged["rejoin_stage_sha256"], staged.get("source_fence_wal")
+    error = "transition_source_fence_wal_unconfirmed"
+    caddy._need(bridge._wal_pin(wal), error)
 
     def current_stage(limit):
-        return observe("observe-rejoin-stage", limit)["rejoin_stage_sha256"]
+        observed = observe("observe-rejoin-stage", limit)
+        caddy._need(observed["rejoin_stage_sha256"] == pin and observed.get("source_fence_wal") == wal, error)
+        return pin
 
     def synchronized(limit):
-        return observe("check-rejoin", limit)
+        observed = observe("check-rejoin", limit)
+        caddy._need(observed["rejoin_stage_sha256"] == pin and observed.get("source_fence_wal") == wal, error)
+        return observed
 
-    return pin, current_stage, synchronized
+    return pin, int(wal, 16), current_stage, synchronized
 
 
 @dataclass(frozen=True)
@@ -247,7 +253,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 "transition_ingress_controller_unbound")
     template = parse(raw)
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
-                and template.get("node") == generation.partner, "transition_ingress_controller_unbound")
+                and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
     caddy._need((target_request.binding.plan_sha256, target_request.binding.attempt_id)
                 == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
                 and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
@@ -308,7 +314,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                         "transition_ingress_controller_unbound")
             assert_legacy_closed()
         _bind_rejoin_controller(execution, controller, parameters, resume=resume_rejoin is not None)
-        stage, check_stage, check_sync = _windows_rejoin(
+        stage, replay_floor, check_stage, check_sync = _windows_rejoin(
             controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],
             root=controller_setup["root"], deadline=deadline, resume=resume_rejoin is not None,
         )
@@ -325,8 +331,12 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             bridge._remaining(limit)
             return parameters
 
+        def publish_handoff(serving_generation, instance, limit):
+            return controller_setup["publish_handoff"](serving_generation, instance, limit, replay_floor=replay_floor)
+
         with open_transition_controller(controller, generation, attempt=execution.spec["attempt_id"],
-                                        **(controller_setup | {"prepare_service": same_service})) as (assert_guard, guest_boundary):
+                                        **(controller_setup | {"prepare_service": same_service,
+                                                               "publish_handoff": publish_handoff})) as (assert_guard, guest_boundary):
             activate_guest(generation, target, guest_boundary)
             active, next_relay, receipt = switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],

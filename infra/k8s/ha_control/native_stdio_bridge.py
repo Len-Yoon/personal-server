@@ -105,6 +105,10 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def _wal_pin(value):
+    return type(value) is str and re.fullmatch(r"[a-f0-9]{16}", value) is not None and value != "0" * 16
+
+
 def _matches(actual, expected):
     return type(actual) is dict and actual.keys() == expected.keys() and all(
         type(actual[key]) is type(value) and actual[key] == value for key, value in expected.items()

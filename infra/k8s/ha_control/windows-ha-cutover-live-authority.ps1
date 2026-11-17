@@ -284,6 +284,15 @@ function Read-RejoinReceipt {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $keys = 'authority_opened,mode,observed_at_ms,phase,plan_sha256,probe,python_pid,rejoin_stage_sha256,schema_version,status'
     if ($RejoinMode -ceq 'check-rejoin') { $keys = $keys.Replace(',status',',standby_rejoined,status') }
+    $hasWal = $null -ne $result.PSObject.Properties['source_fence_wal']
+    if ($hasWal) {
+        if ($RejoinMode -ceq 'initialize' -or $result.source_fence_wal -isnot [string] -or
+            $result.source_fence_wal -cnotmatch '\A[a-f0-9]{16}\z' -or $result.source_fence_wal -ceq '0000000000000000') {
+            throw 'transition_rejoin_receipt_invalid'
+        }
+        $keys = if ($RejoinMode -ceq 'check-rejoin') { $keys.Replace(',standby_rejoined',',source_fence_wal,standby_rejoined') }
+                else { $keys.Replace(',status',',source_fence_wal,status') }
+    }
     $expectedPhase = if ($RejoinMode -ceq 'initialize') { 'fencing' } else { 'rejoining' }
     if ((@($result.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne $keys -or
         $result.schema_version -isnot [int] -or $result.schema_version -ne 1 -or
@@ -298,6 +307,7 @@ function Read-RejoinReceipt {
         $result.authority_opened -isnot [bool] -or $result.authority_opened -or
         $result.rejoin_stage_sha256 -isnot [string] -or $result.rejoin_stage_sha256 -cnotmatch $pattern) { throw 'transition_rejoin_receipt_invalid' }
     $reply = [ordered]@{status='PASS';phase=$expectedPhase;authority_opened=$false;rejoin_stage_sha256=$result.rejoin_stage_sha256}
+    if ($hasWal) { $reply["source_fence_wal"] = $result.source_fence_wal }
     if ($RejoinMode -ceq 'check-rejoin') {
         if ($result.standby_rejoined -isnot [bool] -or -not $result.standby_rejoined) { throw 'transition_rejoin_receipt_invalid' }
         $reply['standby_rejoined'] = $true
