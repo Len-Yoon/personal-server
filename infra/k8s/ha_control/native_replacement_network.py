@@ -16,16 +16,32 @@ class WindowsReplacementNetwork:
             "ReplacementMac": replacement_mac,
         }
 
-    def __call__(self, replacement, old_vm_id, preflight, stage, deadline, *, assert_fenced):
+    def _parameters(self, replacement, old_vm_id, preflight):
         error = "transition_replacement_network_unconfirmed"
         bridge._need(type(preflight) is bridge.Request and preflight.verb == bridge.GUEST_PREFLIGHT_REPLACEMENT
                      and preflight.node == replacement["node"]
-                     and preflight.args["installation_id"] == replacement["installation_id"]
-                     and bridge._hash(stage), error)
-        source = fixed_script("windows-ha-replacement-network.ps1", self.script_sha256, self.pins | {
+                     and preflight.args["installation_id"] == replacement["installation_id"], error)
+        return self.pins | {
             "OldVmId": old_vm_id, "ReplacementVmId": replacement["vm_id"],
-            "ReplacementDiskPathsSha256": replacement["disk_paths_sha256"], "StageSha256": stage, "Go": True,
-        })
+            "ReplacementDiskPathsSha256": replacement["disk_paths_sha256"],
+        }
+
+    def preflight(self, replacement, old_vm_id, request, deadline):
+        parameters = self._parameters(replacement, old_vm_id, request)
+        source = fixed_script("windows-ha-replacement-network.ps1", self.script_sha256,
+                              parameters | {"ObserveOnly": True})
+        result = self.windows.powershell(source, deadline)
+        bridge._need(bridge._matches(result, {"isolated": True, "vm_id": replacement["vm_id"],
+                                             "switch_id": self.pins["IsolatedSwitchId"]}),
+                     "transition_replacement_network_unconfirmed")
+        return True
+
+    def __call__(self, replacement, old_vm_id, preflight, stage, deadline, *, assert_fenced):
+        error = "transition_replacement_network_unconfirmed"
+        parameters = self._parameters(replacement, old_vm_id, preflight)
+        bridge._need(bridge._hash(stage), error)
+        source = fixed_script("windows-ha-replacement-network.ps1", self.script_sha256,
+                              parameters | {"StageSha256": stage, "Go": True})
         bridge._need(assert_fenced(deadline) == stage, error)
         result = self.windows.powershell(source, deadline)
         bridge._need(bridge._matches(result, {"attached": True, "stage_sha256": stage,

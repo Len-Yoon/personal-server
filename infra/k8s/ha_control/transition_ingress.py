@@ -316,6 +316,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
     caddy._need(bridge._hash(replacement_manifest_sha256) and callable(generation_handoff_pins)
                 and callable(preflight_replacement) and callable(attach_replacement_network)
+                and callable(getattr(attach_replacement_network, "preflight", None))
                 and type(prepare_guest_runtime) is bool
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
@@ -356,6 +357,9 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         network_intent = execution.directory / "replacement-network-intent.json"
         attachment_pending = resume_rejoin is not None and os.path.lexists(network_intent)
         if not attachment_pending and (resume_rejoin is None or not os.path.lexists(start_intent)):
+            caddy._need(attach_replacement_network.preflight(
+                replacement_vm, controller_setup["old_vm_id"], preflight, deadline,
+            ) is True, "transition_replacement_network_unconfirmed")
             caddy._need(preflight_replacement(preflight, deadline) is True,
                         "transition_replacement_scope_invalid")
         if resume_rejoin is None:

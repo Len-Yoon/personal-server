@@ -39,6 +39,14 @@ class WindowsReplacementNetworkTests(unittest.TestCase):
             old_disk_paths_sha256="5" * 64, isolated_switch_id="isolated", serving_switch_id="live",
             replacement_mac="020000000001",
         )
+        original = windows.powershell.return_value
+        windows.powershell.return_value = {"isolated": True, "vm_id": "replacement", "switch_id": "isolated"}
+        self.assertTrue(implementation.preflight(replacement, "old", request, 90))
+        source = windows.powershell.call_args.args[0]
+        self.assertTrue(source.endswith(" -ObserveOnly"))
+        self.assertNotIn(" -Go", source)
+        windows.powershell.reset_mock()
+        windows.powershell.return_value = original
         fence = MagicMock(return_value=None)
         with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
             implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
@@ -111,6 +119,7 @@ class TransitionIngressTests(unittest.TestCase):
                                    activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
             target_request=SimpleNamespace(binding=MagicMock(**execution.spec, **{"fields.return_value":execution.spec}), sequence=1),
         )
+        args["attach_replacement_network"].preflight.return_value = True
         stage = "7"*64
         handoff = transition_ingress.bridge.Request(
             args["target_request"].binding, "B", transition_ingress.bridge.GUEST_PUBLISH_GENERATION, 6, "5"*64,
@@ -148,6 +157,12 @@ class TransitionIngressTests(unittest.TestCase):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             args["guests"].verify_prepared_transition_target.return_value = True
+            args["attach_replacement_network"].preflight.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            args["preflight_replacement"].assert_not_called()
+            stage_service.assert_not_called()
+            args["attach_replacement_network"].preflight.return_value = True
             args["preflight_replacement"].return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "replacement_scope_invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)

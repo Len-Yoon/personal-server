@@ -8,6 +8,7 @@ param(
     [string]$ServingSwitchId,
     [string]$ReplacementMac,
     [string]$StageSha256,
+    [switch]$ObserveOnly,
     [switch]$Go
 )
 $ErrorActionPreference = 'Stop'
@@ -50,7 +51,8 @@ function Read-ReplacementTopology {
     $old = Get-VM -Id ([Guid]$OldVmId)
     $primary = Get-VM -Id ([Guid]$PrimaryVmId)
     $replacement = Get-VM -Id ([Guid]$ReplacementVmId)
-    if ($old.State -ne 'Off' -or $old.AutomaticStartAction -ne 'Nothing' -or
+    if (($ObserveOnly -and $old.State -notin @('Off','Running')) -or
+        ($Go -and ($old.State -ne 'Off' -or $old.AutomaticStartAction -ne 'Nothing')) -or
         $primary.State -ne 'Running' -or $replacement.State -ne 'Running' -or
         $replacement.AutomaticStartAction -ne 'Nothing') { throw 'replacement_vm_state_unconfirmed' }
     Assert-DiskPaths $old $OldDiskPathsSha256
@@ -89,8 +91,10 @@ function Read-ReplacementTopology {
 
 $guid = '\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z'
 $ids = @($OldVmId,$PrimaryVmId,$ReplacementVmId,$IsolatedSwitchId,$ServingSwitchId)
-$hashes = @($OldDiskPathsSha256,$ReplacementDiskPathsSha256,$StageSha256)
-if (-not $Go -or @($ids | Where-Object {$_ -cnotmatch $guid -or [Guid]$_ -eq [Guid]::Empty}).Count -ne 0 -or
+$hashes = @($OldDiskPathsSha256,$ReplacementDiskPathsSha256)
+if ($Go) { $hashes += $StageSha256 }
+if ($ObserveOnly -and $StageSha256) { throw 'replacement_network_scope_invalid' }
+if (($Go.IsPresent -eq $ObserveOnly.IsPresent) -or @($ids | Where-Object {$_ -cnotmatch $guid -or [Guid]$_ -eq [Guid]::Empty}).Count -ne 0 -or
     @($ids | Select-Object -Unique).Count -ne $ids.Count -or $ReplacementMac -cnotmatch '\A02[0-9A-F]{10}\z' -or
     @($hashes | Where-Object {$_ -cnotmatch '\A[a-f0-9]{64}\z'}).Count -ne 0) {
     throw 'replacement_network_scope_invalid'
@@ -108,6 +112,11 @@ try {
     $held = $mutex.WaitOne(0)
     if (-not $held) { throw 'replacement_network_busy' }
     $state = Read-ReplacementTopology
+    if ($ObserveOnly) {
+        if (-not $state.OldAttached -or $state.Attached) { throw 'replacement_preflight_topology_unconfirmed' }
+        [ordered]@{isolated=$true;vm_id=$ReplacementVmId;switch_id=$IsolatedSwitchId} | ConvertTo-Json -Compress
+        return
+    }
     if ($state.OldAttached) {
         Disconnect-VMNetworkAdapter -VMNetworkAdapter $state.OldNic
         $state = Read-ReplacementTopology
