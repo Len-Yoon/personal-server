@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Controller, Journal, TransitionBlocked, exclusive
 from ha_control.windows import WindowsFence
-from ha_control import car_callback_ingress
+from ha_control import car_callback_ingress, car_callback_runtime
 
 
 class CarCallbackOriginTests(unittest.TestCase):
@@ -26,6 +26,97 @@ class CarCallbackOriginTests(unittest.TestCase):
         for current, host, marker in ((active + b"\n", b, new_pin), (active, a, new_pin), (active, b, old_pin)):
             with self.assertRaises(TransitionBlocked):
                 retarget(current, a, old_pin, host, marker)
+
+    def test_independent_relay_reconciles_unknown_run_without_second_mutation(self):
+        relay = car_callback_runtime
+        caddy = relay.caddy
+        a, b = '192.168.100.2', '192.168.100.3'
+        old_pin, new_pin = 'a' * 64, 'b' * 64
+        old_id, new_id, network = '1' * 64, '2' * 64, '3' * 64
+        image, address = 'sha256:' + '4' * 64, '172.20.0.4'
+        calls = []
+        volume = {'Mountpoint': '/fixture/mtls'}
+        fingerprints = dict.fromkeys(caddy.TLS_FILES, 'f' * 64)
+        tls_output = ''.join(f'{pin}  {caddy.MOUNT}/{name}\n' for name, pin in fingerprints.items()).encode()
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory).resolve()
+            old_path = root / 'old'
+            old_path.write_bytes(car_callback_ingress.render(a, route_pin=old_pin))
+            previous = relay.Relay(caddy._sha(old_id.encode()), image, network, address, old_path, a, old_pin,
+                                  caddy._pin(volume), caddy._pin(fingerprints))
+            current = {'id': old_id, 'path': old_path, 'running': True, 'labels': {}}
+
+            def inspect():
+                return {
+                    'Id': current['id'], 'Name': '/' + relay.NAME, 'Image': image,
+                    'State': {'Running': current['running'], 'Status': 'running' if current['running'] else 'exited'},
+                    'Config': {'User': '10001:10001', 'Entrypoint': ['/usr/bin/caddy'], 'Labels': current['labels'],
+                               'Cmd': ['run', '--config', caddy.CONFIG, '--adapter', 'caddyfile']},
+                    'HostConfig': {'ReadonlyRootfs': True, 'Privileged': False, 'LogConfig': {'Type': 'none'},
+                                   'PortBindings': {}, 'CapDrop': ['ALL'], 'CapAdd': ['CAP_NET_BIND_SERVICE'],
+                                   'SecurityOpt': ['no-new-privileges'], 'RestartPolicy': {'Name': 'unless-stopped'}},
+                    'Mounts': [
+                        {'Destination': caddy.CONFIG, 'Type': 'bind', 'Source': str(current['path']), 'RW': False},
+                        {'Destination': caddy.MOUNT, 'Type': 'volume', 'Name': caddy.MTLS_VOLUME, 'RW': False,
+                         'Source': volume['Mountpoint']},
+                    ],
+                    'NetworkSettings': {'Networks': {'test': {'NetworkID': network, 'IPAddress': address}}},
+                }
+
+            def docker(*args, **options):
+                calls.append(args)
+                if args[0] == 'ps':
+                    return (current['id'] or '').encode()
+                if args[0] == 'inspect':
+                    self.assertEqual(args[1], current['id'])
+                    return json.dumps([inspect()]).encode()
+                if args[:2] == ('network', 'inspect'):
+                    return json.dumps([{'Id': network, 'Driver': 'bridge', 'Scope': 'local',
+                                        'Containers': {current['id']: {}} if current['running'] else {}}]).encode()
+                if args[:2] == ('volume', 'inspect'):
+                    return json.dumps([volume]).encode()
+                if args[0] == 'exec':
+                    return current['path'].read_bytes() if args[2] == '/bin/cat' else tls_output
+                if args[:2] == ('run', '--rm'):
+                    return tls_output
+                if args[0] == 'stop':
+                    self.assertTrue((root / relay.INTENT).exists())
+                    self.assertEqual(args[-1], old_id)
+                    current['running'] = False
+                    raise TransitionBlocked('fixture_ambiguous_stop')
+                if args[0] == 'rm':
+                    self.assertEqual(args, ('rm', old_id))
+                    self.assertFalse(current['running'])
+                    current['id'] = None
+                if args[:2] == ('run', '--detach'):
+                    labels = dict(args[index + 1].split('=', 1) for index, value in enumerate(args) if value == '--label')
+                    self.assertEqual(labels, relay.LABELS | {'n100-ha.car-relay-route': new_pin})
+                    current.update(id=new_id, path=root / 'Caddyfile', running=True, labels=labels)
+                    raise TransitionBlocked('fixture_ambiguous_run')
+                return b''
+
+            instance = relay.CallbackRuntime(docker)
+            proof = MagicMock(side_effect=['5' * 64, '6' * 64, '7' * 64])
+            with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
+                instance.replace(previous, b, new_pin, root, assert_guard=MagicMock(), verify_origin=proof)
+            self.assertEqual(instance.status(previous, root, assert_guard=MagicMock()), 'old_stopped')
+            with self.assertRaisesRegex(TransitionBlocked, 'fixture_daemon_unsettled'):
+                instance.resume(previous, root, assert_guard=MagicMock(),
+                                assert_settled=MagicMock(side_effect=TransitionBlocked('fixture_daemon_unsettled')))
+            self.assertFalse(any(args[0] == 'rm' for args in calls))
+            with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
+                instance.resume(previous, root, assert_guard=MagicMock(), assert_settled=MagicMock(),
+                                verify_origin=proof)
+            self.assertEqual(instance.status(previous, root, assert_guard=MagicMock()), 'new_running')
+            with patch.object(relay.time, 'sleep') as pause:
+                receipt = instance.observe(previous, root, assert_guard=MagicMock(), verify_origin=proof)
+            self.assertEqual([call.args for call in pause.call_args_list], [(10,), (10,)])
+            self.assertEqual(receipt['container_sha256'], caddy._sha(new_id.encode()))
+            self.assertEqual(proof.call_count, 3)
+            with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
+                instance.replace(previous, b, new_pin, root, assert_guard=MagicMock(), verify_origin=proof)
+            self.assertEqual([args[0] for args in calls if args[0] in {'stop', 'rm'}], ['stop', 'rm'])
+            self.assertEqual(sum(args[:2] == ('run', '--detach') for args in calls), 1)
 
     def test_public_origin_requires_current_marker_and_healthy_upstream(self):
         pin = "a" * 64
