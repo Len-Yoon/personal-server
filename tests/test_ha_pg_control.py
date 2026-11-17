@@ -58,23 +58,30 @@ class TransitionServiceStartTests(unittest.TestCase):
                       "PlanPath": r"C:\fixture\plan.json", "ApprovalPath": r"C:\fixture\approval.json",
                       "PreflightPath": r"C:\fixture\preflight.ps1", "ScmVerifierPath": r"C:\fixture\scm.cs"}
         windows = MagicMock()
-        windows.powershell.side_effect = TimeoutError("lost reply")
+        observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin}
+        windows.powershell.side_effect = [TimeoutError("lost reply"), observed]
         start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
         deadline = time.monotonic() + 30
         with self.assertRaisesRegex(BridgeRejected, "start_scope_invalid"):
             start.start(plan, parameters | {"PlanSha256": "5"*64}, deadline)
         windows.powershell.assert_not_called()
-        with self.assertRaises(TimeoutError):
-            start.start(plan, parameters, deadline)
-        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -StartTransition -Go"))
+        self.assertEqual(start.start(plan, parameters, deadline), observed)
         with self.assertRaisesRegex(BridgeRejected, "start_reconciliation_required"):
             start.start(plan, parameters, deadline)
-        windows.powershell.assert_called_once()
-        observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin}
-        windows.powershell.side_effect = [observed]
-        self.assertEqual(start.observe(plan, parameters, deadline), observed)
-        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ObserveTransition -Go"))
-        self.assertEqual(windows.powershell.call_count, 2)
+        requests = [call.args[0] for call in windows.powershell.call_args_list]
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[0].endswith(" -StartTransition -Go"))
+        self.assertTrue(requests[1].endswith(" -ObserveTransition -Go"))
+
+        for replies, calls in (([{"blocked": "initial_service_transition_scope"}], 1),
+                               ([TimeoutError("lost reply"), {"blocked": "not running"}], 2)):
+            with self.subTest(replies=replies):
+                windows.powershell.reset_mock()
+                windows.powershell.side_effect = replies
+                start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
+                with self.assertRaisesRegex(BridgeRejected, "service_start_unconfirmed"):
+                    start.start(plan, parameters, deadline)
+                self.assertEqual(windows.powershell.call_count, calls)
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):

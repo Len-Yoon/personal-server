@@ -400,7 +400,12 @@ class WindowsTransitionServiceStart:
         if not observe:
             bridge._need(not self.attempted, "native_transition_start_reconciliation_required")
             self.attempted = True
-        result = self.windows.powershell(source, deadline)
+        try:
+            result = self.windows.powershell(source, deadline)
+        except (bridge.BridgeRejected, TimeoutExpired, OSError):
+            if observe:
+                raise
+            return self.observe(controller, parameters, deadline)
         receipt = "transition_service_observed" if observe else "transition_service_started"
         bridge._need(type(result) is dict and set(result) == {
             receipt, "service_pid", "controller_plan_sha256",
