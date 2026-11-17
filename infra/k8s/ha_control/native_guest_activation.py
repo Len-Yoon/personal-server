@@ -1,6 +1,6 @@
 """Install generation-bound authority and start exact stopped containers."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import http.client
 from ipaddress import IPv4Address
@@ -16,7 +16,7 @@ from ha_egress.boot import validate_authority as validate_broker_authority
 from ha_runtime.config import SERVICES, validate_installed_authority
 from ha_runtime.seven_migration import MigrationRejected
 
-from . import native_guest_runtime as runtime
+from . import native_guest_runtime as runtime, native_guest_restore as restore, native_stdio_bridge as bridge
 from .native_guest_config import NODES
 from .native_guest_live import _probe, _tls
 from .legacy_writers import TransitionBlocked, _need
@@ -68,6 +68,38 @@ class ServingGeneration:
 
 
 INITIAL_GENERATION = ServingGeneration("A", 1, 1, 2)
+
+
+def validate_generation_handoff_pins(binding, node, pins, pg, activation, generation, floor, effects_plan_sha256):
+    pins.validate()
+    pg.validate()
+    activation.validate()
+    generation.validate()
+    _need(type(floor) is int and 0 < floor < 2**64 and generation.epoch > 1
+          and pins.node == generation.primary == node and pins.primary_node == node
+          and pins.generation == generation.epoch and pins.attempt_id == binding.attempt_id
+          and pins.boot_sha256 == binding.boot(node) and pins.plan_sha256 == effects_plan_sha256
+          and pins.release["source_commit"] == pg.source_commit
+          and all(getattr(pins, field) == getattr(pg, field) for field in (
+              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "system_id", "cluster", "postgres_id",
+          )), "guest_generation_handoff_unbound")
+
+
+def generation_handoff_request(binding, sequence, generation, instance, replay_floor, *, pins, postgres, activation):
+    """Construct exactly the guest document consumed by the activation worker."""
+    _need(type(binding) is bridge.Binding and type(sequence) is int and 0 < sequence <= bridge.MAX_REQUESTS
+          and type(pins) is runtime.RuntimePins and type(postgres) is restore.RestorePins
+          and type(activation) is ActivationPins and type(generation) is ServingGeneration,
+          "guest_generation_handoff_unbound")
+    activation = replace(activation, windows_service_instance_sha256=instance)
+    node = generation.primary
+    validate_generation_handoff_pins(binding, node, pins, postgres, activation, generation, replay_floor, pins.plan_sha256)
+    handoff = {"schema_version": 1, "binding": binding.fields(), "generation": asdict(generation), "runtime": asdict(pins),
+               "postgres": asdict(postgres), "activation": asdict(activation), "replay_floor": replay_floor}
+    return bridge.Request(binding, node, bridge.GUEST_PUBLISH_GENERATION, sequence, secrets.token_hex(32), {
+        "handoff": handoff, "generation_handoff_sha256": bridge._digest(bridge._bytes(handoff)),
+        "effects_plan_sha256": pins.plan_sha256,
+    })
 
 
 def _check_lease(pins, activation, assert_lease, boundary, generation=INITIAL_GENERATION):

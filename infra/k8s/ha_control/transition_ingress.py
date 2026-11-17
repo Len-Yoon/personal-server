@@ -11,7 +11,7 @@ from ha_runtime.seven_capture import encoded, parse
 
 from . import caddy_runtime as caddy
 from . import native_stdio_bridge as bridge
-from .native_guest_activation import ServingGeneration
+from .native_guest_activation import ServingGeneration, generation_handoff_request
 from .native_host_evidence import _public_health
 from .native_windows_ssh import fixed_script
 from .native_windows_activation import (close_previous_transition_service, open_transition_controller, prepare_staged_transition_service,
@@ -256,7 +256,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed,
                          guests, target_request,
-                         replacement_requests, generation_handoff_request, stage_service, resume_rejoin=None,
+                         replacement_requests, generation_handoff_pins, stage_service, resume_rejoin=None,
                          verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
@@ -274,7 +274,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
                 and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
                 "transition_ingress_guest_target_unconfirmed")
-    caddy._need(callable(replacement_requests) and callable(generation_handoff_request)
+    caddy._need(callable(replacement_requests) and callable(generation_handoff_pins)
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
@@ -351,7 +351,13 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
 
         def publish_handoff(serving_generation, instance, limit):
             nonlocal activation_request
-            request = generation_handoff_request(serving_generation, instance, replay_floor)
+            pins = generation_handoff_pins(serving_generation)
+            caddy._need(type(pins) is dict and set(pins) == {"pins", "postgres", "activation"},
+                        "transition_ingress_controller_unbound")
+            request = generation_handoff_request(
+                target_request.binding, replacement_observe.sequence + 1, serving_generation,
+                instance, replay_floor, **pins,
+            )
             caddy._need(activation_request is None and type(request) is bridge.Request
                         and request.binding == target_request.binding
                         and type(request.sequence) is int and replacement_observe.sequence < request.sequence <= bridge.MAX_REQUESTS - 8,

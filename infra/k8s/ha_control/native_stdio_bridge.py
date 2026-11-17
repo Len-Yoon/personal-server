@@ -25,6 +25,7 @@ from types import MappingProxyType
 
 VERSION = 1
 FRAME_BYTES = 4096
+GENERATION_HANDOFF_FRAME_BYTES = 8192
 # Each boundary opens a Windows SSH check before the guest samples its own
 # database clock. Budget the transport and framing separately from sample age.
 ACTIVATION_BOUNDARY_SECONDS = 6
@@ -243,7 +244,7 @@ def _args(verb, node, args):
     _need(node in nodes and type(args) is dict and set(args) == set(keys), "bridge_args_rejected")
     for key, value in args.items():
         if key == "handoff":
-            valid = type(value) is dict and 0 < len(_bytes(value)) <= FRAME_BYTES
+            valid = type(value) is dict and 0 < len(_bytes(value)) <= GENERATION_HANDOFF_FRAME_BYTES
         elif key == "max_bytes":
             valid = type(value) is int and 0 < value <= TRANSFER_BYTES
         elif key == "windows_generation":

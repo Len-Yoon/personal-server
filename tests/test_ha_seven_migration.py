@@ -171,6 +171,41 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
 
 
 class NativeGuestActivationTests(unittest.TestCase):
+    def test_generation_handoff_builder_matches_worker_and_frame(self):
+        worker, bridge = native_guest_worker, native_stdio_bridge
+        binding = bridge.Binding(*(character*64 for character in "abcde"))
+        shared = {"boot_sha256": binding.boot("B"), "installation_id": "1"*64, "plan_sha256": "2"*64,
+                  "manifest_sha256": "3"*64, "system_id": "1234567890123456789", "cluster": "test_ha",
+                  "postgres_id": "4"*64}
+        pins = worker.runtime.RuntimePins(
+            **shared, node="B", primary_node="B", generation=2, attempt_id=binding.attempt_id,
+            release={"source_commit": "a"*40, "release_id": "5"*64, "source_files_sha256": "6"*64},
+            protected_inventory_sha256="7"*64, engine_id_sha256="8"*64, renderer_sha256="9"*64,
+            spec_sha256="a"*64, inputs_sha256="b"*64, frozen_transfer_sha256="c"*64,
+            restore_receipt_sha256="d"*64, broker_instance="e"*64, retained_postgres_id="f"*64,
+        )
+        pg = worker.restore.RestorePins(
+            **shared, inventory_sha256="5"*64, uid=70, gid=70, utility_digest="sha256:"+"6"*64,
+            initializer_sha256="7"*64, source_commit="a"*40, config_sha256="8"*64, peer_ipv4="192.168.1.10",
+            retained_postgres_id="f"*64, attempt_id=binding.attempt_id,
+        )
+        activation = native_guest_activation.ActivationPins(*(character*64 for character in "012345"))
+        serving = native_guest_activation.ServingGeneration("B", 2, 2, 3)
+        request = native_guest_activation.generation_handoff_request(
+            binding, 4, serving, "9"*64, 2**64-1, pins=pins, postgres=pg, activation=activation,
+        )
+        handoff = request.args["handoff"]
+        raw = bridge._bytes(handoff)
+        envelope = worker._scope(request) | {"args": request.args}
+        frame = bridge._bytes(envelope)
+        self.assertGreater(len(frame), bridge.FRAME_BYTES)
+        self.assertLessEqual(len(frame), bridge.GENERATION_HANDOFF_FRAME_BYTES)
+        self.assertEqual(worker.read_request(io.BytesIO(frame)), request)
+        with self.assertRaisesRegex(TransitionBlocked, "guest_worker_request_size"):
+            worker.read_request(io.BytesIO(bridge._bytes(envelope | {"verb": bridge.GUEST_ACTIVATE_GENERATION})))
+        self.assertEqual(worker._checked_generation_handoff(request, raw, handoff),
+                         (pins, pg, replace(activation, windows_service_instance_sha256="9"*64), serving, 2**64-1))
+
     def test_generation_guest_request_binds_b_and_requires_wal_at_each_boundary(self):
         worker, bridge = native_guest_worker, native_stdio_bridge
         boot, installation = b"fresh boot", "4"*64

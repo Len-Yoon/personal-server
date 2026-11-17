@@ -58,7 +58,7 @@ class TransitionIngressTests(unittest.TestCase):
             controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
             replacement_requests=lambda _: (replacement, observe),
-            generation_handoff_request=lambda *_: handoff,
+            generation_handoff_pins=lambda _: {"pins": None, "postgres": None, "activation": None},
             stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
                                                                         "action": "ha-transition",
                                                                         "authority_kind": "installed-runtime"}),
@@ -86,7 +86,8 @@ class TransitionIngressTests(unittest.TestCase):
             steps.append("ingress")
             return None, None, {}
 
-        with patch.object(transition_ingress, "validate_transition_approval") as validate_approval, \
+        with patch.object(transition_ingress, "generation_handoff_request", return_value=handoff), \
+                patch.object(transition_ingress, "validate_transition_approval") as validate_approval, \
                 patch.object(transition_ingress, "fixed_script"), \
                 patch.object(transition_ingress, "stage_approved_transition_service",
                           side_effect=lambda *_a, **_kw: steps.append("stage") or prepared) as stage_service, \

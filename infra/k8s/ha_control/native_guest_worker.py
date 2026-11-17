@@ -24,7 +24,7 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
-    ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES,
+    ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
@@ -87,11 +87,12 @@ def _scope(request):
 
 
 def read_request(stream):
-    raw = stream.readline(FRAME_BYTES + 1)
-    _need(0 < len(raw) <= FRAME_BYTES and raw.endswith(b"\n"), "guest_worker_request_size")
+    raw = stream.readline(GENERATION_HANDOFF_FRAME_BYTES + 1)
+    _need(0 < len(raw) <= GENERATION_HANDOFF_FRAME_BYTES and raw.endswith(b"\n"), "guest_worker_request_size")
     value = json.loads(raw.decode("ascii"), object_pairs_hook=_pairs, parse_constant=_reject_constant)
     _need(type(value) is dict and _bytes(value) == raw and type(value["binding"]) is dict,
           "guest_worker_request_encoding")
+    _need(len(raw) <= FRAME_BYTES or value.get("verb") == GUEST_PUBLISH_GENERATION, "guest_worker_request_size")
     binding = Binding(**value["binding"])
     binding.fields()
     request = Request(binding, value["node"], value["verb"], value["sequence"], value["nonce"], value["args"])
@@ -689,22 +690,10 @@ def _checked_generation_handoff(request, raw, handoff):
     pg = restore.RestorePins(**handoff["postgres"])
     activation_pins = activation.ActivationPins(**handoff["activation"])
     generation = activation.ServingGeneration(**handoff["generation"])
-    pins.validate()
-    pg.validate()
-    activation_pins.validate()
-    generation.validate()
     floor = handoff["replay_floor"]
-    _need(type(floor) is int and 0 < floor < 2**64 and generation.epoch > 1
-          and pins.node == generation.primary == request.node and pins.primary_node == request.node
-          and pins.generation == generation.epoch and pins.attempt_id == request.binding.attempt_id
-          and pins.boot_sha256 == request.binding.boot(request.node)
-          # The transition authorization moves the writer. The original
-          # effects ledger keeps the separately pinned business history.
-          and pins.plan_sha256 == request.args["effects_plan_sha256"]
-          and pins.release["source_commit"] == pg.source_commit
-          and all(getattr(pins, field) == getattr(pg, field) for field in (
-              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "system_id", "cluster", "postgres_id",
-          )), "guest_generation_handoff_unbound")
+    activation.validate_generation_handoff_pins(
+        request.binding, request.node, pins, pg, activation_pins, generation, floor, request.args["effects_plan_sha256"],
+    )
 
     return pins, pg, activation_pins, generation, floor
 
@@ -722,14 +711,14 @@ def publish_generation_handoff(request):
           and installed["source_commit"] == pg.source_commit, "guest_generation_handoff_changed")
     path = stage / "generation-handoff.json"
     if os.path.lexists(path):
-        _need(runtime._read(path, 0, {0o400}, limit=FRAME_BYTES) == raw,
+        _need(runtime._read(path, 0, {0o400}, limit=GENERATION_HANDOFF_FRAME_BYTES) == raw,
               "guest_generation_handoff_changed")
     else:
         _need(not any(os.path.lexists(stage / name) for name in
                       ("runtime-activation-intent.json", "runtime-activation.json")),
               "guest_generation_already_activated")
         runtime._write(path, raw, 0o400)
-    _need(runtime._read(path, 0, {0o400}, limit=FRAME_BYTES) == raw,
+    _need(runtime._read(path, 0, {0o400}, limit=GENERATION_HANDOFF_FRAME_BYTES) == raw,
           "guest_generation_handoff_changed")
     return Receipt("PASS", _digest(raw))
 

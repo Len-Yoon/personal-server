@@ -438,7 +438,9 @@ class GuestSshDispatcher:
                     'boot_sha256': self.binding.boot(request.node), 'verb': request.verb,
                     'sequence': request.sequence, 'nonce': request.nonce}
         payload = bridge._bytes(envelope | {'args': args})
-        bridge._need(len(payload) <= bridge.FRAME_BYTES and type(deadline) in (int, float), 'guest_ssh_request_unbound')
+        frame_limit = (bridge.GENERATION_HANDOFF_FRAME_BYTES
+                       if request.verb == bridge.GUEST_PUBLISH_GENERATION else bridge.FRAME_BYTES)
+        bridge._need(len(payload) <= frame_limit and type(deadline) in (int, float), 'guest_ssh_request_unbound')
         limit = min(deadline, time.monotonic() + bridge.VERBS[request.verb][1])
         bridge._remaining(limit)
         with self.lock:
