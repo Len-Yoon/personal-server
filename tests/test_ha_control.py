@@ -266,10 +266,29 @@ class ControlTests(unittest.TestCase):
     def test_unknown_open_closes_again_and_reproves_without_new_generation(self):
         self.backend.failure = "open_unknown"
         with self.assertRaises(TransitionBlocked): self.control.advance()
+        self.assertFalse(self.backend.ready)
+        self.assertEqual(self.backend.actions[-2:], ["open", "close"])
         self.backend.failure = None
         state = Controller(self.path, self.backend).advance()
         self.assertEqual(state["generation"], 3)
         self.assertEqual(self.backend.actions[-3:], ["close", "validate", "open"])
+
+    def test_ready_record_failure_revokes_without_starting_lease_service(self):
+        save = self.control.journal.save
+
+        def fail_ready(state):
+            if state["phase"] == "ready":
+                raise TransitionBlocked("controller_journal_not_durable")
+            save(state)
+
+        serve = MagicMock()
+        with patch.object(self.control.journal, "save", fail_ready):
+            with self.assertRaisesRegex(TransitionBlocked, "controller_journal_not_durable"):
+                self.control.advance(on_ready=serve)
+        serve.assert_not_called()
+        self.assertEqual(Journal(self.path).read()["phase"], "validating")
+        self.assertFalse(self.backend.ready)
+        self.assertEqual(self.backend.actions[-2:], ["open", "close"])
 
     def test_three_attempt_bound_survives_controller_restart(self):
         self.backend.failure = "fence"

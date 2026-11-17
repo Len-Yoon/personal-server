@@ -184,10 +184,19 @@ class Controller:
                     if not self.backend.fenced(state):
                         raise TransitionBlocked("old_primary_restarted")
                     self.backend.validate(state)
-                    self.backend.open(state)
-                    self.backend.assert_ready(state)
-                    state["phase"] = "ready"
-                    self.journal.save(state)
+                    try:
+                        self.backend.open(state)
+                        self.backend.assert_ready(state)
+                        state["phase"] = "ready"
+                        self.journal.save(state)
+                    except BaseException:
+                        # A lost response or failed ready record may follow a
+                        # committed lease. Revoke under the held guards.
+                        try:
+                            self.backend.close(state)
+                        except Exception:
+                            pass  # The database-clock lease still expires.
+                        raise
             except TransitionBlocked:
                 raise
             except Exception:
