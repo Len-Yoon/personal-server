@@ -228,12 +228,13 @@ class PgBackend:
         return floor
 
     @contextmanager
-    def _connection(self, node):
+    def _connection(self, node, *, replication=False):
         import psycopg
         connection = None
         phase = "connect"
         try:
-            connection = psycopg.connect(**self.plan["pg_nodes"][node], autocommit=True,
+            protocol = {"replication": "database", "cursor_factory": psycopg.ClientCursor} if replication else {}
+            connection = psycopg.connect(**self.plan["pg_nodes"][node], **protocol, autocommit=True,
                                          connect_timeout=1, application_name="ha_native_controller")
             phase = "setup"
             connection.execute("SET statement_timeout='700ms'")
@@ -297,8 +298,22 @@ class PgBackend:
         value = value[0] if value else None
         if (not isinstance(value, dict) or value.get("cluster") != state["cluster"]
                 or value.get("system_id") != str(self.plan["system_id"]) or value.get("node") != "ha_" + node
-                or type(value.get("actual_timeline")) is not int or value["actual_timeline"] < state["timeline"]
                 or type(value.get("epoch")) is not int or value["epoch"] > state["generation"]):
+            _deny("pg_identity_mismatch")
+        if (value.get("recovery") is True and node == state["target"]
+                and state["phase"] in {"fencing", "promoting"} and self._promotion_replay_floor() is not None):
+            # IDENTIFY_SYSTEM on a standby reports its replay timeline even
+            # after the upstream WAL receiver has exited. Its position can be
+            # ahead of replay, so retain the separately observed replay LSN.
+            with self._connection(node, replication=True) as replication:
+                status = replication.execute("IDENTIFY_SYSTEM").fetchone()
+            if (not status or len(status) != 4 or status[0] != value["system_id"]
+                    or status[3] != self.plan["pg_nodes"][node]["dbname"]
+                    or type(status[1]) is not int or status[1] != state["timeline"]
+                    or self._lsn(value["replay"]) > self._lsn(status[2])):
+                _deny("promotion_replay_identity_unconfirmed")
+            value = {**value, "actual_timeline": status[1], "flush": status[2]}
+        if type(value.get("actual_timeline")) is not int or value["actual_timeline"] < state["timeline"]:
             _deny("pg_identity_mismatch")
         return value
 

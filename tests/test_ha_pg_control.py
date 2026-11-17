@@ -190,6 +190,26 @@ class PGControlTests(unittest.TestCase):
                 self.backend.promote(self.state)
         self.primary.execute.assert_not_called()
 
+    def test_disconnected_standby_uses_replay_timeline_without_substituting_flush(self):
+        self.backend.plan["required_replay_lsn"] = "0/21"
+        state = dict(self.state, phase="promoting")
+        sql = MagicMock()
+        sql.execute.return_value.fetchone.return_value = (
+            dict(self.candidate(), actual_timeline=None, replay="0/20", flush=None),
+        )
+        replication = MagicMock()
+        replication.execute.return_value.fetchone.return_value = ("123", 1, "0/30", "ha")
+        with patch.object(self.backend, "_connection", return_value=nullcontext(replication)) as connect:
+            status = self.backend._observe_runtime(sql, "B", state)
+            self.assertEqual((status["actual_timeline"], status["replay"], status["flush"]), (1, "0/20", "0/30"))
+            connect.assert_called_once_with("B", replication=True)
+            replication.execute.assert_called_once_with("IDENTIFY_SYSTEM")
+            for invalid in (("foreign", 1, "0/30", "ha"), ("123", 2, "0/30", "ha"),
+                            ("123", 1, "0/1F", "ha"), ("123", 1, "0/30", "foreign")):
+                replication.execute.return_value.fetchone.return_value = invalid
+                with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_identity_unconfirmed"):
+                    self.backend._observe_runtime(sql, "B", state)
+
     def test_lost_promotion_response_is_reconciled_without_second_promote(self):
         self.backend.plan["required_replay_lsn"] = "0/20"
         self.primary, self.peer = MagicMock(), MagicMock()
