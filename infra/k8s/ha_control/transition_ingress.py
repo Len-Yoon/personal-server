@@ -425,8 +425,11 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             replacement_vm, controller_setup["old_vm_id"], preflight, stage, deadline, assert_fenced=check_stage,
         ) is True, network_error)
         caddy._need(check_stage(deadline) == stage, network_error)
-        if attachment_pending and not os.path.lexists(start_intent):
-            caddy._need(guests.preflight_replacement_standby(preflight, deadline) is True, network_error)
+        # Confirm the same boot-bound guest through the serving route before
+        # publication. An already-started attempt uses pinned readback instead.
+        if not os.path.lexists(start_intent):
+            serving_preflight = replace(preflight, nonce=secrets.token_hex(32))
+            caddy._need(guests.preflight_replacement_standby(serving_preflight, deadline) is True, network_error)
         args = {"bootstrap_manifest_sha256": replacement_manifest_sha256, "rejoin_stage_sha256": stage}
         replacement_start = replace(preflight, verb=bridge.GUEST_START_REPLACEMENT, sequence=preflight.sequence + 2,
                                     nonce=secrets.token_hex(32), args=args)
