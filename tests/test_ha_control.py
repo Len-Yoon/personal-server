@@ -115,10 +115,23 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual([call.args[2] for call in starter.run_rejoin.call_args_list], expected)
             self.assertEqual(len({call.args[3] for call in starter.run_rejoin.call_args_list}), len(expected))
             if resume:
-                self.assertEqual(starter.mock_calls[0][0], "restore_rejoin_args")
+                self.assertEqual(starter.mock_calls[0][0], "rejoin_stage_intent_present")
                 starter.restore_rejoin_args.assert_called_once()
             else:
                 starter.restore_rejoin_args.assert_not_called()
+
+    def test_rejoin_resume_before_stage_restores_initialize_without_replaying_it(self):
+        starter = MagicMock()
+        starter.rejoin_stage_intent_present.return_value = False
+        starter.run_rejoin.return_value = {"rejoin_stage_sha256": "f"*64}
+        controller, parameters = {"plan": b"fixture"}, {"PlanSha256": "a"*64}
+        transition_ingress._windows_rejoin(
+            starter, controller, parameters, live_sha256="b"*64, root="fixture", deadline=90, resume=True,
+        )
+        self.assertEqual([call[0] for call in starter.mock_calls],
+                         ["rejoin_stage_intent_present", "restore_rejoin_args", "run_rejoin"])
+        self.assertEqual(starter.restore_rejoin_args.call_args.args[2], "initialize")
+        self.assertEqual(starter.run_rejoin.call_args.args[2], "stage-rejoin")
 
     def test_replacement_unknown_start_reconciles_without_replay(self):
         bridge = transition_ingress.bridge

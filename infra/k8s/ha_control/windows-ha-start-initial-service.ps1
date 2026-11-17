@@ -18,6 +18,7 @@ param(
     [string]$RejoinMode,
     [string]$RejoinRequestId,
     [switch]$RestoreRejoinArgs,
+    [switch]$InspectRejoinStage,
     [switch]$ObserveTransition,
     [switch]$StopTransition,
     [string]$ExpectedServicePid,
@@ -159,6 +160,12 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         $argsSha = [BitConverter]::ToString($hash.ComputeHash($argsBytes)).Replace('-','').ToLowerInvariant()
         $servingBytes = $encoder.GetBytes(($servingLines -join [char]10) + [char]10)
         $servingSha = [BitConverter]::ToString($hash.ComputeHash($servingBytes)).Replace('-','').ToLowerInvariant()
+        if ($InspectRejoinStage) {
+            $settings['mode'] = 'initialize'
+            $initializeLines = @($settings.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value })
+            $initializeBytes = $encoder.GetBytes(($initializeLines -join [char]10) + [char]10)
+            $initializeSha = [BitConverter]::ToString($hash.ComputeHash($initializeBytes)).Replace('-','').ToLowerInvariant()
+        }
         $preflight = [IO.File]::ReadAllBytes($PreflightPath)
         $scmSource = [IO.File]::ReadAllBytes($ScmVerifierPath)
         if ([BitConverter]::ToString($hash.ComputeHash($preflight)).Replace('-','').ToLowerInvariant() -cne $PreflightSha256 -or
@@ -169,7 +176,13 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     $preflightBlock = [ScriptBlock]::Create($encoder.GetString($preflight))
     . $preflightBlock -HostRoot $hostRoot -HostSha256 $ServiceHostSha256 -ArgsSha256 $argsSha -ServiceSid $sid -TrustedAdminSids $pins.trusted_admin_sids
     $restoreOneShot = $RestoreClosureArgs -or $RestoreRejoinArgs
-    if ($restoreOneShot) { Confirm-ClosureArgsState $servingSha $argsSha }
+    if ($InspectRejoinStage) {
+        try { Confirm-ClosureArgsState $servingSha $argsSha }
+        catch {
+            if ($_.Exception.Message -cne 'preflight_hash_rejected') { throw }
+            Assert-TransitionPreflight $initializeSha
+        }
+    } elseif ($restoreOneShot) { Confirm-ClosureArgsState $servingSha $argsSha }
     else { Assert-TransitionPreflight $servingSha }
     if ($PlanPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z') {
         throw 'initial_service_transition_intent_scope'
@@ -204,6 +217,24 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize,Delete',[IO.FileShare]::None,4096,
         [IO.FileOptions]::DeleteOnClose,$intentAcl)
     try {
+        if ($InspectRejoinStage) {
+            if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+            Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+            Assert-TransitionStopped $Plan $HostPath $Current.PathName
+            try { $entry = Get-Item -LiteralPath $intentPath -Force -ErrorAction Stop }
+            catch [System.Management.Automation.ItemNotFoundException] { $entry = $null }
+            if ($null -ne $entry) {
+                Assert-PreflightEntry $entry $authors $authors $true $false
+                if ($entry -isnot [IO.FileInfo] -or $entry.Length -ne $intentBytes.Length -or
+                    (Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
+                        $intentAcl.GetSecurityDescriptorSddlForm($sections) -or
+                    $encoder.GetString([IO.File]::ReadAllBytes($intentPath)) -cne $encoder.GetString($intentBytes)) {
+                    throw 'initial_service_transition_intent_scope'
+                }
+            }
+            [ordered]@{stage_intent_present=($null -ne $entry);controller_plan_sha256=$PlanSha256}|ConvertTo-Json -Compress
+            return
+        }
         if (-not $restoreOneShot) { Assert-TransitionPreflight $servingSha }
         if ($ObserveTransition -or $StopTransition -or $restoreOneShot -or $ObserveClosureCheck) {
             $intentHash = [Security.Cryptography.SHA256]::Create()
@@ -390,6 +421,7 @@ try {
     if (-not $Go -or $modes -gt 1 -or
         ($rejoin -and ($RejoinMode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin') -or
             $RejoinRequestId -cnotmatch '\A[a-f0-9]{32}\z')) -or
+        ($InspectRejoinStage -and ($RejoinMode -cne 'stage-rejoin' -or $RestoreRejoinArgs)) -or
         (-not $rejoin -and ($RestoreRejoinArgs -or $RejoinRequestId -cne '')) -or
         ($StopTransition -and ($ExpectedServicePid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
             $ExpectedServiceCreatedTicks -cnotmatch '\A[1-9][0-9]{1,19}\z')) -or

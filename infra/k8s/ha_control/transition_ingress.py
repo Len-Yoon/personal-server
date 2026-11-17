@@ -195,11 +195,15 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
         return run(mode, secrets.token_hex(16), limit)
 
     stage_id = secrets.token_hex(16)
-    if resume:
+    if resume and starter.rejoin_stage_intent_present(controller, parameters, stage_id, deadline):
         starter.restore_rejoin_args(controller, parameters, "stage-rejoin", stage_id, deadline)
         staged = observe("observe-rejoin-stage", deadline)
     else:
-        run("initialize", secrets.token_hex(16), deadline)
+        init_id = secrets.token_hex(16)
+        if resume:
+            starter.restore_rejoin_args(controller, parameters, "initialize", init_id, deadline)
+        else:
+            run("initialize", init_id, deadline)
         staged = run("stage-rejoin", stage_id, deadline)
     pin = staged["rejoin_stage_sha256"]
 

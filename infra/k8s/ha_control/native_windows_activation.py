@@ -401,14 +401,19 @@ class WindowsTransitionServiceStart:
                      and type(parameters) is dict and parameters.get("PlanPath") == root + r"\plan.json",
                      "native_transition_rejoin_receipt_unconfirmed")
         fixed_script("windows-ha-cutover-live-authority.ps1", live_sha256, {})
-        launch = self._invoke(controller, parameters, deadline, observe=False, rejoin=(mode, request_id, False))
+        launch = self._invoke(controller, parameters, deadline, observe=False, rejoin=(mode, request_id, None))
         return read_transition_rejoin_receipt(
             self.windows, live_sha256, root, controller["plan_sha256"], mode, host_pid=launch["host_pid"],
             started_ms=launch["started_at_ms"], service_sid=launch["service_sid"], deadline=deadline,
         )
 
     def restore_rejoin_args(self, controller, parameters, mode, request_id, deadline):
-        return self._invoke(controller, parameters, deadline, observe=False, rejoin=(mode, request_id, True))
+        return self._invoke(controller, parameters, deadline, observe=False, rejoin=(mode, request_id, "RestoreRejoinArgs"))
+
+    def rejoin_stage_intent_present(self, controller, parameters, request_id, deadline):
+        result = self._invoke(controller, parameters, deadline, observe=False,
+                              rejoin=("stage-rejoin", request_id, "InspectRejoinStage"))
+        return result["stage_intent_present"]
 
     def _invoke(self, controller, parameters, deadline, *, observe, stop=None, closure=None, rejoin=None):
         fields = START_PARAMETERS - {"BindingPath"}
@@ -429,17 +434,22 @@ class WindowsTransitionServiceStart:
                      and bridge._hash(plan["transition_service_start"].get("service_image_path_sha256"))
                      and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
         if rejoin is not None:
-            mode, request_id, restore = rejoin
+            mode, request_id, action = rejoin
             bridge._need(plan["transition_service_start"].get("lease_closure_check") is True
                          and mode in ("initialize", "stage-rejoin", "observe-rejoin-stage", "check-rejoin")
                          and type(request_id) is str and re.fullmatch(r"[a-f0-9]{32}", request_id), invalid)
             options = {"RejoinMode": mode, "RejoinRequestId": request_id, "Go": True}
-            if restore:
-                options["RestoreRejoinArgs"] = True
+            if action is not None:
+                options[action] = True
             source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | options)
             bridge._remaining(deadline)
             result = self.windows.powershell(source, deadline)
-            if restore:
+            if action == "InspectRejoinStage":
+                bridge._need(type(result) is dict and set(result) == {"stage_intent_present", "controller_plan_sha256"}
+                             and type(result["stage_intent_present"]) is bool
+                             and result["controller_plan_sha256"] == controller["plan_sha256"],
+                             "native_transition_rejoin_intent_unconfirmed")
+            elif action == "RestoreRejoinArgs":
                 bridge._need(bridge._matches(result, {
                     "serving_args_restored": True, "controller_plan_sha256": controller["plan_sha256"],
                 }), "native_transition_rejoin_restore_unconfirmed")
