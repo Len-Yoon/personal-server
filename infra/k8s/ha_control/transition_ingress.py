@@ -1,6 +1,6 @@
 """Switch both public routes for one independently verified serving generation."""
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from collections.abc import Mapping
 import os
 import secrets
@@ -225,6 +225,35 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
     return pin, int(wal, 16), current_stage, synchronized
 
 
+def _prepare_target_generation(guests, binding, sequence, generation, pins, stage, replay_floor, deadline, *,
+                               check_sync, assert_legacy_closed):
+    source_wal = f"{replay_floor:016x}"
+    request = bridge.Request(binding, generation.primary, bridge.GUEST_PREPARE_GENERATION, sequence,
+                             secrets.token_hex(32), {
+        "runtime": asdict(pins["pins"]), "postgres": asdict(pins["postgres"]), "generation": asdict(generation),
+        "rejoin_stage_sha256": stage, "source_fence_wal": source_wal,
+    })
+
+    def current_rejoin(challenge, boundary, limit):
+        caddy._need(bridge._hash(challenge) and boundary in bridge.PREPARATION_BOUNDARIES,
+                    "transition_replacement_scope_invalid")
+        assert_legacy_closed()
+        observed = check_sync(limit)
+        caddy._need(type(observed) is dict and observed.get("rejoin_stage_sha256") == stage
+                    and observed.get("source_fence_wal") == source_wal and observed.get("standby_rejoined") is True
+                    and observed.get("authority_opened") is False,
+                    "transition_replacement_replication_unconfirmed")
+        bridge._remaining(limit)
+        return bridge._digest(bridge._bytes({
+            "binding": binding.fields(), "generation": asdict(generation), "request_nonce": request.nonce,
+            "challenge": challenge, "boundary": boundary, "observation": observed,
+        }))
+
+    pin = guests.prepare_generation_runtime(request, generation, stage, replay_floor, deadline, assert_rejoin=current_rejoin)
+    caddy._need(bridge._hash(pin), "transition_ingress_activation_unconfirmed")
+    return pins | {"activation": replace(pins["activation"], primary_runtime_receipt_sha256=pin)}
+
+
 def _activate_or_observe_generation(guests, request, deadline, *, assert_guard, guest_boundary):
     try:
         result = guests.activate_generation(request, deadline, assert_windows_current=guest_boundary)
@@ -257,7 +286,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          observer_setup, controller_setup, assert_legacy_closed,
                          guests, target_request,
                          replacement_requests, generation_handoff_pins, stage_service, resume_rejoin=None,
-                         verify_public=_public_health):
+                         prepare_guest_runtime=False, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
     After a lost guest response, supply fresh request sequences and nonces
@@ -271,6 +300,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
                 and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
     caddy._need(callable(replacement_requests) and callable(generation_handoff_pins)
+                and type(prepare_guest_runtime) is bool
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
@@ -284,7 +314,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     caddy._need((target_request.binding.plan_sha256, target_request.binding.attempt_id)
                 == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
                 and guests.verify_prepared_transition_target(
-                    target_request, generation, target, pins["pins"], pins["activation"].primary_runtime_receipt_sha256,
+                    target_request, generation, target, pins["pins"],
+                    None if prepare_guest_runtime else pins["activation"].primary_runtime_receipt_sha256,
                     observer_setup["deadline"],
                 ) is True, "transition_ingress_guest_target_unconfirmed")
     stage_fields = {"approval", "close_previous_service", "preflight_path", "scm_verifier_path"}
@@ -350,6 +381,15 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         _rejoin_replacement(execution, guests, generation, target_request, replacement_start, replacement_observe,
                             check_stage, check_sync, deadline)
 
+        publish_sequence = replacement_observe.sequence + 1
+        if prepare_guest_runtime:
+            caddy._need(publish_sequence < bridge.MAX_REQUESTS - 8, "transition_ingress_controller_unbound")
+            pins = _prepare_target_generation(
+                guests, target_request.binding, publish_sequence, generation, pins, stage, replay_floor, deadline,
+                check_sync=check_sync, assert_legacy_closed=assert_legacy_closed,
+            )
+            publish_sequence += 1
+
         def same_service(plan, serving_generation, limit):
             caddy._need(plan == controller and serving_generation == generation,
                         "transition_ingress_controller_unbound")
@@ -361,7 +401,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         def publish_handoff(serving_generation, instance, limit):
             nonlocal activation_request
             request = generation_handoff_request(
-                target_request.binding, replacement_observe.sequence + 1, serving_generation,
+                target_request.binding, publish_sequence, serving_generation,
                 instance, replay_floor, **pins,
             )
             caddy._need(activation_request is None and type(request) is bridge.Request

@@ -341,12 +341,13 @@ class GuestSshDispatcher:
         return True
 
     def verify_prepared_transition_target(self, request, generation, target, pins, runtime_receipt_sha256, deadline):
-        """Bind the original target request to a fresh stopped-runtime observation."""
+        """Bind the target to verified staged inputs or a stopped-runtime receipt."""
         generation.validate()
         error = "guest_ssh_prepared_generation_unbound"
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_TRANSITION_TARGET
                      and request.binding == self.binding and request.node == generation.primary
-                     and target == self.guests[request.node].host and bridge._hash(runtime_receipt_sha256)
+                     and target == self.guests[request.node].host
+                     and (runtime_receipt_sha256 is None or bridge._hash(runtime_receipt_sha256))
                      and pins.node == request.node and pins.generation == generation.epoch
                      and pins.installation_id == request.args.get("installation_id"), error)
         bridge._args(request.verb, request.node, dict(request.args))
@@ -355,7 +356,8 @@ class GuestSshDispatcher:
             "target_sha256": bridge._digest(target.encode("ascii")),
         })
         receipt = self._dispatch(observation, deadline)
-        bridge._need(receipt.status == "PASS" and receipt.receipt_sha256 == runtime_receipt_sha256, error)
+        bridge._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256)
+                     and (runtime_receipt_sha256 is None or receipt.receipt_sha256 == runtime_receipt_sha256), error)
         return True
 
     def prepare_generation_runtime(self, request, generation, stage_pin, replay_floor, deadline, *, assert_rejoin):

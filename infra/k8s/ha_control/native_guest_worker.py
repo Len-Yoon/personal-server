@@ -817,9 +817,21 @@ def verify_prepared_generation(request):
     _, installation = _read_json(restore.INSTALLATION)
     _need(installation["installation_id"] == pins.installation_id and installation["node"] == request.node
           and installation["source_commit"] == pins.release["source_commit"], "guest_generation_prepared_unbound")
-    pin = runtime._inspect_prepared(pins, stage, stage / "runtime-intent.json", stage / "runtime-prepared.json")
-    _need(pin == request.args["runtime_receipt_sha256"]
-          and _digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_generation_prepared_unbound")
+    expected = request.args["runtime_receipt_sha256"]
+    if expected is None:
+        _need(not any(os.path.lexists(path) for path in (
+            stage / "runtime-intent.json", stage / "runtime-prepared.json", stage / "apps.json",
+            stage / "broker.json", runtime.ROOT / "broker" / "config.json",
+            *(runtime.RUN / "ingress" / service for service in SERVICES),
+        )), "guest_generation_prepared_unbound")
+        checked = runtime.preflight_runtime(pins, stage)
+        _need(checked["status"] == "PREFLIGHT_PASS" and checked["frozen_socket_released"] is True,
+              "guest_generation_prepared_unbound")
+        pin = _digest(_bytes(_scope(request) | {"preflight": checked}))
+    else:
+        pin = runtime._inspect_prepared(pins, stage, stage / "runtime-intent.json", stage / "runtime-prepared.json")
+        _need(pin == expected, "guest_generation_prepared_unbound")
+    _need(_digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_generation_prepared_unbound")
     return Receipt("PASS", pin)
 
 

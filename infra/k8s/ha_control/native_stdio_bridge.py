@@ -255,6 +255,8 @@ def _args(verb, node, args):
             valid = type(value) is dict and 0 < len(_bytes(value)) <= FRAME_BYTES
         elif key == "handoff":
             valid = type(value) is dict and 0 < len(_bytes(value)) <= GENERATION_HANDOFF_FRAME_BYTES
+        elif key == "runtime_receipt_sha256" and verb == GUEST_VERIFY_PREPARED_GENERATION:
+            valid = value is None or _hash(value)
         elif key == "source_fence_wal":
             valid = _wal_pin(value)
         elif key == "max_bytes":

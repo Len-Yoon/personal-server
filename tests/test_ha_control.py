@@ -136,6 +136,46 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(verified.args["activation_receipt_sha256"], outcome.activation_sha256)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 
+    def test_preparing_generation_refreshes_closed_windows_proof_per_boundary(self):
+        from ha_control.native_guest_activation import ActivationPins
+
+        switcher = transition_ingress
+        bridge = switcher.bridge
+        binding = bridge.Binding(*(item*64 for item in "abcde"))
+        generation = ServingGeneration("B", 2, 2, 3)
+        stage = "f"*64
+        activation = ActivationPins(*(item*64 for item in "123456"))
+        pins = {"pins": generation, "postgres": generation, "activation": activation}
+        settled = {"rejoin_stage_sha256": stage, "source_fence_wal": "0000000000000008",
+                   "standby_rejoined": True, "authority_opened": False}
+        sync = MagicMock(return_value=settled)
+        legacy = MagicMock()
+        guests = MagicMock()
+        proof_digests = []
+
+        def prepare(request, serving, reported_stage, floor, deadline, *, assert_rejoin):
+            self.assertEqual(request.verb, bridge.GUEST_PREPARE_GENERATION)
+            self.assertEqual(request.args["source_fence_wal"], "0000000000000008")
+            for boundary in bridge.PREPARATION_BOUNDARIES:
+                proof_digests.append(assert_rejoin("1"*64, boundary, deadline))
+            return "7"*64
+
+        guests.prepare_generation_runtime.side_effect = prepare
+        result = switcher._prepare_target_generation(
+            guests, binding, 4, generation, pins, stage, 8, float("inf"),
+            check_sync=sync, assert_legacy_closed=legacy,
+        )
+        self.assertEqual(result["activation"].primary_runtime_receipt_sha256, "7"*64)
+        self.assertEqual(len(set(proof_digests)), 4)
+        self.assertEqual(sync.call_count, 4)
+        self.assertEqual(legacy.call_count, 4)
+        sync.return_value = settled | {"authority_opened": True}
+        with self.assertRaisesRegex(TransitionBlocked, "replacement_replication_unconfirmed"):
+            switcher._prepare_target_generation(
+                guests, binding, 4, generation, pins, stage, 8, float("inf"),
+                check_sync=sync, assert_legacy_closed=legacy,
+            )
+
     def test_lost_activation_is_followed_only_by_fresh_readback(self):
         bridge = transition_ingress.bridge
         guests = MagicMock()

@@ -171,6 +171,22 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
 
 
 class NativeGuestActivationTests(unittest.TestCase):
+    def test_b_runtime_preflight_rejects_a_or_unbound_postgres_address(self):
+        runtime = native_guest_worker.runtime
+        boot = b"boot"
+        install = {"installation_id": "a"*64, "node": "B"}
+        spec = encoded(install | {"source_commit": "b"*40, "guest_ip": "192.168.1.10",
+                                 "pg_a": "192.168.1.10", "pg_b": "192.168.1.11"})
+        pins = SimpleNamespace(boot_sha256=sha(boot), installation_id=install["installation_id"],
+                               node="B", spec_sha256=sha(spec), release={"source_commit": "b"*40})
+        with patch.object(runtime, "_directory"), \
+                patch.object(runtime, "BOOT_ID", MagicMock(read_bytes=MagicMock(return_value=boot))), \
+                patch.object(runtime, "_read", side_effect=[encoded(install), spec]), \
+                patch.object(runtime, "_renderer") as renderer:
+            with self.assertRaisesRegex(TransitionBlocked, "runtime_spec_scope_mismatch"):
+                runtime._preflight(pins, Path("/fixture"))
+            renderer.assert_not_called()
+
     def test_generation_runtime_prepare_requires_closed_primary_and_current_wal(self):
         runtime = native_guest_worker.runtime
         generation = native_guest_activation.ServingGeneration("B", 2, 3, 4)
