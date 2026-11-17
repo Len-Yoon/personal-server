@@ -17,8 +17,44 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
+from ha_control.native_windows_activation import WindowsActivationLease
+from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
 from ha_control import cli, scm_pg_auth_probe
+
+
+class InitialServiceRetirementTests(unittest.TestCase):
+    def test_uncertain_retirement_requires_exact_read_only_observation(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        guard = MagicMock()
+        windows = MagicMock()
+        windows.powershell.side_effect = [
+            TimeoutError("uncertain"), {"initial_service_retired": True, "retirement_sha256": "d" * 64},
+        ]
+        custody = SimpleNamespace(windows=windows, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+                                  binding=SimpleNamespace(plan_sha256="a" * 64, attempt_id="b" * 64))
+        lease = WindowsActivationLease(custody, r"C:\Private\binding.json", {
+            "first_write_proof_sha256": "e" * 64, "service_instance_sha256": "c" * 64,
+        })
+        deadline = time.monotonic() + 30
+        with self.assertRaises(TimeoutError):
+            lease.retire_service(deadline, assert_guard=guard)
+        with self.assertRaisesRegex(BridgeRejected, "initial_service_retirement_reconciliation_required"):
+            lease.retire_service(deadline, assert_guard=guard)
+        self.assertEqual(lease.observe_retired(deadline, assert_guard=guard), "d" * 64)
+        retire, observe = (call.args[0] for call in windows.powershell.call_args_list)
+        self.assertTrue(retire.endswith(" -Retire"))
+        self.assertTrue(observe.endswith(" -ObserveRetired"))
+        self.assertIn("-ExpectedServiceInstanceSha256 '" + "c" * 64 + "'", retire)
+        self.assertEqual(guard.call_count, 3)
+        unsettled = MagicMock(side_effect=TransitionBlocked("previous_scm_call_unsettled"))
+        with self.assertRaisesRegex(TransitionBlocked, "previous_scm_call_unsettled"):
+            lease.resume_retirement(deadline, assert_guard=guard, assert_settled=unsettled)
+        self.assertEqual(windows.powershell.call_count, 2)
+        windows.powershell.side_effect = None
+        windows.powershell.return_value = {"initial_service_retired": True, "retirement_sha256": "f" * 64}
+        self.assertEqual(lease.resume_retirement(deadline, assert_guard=guard, assert_settled=lambda: None), "f" * 64)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ResumeRetire"))
 
 
 class Fence:

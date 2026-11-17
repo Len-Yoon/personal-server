@@ -136,6 +136,7 @@ class WindowsActivationLease:
         self.binding_path = binding_path
         self.first_write_proof_sha256 = result['first_write_proof_sha256']
         self.service_instance_sha256 = result['service_instance_sha256']
+        self.retirement_attempted = False
 
     @contextmanager
     def guest_authority(self, deadline):
@@ -165,3 +166,41 @@ class WindowsActivationLease:
                      and all(bridge._hash(result[key]) for key in keys - {'windows_generation'}),
                      'native_activation_service_proof_unconfirmed')
         return bridge._digest(bridge._bytes(result))
+
+    def retire_service(self, deadline, *, assert_guard):
+        """Disable and stop the original SCM service instance under the cutover guard."""
+        bridge._need(not self.retirement_attempted, 'initial_service_retirement_reconciliation_required')
+        assert_guard()
+        self.retirement_attempted = True
+        result = self._service_retirement('Retire', deadline)
+        assert_guard()
+        return result
+
+    def observe_retired(self, deadline, *, assert_guard):
+        assert_guard()
+        result = self._service_retirement('ObserveRetired', min(deadline, time.monotonic() + 4))
+        assert_guard()
+        return result
+
+    def resume_retirement(self, deadline, *, assert_guard, assert_settled):
+        """Finish disabling a still-running original service after a settled attempt."""
+        assert_guard()
+        assert_settled()
+        assert_guard()
+        result = self._service_retirement('ResumeRetire', deadline)
+        assert_guard()
+        return result
+
+    def _service_retirement(self, operation, deadline):
+        custody = self.custody
+        binding = custody.binding
+        source = fixed_script('windows-ha-cutover-live-authority.ps1', custody.live_sha256, {
+            'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            'AttemptId': binding.attempt_id, 'PriorSha256': secrets.token_hex(32),
+            'ExpectedServiceInstanceSha256': self.service_instance_sha256, operation: True,
+        })
+        result = custody.windows.powershell(source, deadline)
+        bridge._need(type(result) is dict and set(result) == {'initial_service_retired', 'retirement_sha256'}
+                     and result['initial_service_retired'] is True and bridge._hash(result['retirement_sha256']),
+                     'initial_service_retirement_unconfirmed')
+        return result['retirement_sha256']

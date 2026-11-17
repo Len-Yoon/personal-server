@@ -3,7 +3,10 @@ param(
     [string]$LegacyPlanSha256,
     [string]$AttemptId,
     [string]$PriorSha256,
-    [string]$ExpectedServiceInstanceSha256
+    [string]$ExpectedServiceInstanceSha256,
+    [switch]$Retire,
+    [switch]$ObserveRetired,
+    [switch]$ResumeRetire
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -50,7 +53,25 @@ function Read-Scope([string]$Path, [string[]]$Owners) {
     } finally { $stream.Dispose() }
 }
 
+function Find-BoundService($Plan) {
+    $service = [wmi]('Win32_Service.Name="' + $Plan.service_name + '"')
+    $service.Get()
+    if ($null -eq $service -or $service.Name -cne $Plan.service_name -or
+        (Get-Digest $service.PathName) -cne $Plan.service_image_path_sha256) { throw 'live_authority_service' }
+    return $service
+}
+
+function Assert-Retired($Service) {
+    if ($Service.StartMode -cne 'Disabled' -or $Service.State -cne 'Stopped' -or $Service.ProcessId -ne 0) {
+        throw 'initial_service_retirement_unconfirmed'
+    }
+}
+
 try {
+    $retireModes = @(@($Retire,$ObserveRetired,$ResumeRetire) | Where-Object { $_.IsPresent }).Count
+    if ($retireModes -gt 1 -or ($retireModes -eq 1 -and $ExpectedServiceInstanceSha256 -cnotmatch $pattern)) {
+        throw 'initial_service_retirement_scope'
+    }
     if ($LegacyPlanSha256 -cnotmatch $pattern -or $AttemptId -cnotmatch $pattern -or $PriorSha256 -cnotmatch $pattern -or
         $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
         -not $BindingPath.EndsWith(('-' + $AttemptId + '.json'),[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
@@ -70,16 +91,32 @@ try {
         -not $plan.state_path.EndsWith('\journal\controller-state.json',[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
     $identity = [Security.Principal.NTAccount]::new('NT SERVICE',$plan.service_name).Translate([Security.Principal.SecurityIdentifier]).Value
     # Bind directly to the validated service key instead of enumerating Win32_Service.
-    $service = [wmi]('Win32_Service.Name="' + $plan.service_name + '"')
-    $service.Get()
-    if ($null -eq $service -or $service.Name -cne $plan.service_name -or $service.State -cne 'Running' -or
-        $service.ProcessId -ne $plan.service_pid -or (Get-Digest $service.PathName) -cne $plan.service_image_path_sha256) { throw 'live_authority_service' }
+    $service = Find-BoundService $plan
+    if ($ObserveRetired) {
+        Assert-Retired $service
+        [ordered]@{initial_service_retired=$true;retirement_sha256=(Get-Digest ($inputFile.raw + ':retired:' + $PriorSha256))}|ConvertTo-Json -Compress
+        return
+    }
+    if ($service.State -cne 'Running' -or $service.ProcessId -ne $plan.service_pid) { throw 'live_authority_service' }
     $process = Get-Process -Id $plan.service_pid -ErrorAction Stop
     try {
         if ($process.HasExited -or $process.SessionId -ne 0 -or
             ('"' + $process.MainModule.FileName + '"') -ine $service.PathName -or
             $process.StartTime.ToUniversalTime().Ticks.ToString() -cne $plan.service_created_ticks) {
             throw 'live_authority_service'
+        }
+        if ($Retire -or $ResumeRetire) {
+            if ($Retire -and ($service.StartMode -cne 'Manual' -or $process.HasExited -or
+                $service.ChangeStartMode('Disabled').ReturnValue -ne 0)) { throw 'initial_service_disable_unconfirmed' }
+            $service = Find-BoundService $plan
+            if ($service.StartMode -cne 'Disabled') { throw 'initial_service_disable_unconfirmed' }
+            if ($service.State -ceq 'Running' -and $service.ProcessId -eq $plan.service_pid -and -not $process.HasExited) {
+                if ($service.StopService().ReturnValue -ne 0) { throw 'initial_service_stop_unconfirmed' }
+            }
+            if (-not $process.WaitForExit(15000)) { throw 'initial_service_stop_unconfirmed' }
+            Assert-Retired (Find-BoundService $plan)
+            [ordered]@{initial_service_retired=$true;retirement_sha256=(Get-Digest ($inputFile.raw + ':retired:' + $PriorSha256))}|ConvertTo-Json -Compress
+            return
         }
         $saved = Read-Scope $plan.state_path ($admins + $identity)
         $record = ConvertFrom-Json -InputObject $saved.raw
