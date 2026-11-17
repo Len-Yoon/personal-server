@@ -8,6 +8,7 @@ param(
     [string]$TransitionBoundarySha256,
     [switch]$Retire,
     [switch]$ObserveRetired,
+    [switch]$ReadPriorServiceArgs,
     [switch]$ResumeRetire,
     [switch]$ReadClosureReceipt,
     [switch]$ReadRejoinReceipt,
@@ -306,21 +307,23 @@ function Read-RejoinReceipt {
 
 try {
     if ($ReadRejoinReceipt) {
-        if ($ReadClosureReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
+        if ($ReadPriorServiceArgs -or $ReadClosureReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
             throw 'transition_rejoin_receipt_invalid'
         }
         Read-RejoinReceipt
         return
     }
     if ($ReadClosureReceipt) {
-        if ($Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
+        if ($ReadPriorServiceArgs -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
             throw 'transition_closure_receipt_invalid'
         }
         Read-ClosureReceipt
         return
     }
     $retireModes = @(@($Retire,$ObserveRetired,$ResumeRetire) | Where-Object { $_.IsPresent }).Count
-    if ($retireModes -gt 1 -or ($retireModes -eq 1 -and $ExpectedServiceInstanceSha256 -cnotmatch $pattern)) {
+    if (($ReadPriorServiceArgs -and ($retireModes -ne 0 -or $TransitionHandoffSha256 -or
+            $TransitionBoundarySha256 -or $ExpectedServiceInstanceSha256 -cnotmatch $pattern)) -or
+        $retireModes -gt 1 -or ($retireModes -eq 1 -and $ExpectedServiceInstanceSha256 -cnotmatch $pattern)) {
         throw 'initial_service_retirement_scope'
     }
     if ($TransitionHandoffSha256 -or $TransitionBoundarySha256) {
@@ -349,6 +352,31 @@ try {
     $identity = [Security.Principal.NTAccount]::new('NT SERVICE',$plan.service_name).Translate([Security.Principal.SecurityIdentifier]).Value
     # Bind directly to the validated service key instead of enumerating Win32_Service.
     $service = Find-BoundService $plan
+    if ($ReadPriorServiceArgs) {
+        if ($service.State -cne 'Stopped' -or $service.ProcessId -ne 0 -or
+            $service.StartMode -cnotin @('Manual','Disabled') -or $service.ServiceType -cne 'Own Process' -or
+            $service.DesktopInteract -or $service.StartName -ine ('NT SERVICE\' + $plan.service_name) -or
+            $service.PathName -cnotmatch '\A"[A-Za-z]:\\[A-Za-z0-9_.\\-]+\\windows-service-host\.exe"\z') {
+            throw 'live_authority_prior_args'
+        }
+        $directory = [IO.Path]::GetDirectoryName($service.PathName.Trim('"'))
+        $argsPath = Join-Path $directory 'service.args'
+        $ClosureServiceSid = $identity
+        $savedArgs = Read-Scope $argsPath ($admins + @($identity)) -Immutable
+        $lines = $savedArgs.raw.Split([char]10)
+        if ($lines.Count -ne 14 -or $lines[-1] -cne '' -or $lines[0] -cne 'format=enforced-service-v1' -or
+            @($lines | Where-Object { $_ -cmatch '\A(?:service_name|service_sid|plan_sha256|mode)=' }).Count -ne 4 -or
+            ('service_name=' + $plan.service_name) -cnotin $lines -or ('service_sid=' + $identity) -cnotin $lines -or
+            ('plan_sha256=' + $plan.controller_plan_sha256) -cnotin $lines -or 'mode=serve' -cnotin $lines) {
+            throw 'live_authority_prior_args'
+        }
+        $confirmed = Find-BoundService $plan
+        if ($confirmed.State -cne 'Stopped' -or $confirmed.ProcessId -ne 0 -or
+            $confirmed.StartMode -cne $service.StartMode) { throw 'live_authority_prior_args' }
+        [ordered]@{prior_args_sha256=(Get-Digest $savedArgs.raw);
+            service_instance_sha256=$ExpectedServiceInstanceSha256}|ConvertTo-Json -Compress
+        return
+    }
     if ($ObserveRetired) {
         Assert-Retired $service
         [ordered]@{initial_service_retired=$true;retirement_sha256=(Get-Digest ($inputFile.raw + ':retired:' + $PriorSha256))}|ConvertTo-Json -Compress
