@@ -65,11 +65,12 @@ class TransitionIngressTests(unittest.TestCase):
                                                                         "authority_kind": "installed-runtime"}),
                            "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
+            preflight_replacement=MagicMock(return_value=True),
+            attach_replacement_network=MagicMock(side_effect=lambda *_a, **_kw: steps.append("attach") or True),
             guests=SimpleNamespace(verify_prepared_transition_target=MagicMock(return_value=True),
-                                   preflight_replacement_standby=MagicMock(return_value=True),
                                    publish_generation_handoff=MagicMock(return_value="6"*64),
                                    activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
-            target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec), sequence=1),
+            target_request=SimpleNamespace(binding=MagicMock(**execution.spec, **{"fields.return_value":execution.spec}), sequence=1),
         )
         stage = "7"*64
         handoff = transition_ingress.bridge.Request(
@@ -78,6 +79,7 @@ class TransitionIngressTests(unittest.TestCase):
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
+        check_stage = MagicMock(side_effect=lambda _: steps.append("fence-proof") or stage)
         prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
         def switch_routes(*_args, **kwargs):
             self.assertEqual(kwargs["verify_guest"](generation, "target"), "9"*64)
@@ -92,8 +94,10 @@ class TransitionIngressTests(unittest.TestCase):
                           side_effect=lambda *_a, **_kw: steps.append("stage") or prepared) as stage_service, \
                 patch.object(transition_ingress, "prepare_staged_transition_service",
                              side_effect=lambda *_a, **_kw: steps.append("verify") or prepared), \
+                patch.object(transition_ingress.caddy, "_write"), \
+                patch.object(transition_ingress.caddy, "_sync_dir"), \
                 patch.object(transition_ingress, "_bind_rejoin_controller"), \
-                patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, 8, MagicMock(), MagicMock())), \
+                patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, 8, check_stage, MagicMock())), \
                 patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
                 patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
@@ -105,12 +109,12 @@ class TransitionIngressTests(unittest.TestCase):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             args["guests"].verify_prepared_transition_target.return_value = True
-            args["guests"].preflight_replacement_standby.return_value = False
+            args["preflight_replacement"].return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "replacement_scope_invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             stage_service.assert_not_called()
-            args["guests"].preflight_replacement_standby.return_value = True
+            args["preflight_replacement"].return_value = True
             validate_approval.side_effect = TransitionBlocked("approval invalid")
             with self.assertRaisesRegex(TransitionBlocked, "approval invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)
@@ -125,10 +129,21 @@ class TransitionIngressTests(unittest.TestCase):
             switch.assert_not_called()
             steps.clear()
             stage_service.side_effect = lambda *_a, **_kw: steps.append("stage") or prepared
+            attach = args["attach_replacement_network"]
+            attached = attach.side_effect
+            attach.side_effect = None
+            attach.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "fence-proof"])
+            switch.assert_not_called()
+            self.assertIs(attach.call_args.kwargs["assert_fenced"], check_stage)
+            attach.side_effect = attached
+            steps.clear()
             with self.assertRaisesRegex(RuntimeError, "guest failed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             switch.assert_not_called()
-            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest"])
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "fence-proof", "attach", "fence-proof", "rejoin", "controller", "lease", "guest"])
             steps.clear()
             args["guests"].activate_generation = lambda *_a, **_kw: steps.append("guest") or transition_ingress.bridge.Receipt("PASS", "5"*64)
             outcome = transition_ingress.switch_with_observer(*routes, **args)
@@ -137,7 +152,7 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(verified.verb, transition_ingress.bridge.GUEST_VERIFY_GENERATION)
             self.assertEqual(verified.sequence, 9)
             self.assertEqual(verified.args["activation_receipt_sha256"], outcome.activation_sha256)
-            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "fence-proof", "attach", "fence-proof", "rejoin", "controller", "lease", "guest", "ingress"])
 
     def test_preparing_generation_refreshes_closed_windows_proof_per_boundary(self):
         from ha_control.native_guest_activation import ActivationPins
@@ -301,6 +316,17 @@ class TransitionIngressTests(unittest.TestCase):
                 starter.restore_rejoin_args.assert_called_once()
             else:
                 starter.restore_rejoin_args.assert_not_called()
+
+    def test_network_attachment_resume_requires_recorded_windows_stage(self):
+        starter = MagicMock()
+        starter.rejoin_stage_intent_present.return_value = False
+        with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+            transition_ingress._windows_rejoin(
+                starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90,
+                resume=True, stage_required=True,
+            )
+        starter.restore_rejoin_args.assert_not_called()
+        starter.run_rejoin.assert_not_called()
 
     def test_windows_rejoin_rejects_changed_source_wal_on_either_read(self):
         starter = MagicMock()

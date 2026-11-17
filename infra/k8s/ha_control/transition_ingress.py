@@ -193,7 +193,7 @@ def _bind_rejoin_controller(execution, controller, parameters, *, resume):
         caddy._sync_dir(directory)
 
 
-def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadline, resume):
+def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadline, resume, stage_required=False):
     """Use one pinned plan through staging and every fresh read-only check."""
     def run(mode, request_id, limit):
         return starter.run_rejoin(controller, parameters, mode, request_id,
@@ -207,6 +207,7 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
         starter.restore_rejoin_args(controller, parameters, "stage-rejoin", stage_id, deadline)
         staged = observe("observe-rejoin-stage", deadline)
     else:
+        caddy._need(not stage_required, "transition_replacement_network_unconfirmed")
         init_id = secrets.token_hex(16)
         if resume:
             starter.restore_rejoin_args(controller, parameters, "initialize", init_id, deadline)
@@ -295,12 +296,16 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed,
                          guests, target_request,
-                         replacement_manifest_sha256, generation_handoff_pins, stage_service, resume_rejoin=None,
+                         replacement_manifest_sha256, generation_handoff_pins, stage_service,
+                         preflight_replacement, attach_replacement_network, resume_rejoin=None,
                          prepare_guest_runtime=False, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
     After a lost guest response, supply fresh request sequences and nonces
     against the same binding. The recorded start intent suppresses replay.
+    Preflight uses isolated transport with the same guest boot and host key.
+    The network adapter must verify or adopt an already completed attachment
+    on resume, without connecting the fenced VM.
     """
     _route_scope(previous, relay, generation, target, route_pin, execution.spec["plan_sha256"], execution.spec["attempt_id"])
     raw = observer_setup["plan_raw"]
@@ -310,6 +315,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
                 and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
     caddy._need(bridge._hash(replacement_manifest_sha256) and callable(generation_handoff_pins)
+                and callable(preflight_replacement) and callable(attach_replacement_network)
                 and type(prepare_guest_runtime) is bool
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
@@ -347,8 +353,10 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         observer_binding = None
         deadline = min(observer_setup["deadline"], controller_setup["deadline"])
         start_intent = execution.directory / "replacement-start-intent.json"
-        if resume_rejoin is None or not os.path.lexists(start_intent):
-            caddy._need(guests.preflight_replacement_standby(preflight, deadline) is True,
+        network_intent = execution.directory / "replacement-network-intent.json"
+        attachment_pending = resume_rejoin is not None and os.path.lexists(network_intent)
+        if not attachment_pending and (resume_rejoin is None or not os.path.lexists(start_intent)):
+            caddy._need(preflight_replacement(preflight, deadline) is True,
                         "transition_replacement_scope_invalid")
         if resume_rejoin is None:
             binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
@@ -395,7 +403,26 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         stage, replay_floor, check_stage, check_sync = _windows_rejoin(
             controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],
             root=controller_setup["root"], deadline=deadline, resume=resume_rejoin is not None,
+            stage_required=attachment_pending,
         )
+        network_error = "transition_replacement_network_unconfirmed"
+        caddy._need(check_stage(deadline) == stage, network_error)
+        network_scope = encoded({
+            "binding": preflight.binding.fields(), "replacement_vm": replacement_vm,
+            "old_vm_id": controller_setup["old_vm_id"], "rejoin_stage_sha256": stage,
+            "bootstrap_manifest_sha256": replacement_manifest_sha256,
+        })
+        if attachment_pending:
+            caddy._need(caddy._read(network_intent) == network_scope, network_error)
+        else:
+            caddy._write(network_intent, network_scope, 0o400)
+            caddy._sync_dir(execution.directory)
+        caddy._need(attach_replacement_network(
+            replacement_vm, controller_setup["old_vm_id"], preflight, stage, deadline, assert_fenced=check_stage,
+        ) is True, network_error)
+        caddy._need(check_stage(deadline) == stage, network_error)
+        if attachment_pending and not os.path.lexists(start_intent):
+            caddy._need(guests.preflight_replacement_standby(preflight, deadline) is True, network_error)
         args = {"bootstrap_manifest_sha256": replacement_manifest_sha256, "rejoin_stage_sha256": stage}
         replacement_start = replace(preflight, verb=bridge.GUEST_START_REPLACEMENT, sequence=preflight.sequence + 2,
                                     nonce=secrets.token_hex(32), args=args)
