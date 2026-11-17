@@ -1,8 +1,9 @@
-"""Read back the running A containers, their mTLS routes, and current PostgreSQL lease."""
+"""Read back running primary containers, their mTLS routes and PostgreSQL lease."""
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import partial
 import http.client
 import os
 from pathlib import Path
@@ -48,7 +49,8 @@ SELECT json_build_object(
         FROM ha_effects.binding),
     'peers', (SELECT COALESCE(json_agg(json_build_array(host(r.client_addr),r.replay_lsn::text)), '[]'::json)
         FROM pg_stat_replication r JOIN pg_stat_ssl tls USING (pid)
-        WHERE r.application_name='ha_b' AND r.usename='ha_repl' AND r.state='streaming'
+        WHERE r.application_name='ha_' || lower((SELECT partner FROM ha.control WHERE singleton=1))
+          AND r.usename='ha_repl' AND r.state='streaming'
           AND r.sync_state='sync' AND tls.ssl AND r.replay_lsn IS NOT NULL))
 FROM pg_control_system(), sampled
 """
@@ -68,15 +70,24 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres):
+def _lease(pins, postgres, generation=None):
+    if generation is None:
+        primary, partner, epoch, revision, timeline = "A", "B", 1, 2, 1
+    else:
+        generation.validate()
+        primary, partner = generation.primary, generation.partner
+        epoch, revision, timeline = generation.epoch, generation.revision, generation.timeline
+        _need(pins.node == primary, "guest_live_pg_binding_unconfirmed")
     observed = restore._pg(postgres, OPEN_STATE)
-    identity = ["postgres", "ha", "ha_A", False, pins.system_id, "on", "remote_apply", "FIRST1(ha_b)", "on", "on", 1]
-    authority = [pins.cluster, 1, 2, "A", "B", 1, ["A"], "A", "AS", True, True]
+    identity = ["postgres", "ha", "ha_" + primary, False, pins.system_id,
+                "on", "remote_apply", f"FIRST1(ha_{partner.lower()})", "on", "on", timeline]
+    authority = [pins.cluster, epoch, revision, primary, partner, timeline, [primary], primary, "AS", True, True]
     binding = [[pins.cluster, pins.system_id, pins.release["source_commit"], pins.plan_sha256, runtime.config.BROKER_ROLE]]
     _need(type(observed) is dict and set(observed) == {"identity", "authority", "lease_clock", "binding", "peers"}
           and _matches(observed["identity"], identity) and _matches(observed["authority"], authority)
           and _matches(observed["binding"], binding), "guest_live_pg_binding_unconfirmed")
-    peer, = observed["peers"]
+    _need(type(observed["peers"]) is list and len(observed["peers"]) == 1, "guest_live_pg_peer_unconfirmed")
+    peer = observed["peers"][0]
     _need(type(peer) is list and len(peer) == 2 and peer[0] == postgres.peer_ipv4,
           "guest_live_pg_peer_unconfirmed")
     replay = restore._lsn(peer[1])
@@ -100,7 +111,7 @@ def _installed_authorities(digests):
           "guest_live_installed_authority_changed")
 
 
-def _receipts(pins, activation, stage, activation_receipt_sha256):
+def _receipts(pins, activation, stage, activation_receipt_sha256, generation=None):
     identity = runtime._runtime_identity(pins)
     _need(runtime._read(stage / "runtime-intent.json", 0, {0o600}) == runtime._json_bytes(runtime._runtime_intent(pins)),
           "guest_live_preparation_intent_unconfirmed")
@@ -125,6 +136,8 @@ def _receipts(pins, activation, stage, activation_receipt_sha256):
     intent = parse(intent_raw)
     files = result["authority_files"]
     common = {"schema_version": 1, **identity, **asdict(activation), "authority_files": files, "containers": containers}
+    if generation is not None:
+        common["serving_generation"] = asdict(generation)
     expected_intent = {**common, "status": "INTENT", "activation_order": order, "lease_sha256": intent["lease_sha256"]}
     expected_done = {**common, "status": "STARTED", "guest_intent_sha256": runtime._digest(intent_raw),
                      "lease_sha256": result["lease_sha256"], "automatic_retry_permitted": False}
@@ -138,12 +151,13 @@ def _receipts(pins, activation, stage, activation_receipt_sha256):
 def _layout(pins, postgres, stage, prepared):
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_live_boot_changed")
     identity = parse(runtime._read(runtime.INSTALLATION, 0, {0o400, 0o600}))
-    _need(identity["node"] == "A" and identity["installation_id"] == pins.installation_id,
+    _need(identity["node"] == pins.node and identity["installation_id"] == pins.installation_id,
           "guest_live_installation_changed")
     raw = runtime._read(stage / "guest-spec.json", 0, {0o400, 0o600})
     _need(runtime._digest(raw) == pins.spec_sha256, "guest_live_spec_unbound")
     spec = parse(raw)
-    _need(spec["node"] == "A" and spec["guest_ip"] == spec["pg_a"] and spec["pg_b"] == postgres.peer_ipv4
+    primary_key, peer_key = ("pg_a", "pg_b") if pins.node == "A" else ("pg_b", "pg_a")
+    _need(spec["node"] == pins.node and spec["guest_ip"] == spec[primary_key] and spec[peer_key] == postgres.peer_ipv4
           and spec["installation_id"] == pins.installation_id and spec["source_commit"] == pins.release["source_commit"],
           "guest_live_spec_unbound")
     renderer = runtime._renderer(pins)
@@ -209,7 +223,7 @@ def _tls(prepared):
     return context, leaf
 
 
-def _probe(context, leaf, ip, service, deadline):
+def _probe(context, leaf, ip, service, deadline, *, expected_node="A"):
     host, path = service + ".ha.internal", PATHS[service]
     boundary = "connect"
 
@@ -247,27 +261,48 @@ def _probe(context, leaf, ip, service, deadline):
         _need(content_type == "application/json" and type(data) is dict and data.get("service") == service
               and data.get("status") == ("ready" if path == "/ready" else "ok"), "guest_live_route_unready")
         if service in {"portal-web", "system-agent"}:
-            _need(data.get("node_id") == "A", "guest_live_route_wrong_node")
+            _need(data.get("node_id") == expected_node, "guest_live_route_wrong_node")
         if service == "system-agent":
-            _need(node_header == ["A"], "guest_live_route_wrong_node")
+            _need(node_header == [expected_node], "guest_live_route_wrong_node")
     return runtime._digest(body)
 
 
-def _probe_route(context, leaf, ip, service, deadline):
+def _probe_route(context, leaf, ip, service, deadline, *, expected_node=None):
+    probe = _probe if expected_node is None else partial(_probe, expected_node=expected_node)
     try:
-        return _probe(context, leaf, ip, service, deadline)
+        return probe(context, leaf, ip, service, deadline)
     except RouteTimeout:
         if deadline - time.monotonic() < SOCKET_SECONDS:
             raise
     # Retry only this read-only route, with fresh TLS and the same live
     # observation deadline. Response, identity and lease rejections propagate.
-    return _probe(context, leaf, ip, service, deadline)
+    return probe(context, leaf, ip, service, deadline)
 
 
 def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha256, authority_sha256,
                    windows_generation, windows_generation_sha256, live_lease_sha256, live_authority_sha256):
     """Return a digest only after fresh A runtime, mTLS and database observations."""
     _need(os.geteuid() == 0 and pins.node == "A", "guest_live_a_root_required")
+    return _observe_live(pins, activation, postgres, stage, activation_receipt_sha256=activation_receipt_sha256,
+                         authority_sha256=authority_sha256, windows_generation=windows_generation,
+                         windows_generation_sha256=windows_generation_sha256, live_lease_sha256=live_lease_sha256,
+                         live_authority_sha256=live_authority_sha256)
+
+
+def observe_live_generation(pins, activation, postgres, stage, generation, **authority):
+    from .native_guest_activation import ServingGeneration
+
+    _need(type(generation) is ServingGeneration, "guest_live_observation_unbound")
+    generation.validate()
+    _need(os.geteuid() == 0 and pins.node == generation.primary and generation.epoch > 1
+          and type(authority.get("windows_generation")) is int and authority["windows_generation"] == generation.epoch,
+          "guest_live_observation_unbound")
+    return _observe_live(pins, activation, postgres, stage, generation=generation, **authority)
+
+
+def _observe_live(pins, activation, postgres, stage, *, activation_receipt_sha256, authority_sha256,
+                  windows_generation, windows_generation_sha256, live_lease_sha256, live_authority_sha256,
+                  generation=None):
     pins.validate()
     activation.validate()
     postgres.validate()
@@ -283,10 +318,11 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
     started = time.monotonic()
     deadline = started + LIVE_SECONDS
     phase = service = None
+    probe = _probe_route if generation is None else partial(_probe_route, expected_node=generation.primary)
     try:
         runtime._directory(stage, 0)
         phase = "activation_receipts"
-        prepared, files, activated_at = _receipts(pins, activation, stage, activation_receipt_sha256)
+        prepared, files, activated_at = _receipts(pins, activation, stage, activation_receipt_sha256, generation)
         phase = "runtime_layout"
         ip, layouts, images = _layout(pins, postgres, stage, prepared)
         phase = "containers_before"
@@ -294,14 +330,14 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         phase = "ingress_tls"
         context, leaf = _tls(prepared)
         phase = "postgres_before"
-        first, sampled, expires, replay = _lease(pins, postgres)
+        first, sampled, expires, replay = _lease(pins, postgres, generation)
         phase = "application_routes"
         # Portal readiness queries several backends through the same guest.
         # Keep its request out of the burst from the remaining ingress probes.
         service = PORTAL_SERVICE
-        routes = {service: _probe_route(context, leaf, ip, service, deadline)}
+        routes = {service: probe(context, leaf, ip, service, deadline)}
         with ThreadPoolExecutor(max_workers=len(PATHS) - 1) as pool:
-            pending = {name: pool.submit(_probe_route, context, leaf, ip, name, deadline)
+            pending = {name: pool.submit(probe, context, leaf, ip, name, deadline)
                        for name in PATHS if name != PORTAL_SERVICE}
             for service, task in pending.items():
                 routes[service] = task.result()
@@ -312,7 +348,7 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         phase = "containers_after"
         after = _running(pins, postgres, prepared, layouts, images, activated_at)
         phase = "postgres_after"
-        last, sampled_after, expires_after, replay_after = _lease(pins, postgres)
+        last, sampled_after, expires_after, replay_after = _lease(pins, postgres, generation)
         phase = "freshness"
         _need(before == after and sampled_after >= sampled and expires_after >= expires and replay_after >= replay
               and time.monotonic() < deadline, "guest_live_observation_stale")

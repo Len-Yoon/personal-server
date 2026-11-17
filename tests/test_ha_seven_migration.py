@@ -123,6 +123,35 @@ class NativeGuestActivationTests(unittest.TestCase):
             self.assertEqual(json.loads(raw)["reason"], expected)
             self.assertEqual(json.loads(raw)["boundary"], "activation_intent")
 
+    def test_failover_activation_requires_new_generation_and_live_old_writer_fence(self):
+        activation = native_guest_activation
+        pins = activation.ActivationPins(*(character * 64 for character in "abcdef"))
+        generation = activation.ServingGeneration("B", 2, 3, 7)
+        now = datetime.now(timezone.utc)
+        facts = dict(transition_postcommit_verified=True, previous_primary_fenced=True, epoch=2, timeline=3,
+                     revision=7, primary="B", partner="A", coordinator_intent_durable=True, writes_open=True,
+                     legacy_writers_closed=True, standby_runtime_closed=True, runtime_mutations_excluded=True)
+
+        def verify(overrides):
+            def proof(challenge, boundary):
+                return {**activation.asdict(pins), **facts, **overrides, "challenge": challenge, "boundary": boundary,
+                        "lease_sha256": "f" * 64, "observed_at": now.isoformat().replace("+00:00", "Z"),
+                        "expires_at": (now + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")}
+            return activation._check_lease(None, pins, proof, "start:ha-broker", generation)
+
+        with patch.object(activation.runtime, "_runtime_identity", return_value={}):
+            self.assertEqual(verify({}), "f" * 64)
+            for wrong in ({"previous_primary_fenced": False}, {"primary": "A"}, {"epoch": 1},
+                          {"timeline": 2}, {"revision": 6}, {"transition_postcommit_verified": False}):
+                with self.subTest(wrong=wrong), self.assertRaisesRegex(
+                        TransitionBlocked, "guest_activation_lease_unconfirmed"):
+                    verify(wrong)
+        with patch.object(activation.os, "geteuid", return_value=0), patch.object(activation, "_activate") as start:
+            with self.assertRaisesRegex(TransitionBlocked, "guest_activation_generation_scope"):
+                activation.activate_prepared_generation(SimpleNamespace(node="A"), pins, Path("/unused"),
+                                                        generation, assert_lease=MagicMock())
+            start.assert_not_called()
+
     def test_readiness_blocks_next_application_start(self):
         activation = native_guest_activation
         runtime = activation.runtime
@@ -137,7 +166,8 @@ class NativeGuestActivationTests(unittest.TestCase):
         def start(*args, **kwargs):
             events.append(args)
 
-        def ready(_context, _leaf, _address, role):
+        def ready(_context, _leaf, _address, role, *, expected_node):
+            self.assertEqual(expected_node, "A")
             events.append(("ready", role))
             if role == "car-care-worker":
                 raise TransitionBlocked("guest_activation_app_unready")
@@ -233,6 +263,79 @@ class NativeGuestLiveTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "^guest_live_route_headers_timeout$"):
                 live._probe(context, live.runtime._digest(b"cert"), "192.0.2.10", "portal-web",
                             live.time.monotonic() + live.LIVE_SECONDS)
+
+    def test_new_primary_route_accepts_only_its_node_markers(self):
+        live = native_guest_live
+        context = MagicMock()
+        conn = context.wrap_socket.return_value.__enter__.return_value
+        conn.getpeercert.return_value = b"cert"
+        with patch.object(live.socket, "create_connection"), patch.object(live.http.client, "HTTPResponse") as http:
+            response = http.return_value.__enter__.return_value
+            response.status = 200
+            response.headers.get_content_type.return_value = "application/json"
+            response.read.return_value = b'{"node_id":"B","service":"system-agent","status":"ok"}'
+            response.headers.get_all.return_value = ["B"]
+            args = (context, live.runtime._digest(b"cert"), "192.0.2.11", "system-agent",
+                    live.time.monotonic() + live.LIVE_SECONDS)
+            self.assertEqual(live._probe(*args, expected_node="B"), live.runtime._digest(response.read.return_value))
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_route_wrong_node"):
+                live._probe(*args, expected_node="A")
+            response.headers.get_all.return_value = ["A"]
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_route_wrong_node"):
+                live._probe(*args, expected_node="B")
+
+    def test_new_primary_requires_synchronous_peer_and_exact_epoch(self):
+        live = native_guest_live
+        generation = native_guest_activation.ServingGeneration("B", 2, 3, 7)
+        pins = SimpleNamespace(node="B", system_id="123", cluster="fixture",
+                               release={"source_commit": "a" * 40}, plan_sha256="b" * 64)
+        postgres = SimpleNamespace(peer_ipv4="192.0.2.10")
+        sampled = datetime.now(timezone.utc)
+        row = {
+            "identity": ["postgres", "ha", "ha_B", False, "123", "on", "remote_apply",
+                         "FIRST1(ha_a)", "on", "on", 3],
+            "authority": ["fixture", 2, 7, "B", "A", 3, ["B"], "B", "AS", True, True],
+            "lease_clock": [sampled.isoformat(), (sampled + timedelta(seconds=5)).isoformat()],
+            "binding": [["fixture", "123", "a" * 40, "b" * 64, live.runtime.config.BROKER_ROLE]],
+            "peers": [["192.0.2.10", "0/20"]],
+        }
+        with patch.object(live.restore, "_pg", return_value=row):
+            self.assertEqual(live._lease(pins, postgres, generation)[-1], 32)
+            row["authority"][1] = 1
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
+                live._lease(pins, postgres, generation)
+            row["authority"][1] = 2
+            row["peers"] = []
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_peer_unconfirmed"):
+                live._lease(pins, postgres, generation)
+
+    def test_live_generation_b_binds_all_routes_receipts_and_windows_epoch(self):
+        live = native_guest_live
+        pin = "a" * 64
+        generation = native_guest_activation.ServingGeneration("B", 2, 2, 3)
+        shared = dict(boot_sha256=pin, installation_id=pin, system_id="1", plan_sha256=pin,
+                      manifest_sha256=pin, cluster="fixture", validate=lambda: None)
+        pins = SimpleNamespace(**shared, node="B", release={"source_commit": pin})
+        postgres = SimpleNamespace(**shared, source_commit=pin)
+        args = (pins, SimpleNamespace(validate=lambda: None), postgres, Path("/unused"), generation)
+        authority = dict(activation_receipt_sha256=pin, authority_sha256=pin, windows_generation=2,
+                         windows_generation_sha256=pin, live_lease_sha256=pin, live_authority_sha256=pin)
+        with patch.object(live.os, "geteuid", return_value=0), patch.object(live.runtime, "_directory"), \
+                patch.object(live.runtime, "_runtime_identity", return_value={}), \
+                patch.object(live, "_receipts", return_value=(None, {}, None)) as receipts, \
+                patch.object(live, "_layout", return_value=("192.0.2.11", {}, {})), \
+                patch.object(live, "_running", return_value={}), patch.object(live, "_tls", return_value=(None, pin)), \
+                patch.object(live, "_installed_authorities"), \
+                patch.object(live, "_lease", return_value=(pin, 0, 1, 0)) as lease, \
+                patch.object(live, "_probe", return_value=pin) as probe:
+            self.assertRegex(live.observe_live_generation(*args, **authority), r"^[0-9a-f]{64}$")
+            self.assertEqual(receipts.call_args.args[-1], generation)
+            self.assertEqual(lease.call_count, 2)
+            self.assertCountEqual([call.args[3] for call in probe.call_args_list], live.PATHS)
+            self.assertTrue(all(call.kwargs == {"expected_node": "B"} for call in probe.call_args_list))
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_observation_unbound"):
+                live.observe_live_generation(*args, **{**authority, "windows_generation": 1})
+            self.assertEqual(lease.call_count, 2)
 
     def test_only_timeout_with_time_left_retries_same_authenticated_route_once(self):
         live = native_guest_live
