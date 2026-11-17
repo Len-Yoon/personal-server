@@ -1,6 +1,7 @@
 # Prepare the initial Windows observer and one installed controller approval.
 param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
-      [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig)
+      [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig,
+      [switch]$ObserveTransitionObserverConfig)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -221,18 +222,32 @@ try {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)
-    if ($PublishTransitionObserverConfig) {
-        if (-not $Go -or $IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) { throw 'initial_stage_observer' }
+    if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig) {
+        if (-not $Go -or $PublishTransitionObserverConfig.IsPresent -eq $ObserveTransitionObserverConfig.IsPresent) {
+            throw 'initial_stage_observer'
+        }
         Assert-Pin $RuntimeSha256
         Assert-ReservedLeaf $InputPath $root ('transition-observer-config-' + $InputSha256 + '.json')
-        $raw = [Convert]::FromBase64String($IntentBase64)
-        if ($raw.Length -gt 4096 -or (Digest $raw) -cne $InputSha256) { throw 'initial_stage_observer' }
+        if ($ObserveTransitionObserverConfig) {
+            if ($IntentBase64 -cne '') { throw 'initial_stage_observer' }
+            $raw = Read-Protected $InputPath $InputSha256 4096
+            if ((Get-Acl -LiteralPath $InputPath).GetSecurityDescriptorSddlForm($sections) -cne
+                (File-Access).GetSecurityDescriptorSddlForm($sections)) { throw 'initial_stage_published_acl' }
+        } else {
+            if ($IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) { throw 'initial_stage_observer' }
+            $raw = [Convert]::FromBase64String($IntentBase64)
+            if ($raw.Length -gt 4096 -or (Digest $raw) -cne $InputSha256) { throw 'initial_stage_observer' }
+        }
         $config = ConvertFrom-Json -InputObject ($encoding.GetString($raw))
         Assert-Pin $config.vm_b_installation_id
         if ($config.source_manifest_sha256 -cne $ExpectedSourceManifestSha256 -or
             $config.runtime_sha256 -cne $RuntimeSha256) { throw 'initial_stage_observer' }
         Assert-ReservedLeaf $config.vm_observer_path $root
         $null = Read-Protected $config.vm_observer_path $config.vm_observer_sha256 65536
+        if ($ObserveTransitionObserverConfig) {
+            [ordered]@{observed_transition_observer_config_sha256=$InputSha256} | ConvertTo-Json -Compress
+            return
+        }
         Assert-Absent $InputPath
         [ordered]@{transition_observer_config_sha256=(Write-New $InputPath $raw)} | ConvertTo-Json -Compress
         return

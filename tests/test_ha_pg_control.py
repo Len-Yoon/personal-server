@@ -41,13 +41,31 @@ class TransitionObserverPublicationTests(unittest.TestCase):
         self.assertEqual(publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, 40), path)
         source, deadline = windows.powershell.call_args.args
         self.assertIn("-InputPath '" + path + "'", source)
-        self.assertIn("-PublishTransitionObserverConfig -Go", source)
+        self.assertIn(" -Go ", source)
+        self.assertTrue(source.endswith(" -PublishTransitionObserverConfig"))
         self.assertEqual(deadline, 40)
         with self.assertRaisesRegex(BridgeRejected, "config_unconfirmed"):
             publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, 40)
         with self.assertRaisesRegex(BridgeRejected, "config_invalid"):
             publish_transition_observer_config(windows, root, stage_pin, binding | {"callback_config": b"changed"}, "b"*64, 40)
         self.assertEqual(windows.powershell.call_count, 2)
+
+        deadline = time.monotonic() + 40
+        windows.powershell.reset_mock()
+        observed = {"observed_transition_observer_config_sha256": pin}
+        windows.powershell.side_effect = [TimeoutError("missing receipt"), observed, observed]
+        self.assertEqual(publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, deadline), path)
+        self.assertEqual(publish_transition_observer_config(
+            windows, root, stage_pin, binding, "b"*64, deadline, observe_only=True,
+        ), path)
+        publication, observed_after_timeout, observed_only = (
+            call.args[0] for call in windows.powershell.call_args_list
+        )
+        self.assertIn("-PublishTransitionObserverConfig", publication)
+        self.assertEqual(observed_after_timeout, observed_only)
+        self.assertIn("-ObserveTransitionObserverConfig", observed_only)
+        self.assertNotIn("-IntentBase64", observed_only)
+        self.assertEqual(windows.powershell.call_count, 3)
 
 
 class InitialServiceRetirementTests(unittest.TestCase):

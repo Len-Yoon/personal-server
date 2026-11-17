@@ -4,6 +4,7 @@ import base64
 from contextlib import contextmanager
 import re
 import secrets
+from subprocess import TimeoutExpired
 import time
 
 from . import native_stdio_bridge as bridge
@@ -206,7 +207,8 @@ class WindowsActivationLease:
         return result['retirement_sha256']
 
 
-def publish_transition_observer_config(windows, root, stage_sha256, binding, manifest_sha256, deadline):
+def publish_transition_observer_config(windows, root, stage_sha256, binding, manifest_sha256, deadline, *,
+                                       observe_only=False):
     """Publish the exact callback config through the existing protected Windows stage."""
     raw = binding["callback_config"]
     pin = binding["callback_config_sha256"]
@@ -217,13 +219,26 @@ def publish_transition_observer_config(windows, root, stage_sha256, binding, man
                      r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root),
                  "native_transition_observer_config_invalid")
     path = root + rf"\transition-observer-config-{pin}.json"
-    source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
-        "InputPath": path, "InputSha256": pin, "ExpectedSourceManifestSha256": manifest_sha256,
-        "RuntimeSha256": runtime, "IntentBase64": base64.b64encode(raw).decode("ascii"),
-        "PublishTransitionObserverConfig": True, "Go": True,
-    })
+    parameters = {"InputPath": path, "InputSha256": pin, "ExpectedSourceManifestSha256": manifest_sha256,
+                  "RuntimeSha256": runtime, "Go": True}
+    script = "windows-ha-stage-initial-activation.ps1"
+    if not observe_only:
+        source = fixed_script(script, stage_sha256, parameters | {
+            "IntentBase64": base64.b64encode(raw).decode("ascii"), "PublishTransitionObserverConfig": True,
+        })
+        try:
+            result = windows.powershell(source, deadline)
+        except (bridge.BridgeRejected, TimeoutExpired, OSError):
+            pass  # The remote write may have completed. Only observe it.
+        else:
+            bridge._need(result == {"transition_observer_config_sha256": pin},
+                         "native_transition_observer_config_unconfirmed")
+            return path
+
+    bridge._remaining(deadline)
+    source = fixed_script(script, stage_sha256, parameters | {"ObserveTransitionObserverConfig": True})
     result = windows.powershell(source, deadline)
-    bridge._need(result == {"transition_observer_config_sha256": pin},
+    bridge._need(result == {"observed_transition_observer_config_sha256": pin},
                  "native_transition_observer_config_unconfirmed")
     return path
 
