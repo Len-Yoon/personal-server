@@ -125,6 +125,14 @@ function Read-TransitionAuthority([string[]]$Admins) {
         Assert-TransitionOldVm $plan
         $saved = Read-Scope $plan.state_path ($Admins + $identity)
         $record = ConvertFrom-Json -InputObject $saved.raw
+        if ($record.target -cne $plan.target -or $record.old -cnotin @('A','B') -or
+            $record.old -ceq $record.target -or $record.generation -ne $plan.generation) { throw 'transition_authority_lease' }
+        if ($TransitionBoundarySha256 -ceq (Get-Digest 'controller-ready') -and
+            -not $record.PSObject.Properties['lease_heartbeat'] -and
+            $record.phase -cin @('rejoining','validating','ready') -and -not $process.HasExited) {
+            [ordered]@{transition_authority_pending=$true}|ConvertTo-Json -Compress
+            return
+        }
         $stamp = $record.lease_heartbeat
         $numbers = @($stamp.sampled_at_ms,$stamp.valid_until_ms,$stamp.python_pid,$stamp.sequence,$stamp.revision)
         if ($record.phase -cne 'ready' -or $record.target -cne $plan.target -or $record.old -cnotin @('A','B') -or

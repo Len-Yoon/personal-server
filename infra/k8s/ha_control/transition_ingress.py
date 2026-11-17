@@ -9,7 +9,7 @@ from ha_runtime.seven_capture import encoded, parse
 from . import caddy_runtime as caddy
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
-from .native_windows_activation import prepare_transition_observer_plan
+from .native_windows_activation import open_transition_controller, prepare_transition_observer_plan
 from .transition_execution import observer_callback_config
 
 
@@ -126,7 +126,7 @@ def resume_ingress(main, car, previous, relay, prepared, generation, target, rou
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
-                         observer_setup, assert_legacy_closed, open_controller, activate_guest,
+                         observer_setup, controller_setup, assert_legacy_closed, activate_guest,
                          guests, target_request, verify_guest,
                          verify_public=_public_health):
     """Prepare the Windows controller, activate the guest, then switch ingress under one lock."""
@@ -151,9 +151,9 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         plan = parse(controller["plan"])
         caddy._need(plan["generation"] == generation.epoch and plan["node"] == generation.partner,
                     "transition_ingress_controller_unbound")
-        with open_controller(controller, generation) as assert_guard:
-            assert_guard()
-            activate_guest(generation, target, assert_guard)
+        with open_transition_controller(controller, generation, attempt=execution.spec["attempt_id"],
+                                        **controller_setup) as (assert_guard, guest_boundary):
+            activate_guest(generation, target, guest_boundary)
             return switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
                                   expected_mtls_sha256=expected_mtls_sha256, assert_guard=assert_guard,

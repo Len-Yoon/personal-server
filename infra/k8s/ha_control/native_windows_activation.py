@@ -423,24 +423,17 @@ class WindowsTransitionServiceStart:
         return result
 
 
-def transition_authority_records(controller, started, generation, *, root, attempt, handoff_sha256,
-                                 old_vm_id):
-    """Render the two protected inputs consumed by the live Windows lease verifier."""
+def _transition_authority_scope(controller, generation, root, attempt, old_vm_id):
     error = "native_transition_authority_record_invalid"
     generation.validate()
     bridge._need(generation.epoch > 1 and type(root) is str and re.fullmatch(
         r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
-        and all(bridge._hash(pin) for pin in (attempt, handoff_sha256))
+        and bridge._hash(attempt)
         and type(old_vm_id) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", old_vm_id)
         and old_vm_id != "00000000-0000-0000-0000-000000000000"
         and type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
         and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 1048576
-        and bridge._digest(controller["plan"]) == controller["plan_sha256"]
-        and type(started) is dict and started.get("controller_plan_sha256") == controller["plan_sha256"]
-        and bridge._hash(started.get("python_command_sha256"))
-        and type(started.get("service_pid")) is int and 0 < started["service_pid"] <= 2147483647
-        and type(started.get("service_created_ticks")) is str
-        and re.fullmatch(r"[1-9][0-9]{1,19}", started["service_created_ticks"]), error)
+        and bridge._digest(controller["plan"]) == controller["plan_sha256"], error)
     try:
         plan = json.loads(controller["plan"], object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
     except (ValueError, UnicodeError, RecursionError):
@@ -455,7 +448,7 @@ def transition_authority_records(controller, started, generation, *, root, attem
     image = plan["transition_service_start"].get("service_image_path_sha256")
     service = scope.get("service_name")
     python_path = scope.get("python_path")
-    bridge._need(bridge._hash(image) and started.get("service_image_path_sha256") == image
+    bridge._need(bridge._hash(image)
                  and type(service) is str and re.fullmatch(r"N100HA_[a-f0-9]{24}_controller", service)
                  and type(python_path) is str and python_path.isascii()
                  and bridge._hash(observer.get("legacy_plan_sha256"))
@@ -469,9 +462,24 @@ def transition_authority_records(controller, started, generation, *, root, attem
         paths.append(path.lower())
     bridge._need(len(paths) == len(set(paths)), error)
     old_disk_paths_sha256 = bridge._digest("\n".join(sorted(paths)).encode("ascii"))
+    return observer["legacy_plan_sha256"], service, image, python_path, old_disk_paths_sha256
+
+
+def transition_authority_records(controller, started, generation, *, root, attempt, handoff_sha256, old_vm_id):
+    """Render the two protected inputs consumed by the live Windows lease verifier."""
+    legacy, service, image, python_path, old_disk_paths_sha256 = _transition_authority_scope(
+        controller, generation, root, attempt, old_vm_id,
+    )
+    bridge._need(bridge._hash(handoff_sha256) and type(started) is dict
+                 and started.get("controller_plan_sha256") == controller["plan_sha256"]
+                 and started.get("service_image_path_sha256") == image and bridge._hash(started.get("python_command_sha256"))
+                 and type(started.get("service_pid")) is int and 0 < started["service_pid"] <= 2147483647
+                 and type(started.get("service_created_ticks")) is str
+                 and re.fullmatch(r"[1-9][0-9]{1,19}", started["service_created_ticks"]),
+                 "native_transition_authority_record_invalid")
     binding = bridge._bytes({
         "attempt_id": attempt, "controller_plan_sha256": controller["plan_sha256"],
-        "generation": generation.epoch, "legacy_plan_sha256": observer["legacy_plan_sha256"],
+        "generation": generation.epoch, "legacy_plan_sha256": legacy,
         "old_disk_paths_sha256": old_disk_paths_sha256, "old_vm_id": old_vm_id,
         "python_command_sha256": started["python_command_sha256"], "python_path_sha256": bridge._digest(python_path.encode()),
         "service_created_ticks": started["service_created_ticks"], "service_image_path_sha256": image,
@@ -542,6 +550,8 @@ class WindowsTransitionLease:
                     'PriorSha256': challenge, 'TransitionBoundarySha256': boundary_sha256,
                 })
                 result = powershell(source, limit)
+                if boundary == "controller-ready" and bridge._matches(result, {"transition_authority_pending": True}):
+                    return None
                 generation = self.generation
                 bridge._need(type(result) is dict and bridge._hash(result.get('transition_proof_sha256')) and
                              bridge._matches(result, {'generation': generation.epoch, 'timeline': generation.timeline,
@@ -553,3 +563,45 @@ class WindowsTransitionLease:
                     'challenge': challenge, 'boundary_sha256': boundary_sha256,
                 }))
             yield check
+
+
+@contextmanager
+def open_transition_controller(controller, generation, *, starter, prepare_service, stage_sha256, live_sha256,
+                               root, attempt, old_vm_id, publish_handoff, assert_non_vm_exclusions, settle_failed_start, deadline):
+    """Start the approved controller, bind its live lease, then expose fresh checks."""
+    generation.validate()
+    bridge._need(generation.epoch > 1 and all(bridge._hash(value) for value in (attempt, stage_sha256, live_sha256))
+                 and callable(assert_non_vm_exclusions) and callable(publish_handoff) and callable(settle_failed_start),
+                 "native_transition_service_scope_invalid")
+    _transition_authority_scope(controller, generation, root, attempt, old_vm_id)
+    parameters = prepare_service(controller, generation, deadline)
+    started = None
+    ready = False
+    try:
+        started = starter.start(controller, parameters, deadline)
+        options = {"root": root, "attempt": attempt, "old_vm_id": old_vm_id}
+        records = transition_authority_records(controller, started, generation, handoff_sha256="0" * 64, **options)
+        instance = records["service_instance_sha256"]
+        handoff = publish_handoff(generation, instance, deadline)
+        records = transition_authority_records(controller, started, generation, handoff_sha256=handoff, **options)
+        bridge._need(records["service_instance_sha256"] == instance, "native_transition_service_scope_invalid")
+        publish_transition_authority_records(starter.windows, stage_sha256, records, controller["plan_sha256"], deadline)
+        legacy = json.loads(records["binding"])["legacy_plan_sha256"]
+        authority = WindowsTransitionLease(
+            starter.windows, records["binding_path"], service_instance_sha256=instance, live_sha256=live_sha256,
+            transition_attempt=attempt, legacy_plan_sha256=legacy, generation_handoff_sha256=handoff,
+            generation=generation, assert_non_vm_exclusions=assert_non_vm_exclusions,
+        )
+        with authority.guest_authority(deadline) as check:
+            ready_deadline = min(deadline, time.monotonic() + 25)
+            while check(secrets.token_hex(32), "controller-ready", min(ready_deadline, time.monotonic() + 7)) is None:
+                time.sleep(min(0.2, bridge._remaining(ready_deadline)))
+            ready = True
+
+            def assert_guard():
+                return check(secrets.token_hex(32), "ingress", min(deadline, time.monotonic() + 7))
+
+            yield assert_guard, check
+    finally:
+        if not ready and starter.attempted:
+            settle_failed_start(controller, parameters, started, time.monotonic() + 15)

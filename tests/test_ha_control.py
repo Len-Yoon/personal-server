@@ -31,11 +31,12 @@ class TransitionIngressTests(unittest.TestCase):
         controller = {"plan": candidate, "plan_sha256": caddy_runtime._sha(candidate)}
 
         @contextmanager
-        def open_controller(plan, serving):
+        def open_controller(plan, serving, *, attempt):
             self.assertEqual(plan, controller)
             self.assertEqual(serving, generation)
-            steps.append("controller")
-            yield lambda: steps.append("lease")
+            self.assertEqual(attempt, execution.spec["attempt_id"])
+            steps.extend(["controller", "lease"])
+            yield MagicMock(), MagicMock()
 
         def guest(*_):
             steps.append("guest")
@@ -45,13 +46,14 @@ class TransitionIngressTests(unittest.TestCase):
             previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
             replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50},
-            assert_legacy_closed=MagicMock(), open_controller=open_controller,
+            assert_legacy_closed=MagicMock(), controller_setup={},
             activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
-        with patch.object(transition_ingress, "observer_callback_config", return_value={}), \
+        with patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
+                patch.object(transition_ingress, "observer_callback_config", return_value={}), \
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
                 patch.object(transition_ingress, "switch_ingress", side_effect=lambda *a, **kw: steps.append("ingress")) as switch:

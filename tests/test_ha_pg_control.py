@@ -22,7 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
-    transition_authority_records, publish_transition_authority_records,
+    transition_authority_records, publish_transition_authority_records, open_transition_controller,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -30,6 +30,33 @@ from ha_control import cli, scm_pg_auth_probe
 
 
 class TransitionServiceStartTests(unittest.TestCase):
+    def test_controller_requires_ready_lease_before_exposing_app_guard(self):
+        generation = ServingGeneration("B", 2, 3, 2)
+        controller = {"plan_sha256": "1"*64}
+        starter = MagicMock()
+        prepare = MagicMock()
+        handoff = MagicMock(return_value="2"*64)
+        records = {"service_instance_sha256": "3"*64, "binding_path": "fixture",
+                   "binding": b'{"legacy_plan_sha256":"fixture"}'}
+        check = MagicMock(side_effect=[None, BridgeRejected("lease unavailable")])
+        settle = MagicMock()
+        with patch("ha_control.native_windows_activation._transition_authority_scope"), \
+                patch("ha_control.native_windows_activation.transition_authority_records", return_value=records), \
+                patch("ha_control.native_windows_activation.publish_transition_authority_records") as publish, \
+                patch("ha_control.native_windows_activation.WindowsTransitionLease") as lease:
+            lease.return_value.guest_authority.return_value = nullcontext(check)
+            with self.assertRaisesRegex(BridgeRejected, "lease unavailable"), open_transition_controller(
+                controller, generation, starter=starter, prepare_service=prepare, stage_sha256="4"*64,
+                live_sha256="5"*64, root="fixture", attempt="6"*64, old_vm_id="fixture",
+                publish_handoff=handoff, assert_non_vm_exclusions=MagicMock(), settle_failed_start=settle, deadline=time.monotonic()+30,
+            ):
+                self.fail("unconfirmed lease allowed activation")
+        starter.start.assert_called_once()
+        publish.assert_called_once()
+        self.assertEqual(check.call_count, 2)
+        settle.assert_called_once()
+        self.assertEqual(check.call_args.args[1], "controller-ready")
+
     def test_live_authority_records_bind_previous_vm_and_running_controller(self):
         image = "7"*64
         vm_id = "11111111-2222-3333-4444-555555555555"
