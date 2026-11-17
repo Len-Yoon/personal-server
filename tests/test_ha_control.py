@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import json
 from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,55 @@ from ha_control.native_guest_activation import ServingGeneration
 
 
 class TransitionIngressTests(unittest.TestCase):
+    def test_observer_and_apps_precede_external_route_switch(self):
+        from ha_runtime.seven_capture import encoded
+
+        generation = ServingGeneration("B", 2, 2, 2)
+        candidate = encoded({"generation": 2, "node": "A"})
+        steps = []
+        execution = MagicMock()
+        execution.publish_observer_runtime.side_effect = lambda **_: steps.append("runtime") or {"runtime": True}
+        execution.spec = {"plan_sha256": "a"*64, "attempt_id": "b"*64}
+        controller = {"plan": candidate, "plan_sha256": caddy_runtime._sha(candidate)}
+
+        @contextmanager
+        def open_controller(plan, serving):
+            self.assertEqual(plan, controller)
+            self.assertEqual(serving, generation)
+            steps.append("controller")
+            yield lambda: steps.append("lease")
+
+        def guest(*_):
+            steps.append("guest")
+            raise RuntimeError("guest failed")
+
+        args = dict(
+            previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
+            expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
+            replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate)},
+            assert_legacy_closed=MagicMock(), open_controller=open_controller,
+            activate_guest=guest, verify_target=MagicMock(return_value=True), verify_guest=MagicMock(),
+        )
+        routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
+                  SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
+        with patch.object(transition_ingress, "observer_callback_config", return_value={}), \
+                patch.object(transition_ingress, "prepare_transition_observer_plan",
+                             side_effect=lambda **_: steps.append("observer") or controller), \
+                patch.object(transition_ingress, "switch_ingress", side_effect=lambda *a, **kw: steps.append("ingress")) as switch:
+            args["verify_target"].return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, [])
+            args["verify_target"].return_value = True
+            with self.assertRaisesRegex(RuntimeError, "guest failed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            switch.assert_not_called()
+            self.assertEqual(steps, ["runtime", "observer", "controller", "lease", "guest"])
+            steps.clear()
+            args["activate_guest"] = lambda *_: steps.append("guest")
+            transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer", "controller", "lease", "guest", "ingress"])
+
     def test_callback_rotation_preserves_primary_and_legacy_pins_in_both_directions(self):
         from ha_runtime.seven_capture import encoded
 

@@ -9,6 +9,7 @@ from ha_runtime.seven_capture import encoded, parse
 from . import caddy_runtime as caddy
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
+from .native_windows_activation import prepare_transition_observer_plan
 from .transition_execution import observer_callback_config
 
 
@@ -16,15 +17,20 @@ INTENT = "ingress-switch-intent.json"
 RECEIPT = "ingress-switch-receipt.json"
 
 
-def _scope(previous, relay, prepared, directory, generation, target, route_pin, plan_sha256, attempt_id):
+def _route_scope(previous, relay, generation, target, route_pin, plan_sha256, attempt_id):
     caddy._need(type(generation) is ServingGeneration, "transition_ingress_scope_invalid")
     generation.validate()
-    caddy._need(generation.epoch > 1
+    caddy._need(generation.epoch > 1 and type(target) is str and target
                 and previous.primary_ip == relay.guest and previous.primary_ip != target
-                and relay.route_pin != route_pin and prepared.override == directory / "main" / "caddy-ha-compose.json"
-                and prepared.candidate == directory / "main" / "Caddyfile"
+                and relay.route_pin != route_pin
                 and all(type(pin) is str and caddy.ID.fullmatch(pin) for pin in (route_pin, plan_sha256, attempt_id)),
                 "transition_ingress_scope_invalid")
+
+
+def _scope(previous, relay, prepared, directory, generation, target, route_pin, plan_sha256, attempt_id):
+    _route_scope(previous, relay, generation, target, route_pin, plan_sha256, attempt_id)
+    caddy._need(prepared.override == directory / "main" / "caddy-ha-compose.json"
+                and prepared.candidate == directory / "main" / "Caddyfile", "transition_ingress_scope_invalid")
     return {"plan_sha256": plan_sha256, "attempt_id": attempt_id, "generation": generation.epoch,
             "timeline": generation.timeline, "revision": generation.revision, "primary": generation.primary,
             "target_sha256": caddy._sha(target.encode()), "old_caddy_sha256": previous.receipt["container_sha256"],
@@ -120,15 +126,30 @@ def resume_ingress(main, car, previous, relay, prepared, generation, target, rou
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
-                         assert_legacy_closed, open_observer, verify_guest, verify_public=_public_health):
-    """Publish the scoped observer input and keep both ingress writers under its guard."""
+                         observer_setup, assert_legacy_closed, open_controller, activate_guest, verify_target, verify_guest,
+                         verify_public=_public_health):
+    """Prepare the Windows controller, activate the guest, then switch ingress under one lock."""
+    _route_scope(previous, relay, generation, target, route_pin, execution.spec["plan_sha256"], execution.spec["attempt_id"])
+    raw = observer_setup["plan_raw"]
+    caddy._need(type(raw) is bytes and 0 < len(raw) <= 1048576 and caddy._sha(raw) == observer_setup["plan_sha256"],
+                "transition_ingress_controller_unbound")
+    template = parse(raw)
+    caddy._need(type(template) is dict and template.get("generation") == generation.epoch
+                and template.get("node") == generation.partner, "transition_ingress_controller_unbound")
+    caddy._need(verify_target(generation, target) is True, "transition_ingress_guest_target_unconfirmed")
     with execution.guard(main, car):
         binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
                                                      legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,
                                                      assert_legacy_closed=assert_legacy_closed)
         callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
                                             generation.primary, replacement_vm, observer_release)
-        with open_observer(binding | callback) as assert_guard:
+        controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
+        plan = parse(controller["plan"])
+        caddy._need(plan["generation"] == generation.epoch and plan["node"] == generation.partner,
+                    "transition_ingress_controller_unbound")
+        with open_controller(controller, generation) as assert_guard:
+            assert_guard()
+            activate_guest(generation, target, assert_guard)
             return switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
                                   expected_mtls_sha256=expected_mtls_sha256, assert_guard=assert_guard,
