@@ -10,6 +10,8 @@ param(
     [switch]$ObserveRetired,
     [switch]$ResumeRetire,
     [switch]$ReadClosureReceipt,
+    [switch]$ReadRejoinReceipt,
+    [string]$RejoinMode,
     [string]$ClosurePlanSha256,
     [string]$ClosureGeneration,
     [string]$ClosureHostPid,
@@ -236,7 +238,78 @@ function Read-ClosureReceipt {
         ConvertTo-Json -Compress
 }
 
+function Read-RejoinReceipt {
+    if ($BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\journal\z' -or
+        $ClosurePlanSha256 -cnotmatch $pattern -or
+        $ClosureServiceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
+        $ClosureHostPid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
+        $ClosureStartedMs -cnotmatch '\A[1-9][0-9]{0,17}\z' -or
+        $RejoinMode -cnotin @('stage-rejoin','observe-rejoin-stage','check-rejoin')) {
+        throw 'transition_rejoin_receipt_invalid'
+    }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $owners = @('S-1-5-18','S-1-5-32-544',$sid,$ClosureServiceSid)
+    $launchPattern = '\Arejoin-launch-' + $ClosurePlanSha256 + '-([a-f0-9]{32})\.json\z'
+    $leaves = @(Get-ChildItem -LiteralPath $BindingPath -Force)
+    if ($leaves.Count -gt 64) { throw 'transition_rejoin_receipt_invalid' }
+    $launch = $null
+    foreach ($leaf in $leaves) {
+        $match = [regex]::Match($leaf.Name,$launchPattern)
+        if (-not $match.Success) { continue }
+        $probe = $match.Groups[1].Value
+        $entry = ConvertFrom-Json -InputObject (Read-Scope $leaf.FullName $owners -Immutable).raw
+        if ((@($entry.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+            'host_pid,mode,plan_sha256,probe,python_pid,schema_version,started_at_ms' -or
+            $entry.plan_sha256 -isnot [string] -or $entry.plan_sha256 -cne $ClosurePlanSha256 -or
+            $entry.probe -isnot [string] -or $entry.probe -cne $probe -or
+            $entry.mode -isnot [string] -or $entry.mode -cnotin @('stage-rejoin','observe-rejoin-stage','check-rejoin') -or
+            $entry.schema_version -isnot [int] -or $entry.schema_version -ne 1 -or
+            $entry.host_pid -isnot [int] -or $entry.host_pid -lt 1 -or
+            $entry.python_pid -isnot [int] -or $entry.python_pid -lt 1 -or
+            $entry.started_at_ms -isnot [long] -or $entry.started_at_ms -lt 1) {
+            throw 'transition_rejoin_receipt_invalid'
+        }
+        if ($entry.host_pid -ne [long]$ClosureHostPid -or $entry.started_at_ms -lt [long]$ClosureStartedMs) { continue }
+        if ($null -ne $launch -or $entry.mode -cne $RejoinMode) { throw 'transition_rejoin_receipt_invalid' }
+        $launch = $entry
+    }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ($null -eq $launch -or $launch.started_at_ms -gt $now -or $now - $launch.started_at_ms -gt 25000) {
+        throw 'transition_rejoin_receipt_invalid'
+    }
+    $path = Join-Path $BindingPath ("rejoin-result-" + $ClosurePlanSha256 + "-" + $launch.probe + ".json")
+    $result = ConvertFrom-Json -InputObject (Read-Scope $path $owners -Immutable).raw
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $keys = 'authority_opened,mode,observed_at_ms,phase,plan_sha256,probe,python_pid,rejoin_stage_sha256,schema_version,status'
+    if ($RejoinMode -ceq 'check-rejoin') { $keys = $keys.Replace(',status',',standby_rejoined,status') }
+    if ((@($result.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne $keys -or
+        $result.schema_version -isnot [int] -or $result.schema_version -ne 1 -or
+        $result.plan_sha256 -isnot [string] -or $result.plan_sha256 -cne $ClosurePlanSha256 -or
+        $result.mode -isnot [string] -or $result.mode -cne $RejoinMode -or
+        $result.probe -isnot [string] -or $result.probe -cne $launch.probe -or $result.python_pid -isnot [int] -or
+        $result.python_pid -ne $launch.python_pid -or $result.observed_at_ms -isnot [long] -or
+        $result.observed_at_ms -lt $launch.started_at_ms -or $result.observed_at_ms -gt $now -or
+        $now - $launch.started_at_ms -gt 25000 -or
+        $result.status -isnot [string] -or $result.status -cne 'PASS' -or
+        $result.phase -isnot [string] -or $result.phase -cne 'rejoining' -or
+        $result.authority_opened -isnot [bool] -or $result.authority_opened -or
+        $result.rejoin_stage_sha256 -isnot [string] -or $result.rejoin_stage_sha256 -cnotmatch $pattern) { throw 'transition_rejoin_receipt_invalid' }
+    $reply = [ordered]@{status='PASS';phase='rejoining';authority_opened=$false;rejoin_stage_sha256=$result.rejoin_stage_sha256}
+    if ($RejoinMode -ceq 'check-rejoin') {
+        if ($result.standby_rejoined -isnot [bool] -or -not $result.standby_rejoined) { throw 'transition_rejoin_receipt_invalid' }
+        $reply['standby_rejoined'] = $true
+    }
+    $reply | ConvertTo-Json -Compress
+}
+
 try {
+    if ($ReadRejoinReceipt) {
+        if ($ReadClosureReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
+            throw 'transition_rejoin_receipt_invalid'
+        }
+        Read-RejoinReceipt
+        return
+    }
     if ($ReadClosureReceipt) {
         if ($Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
             throw 'transition_closure_receipt_invalid'

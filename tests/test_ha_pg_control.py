@@ -22,7 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
-    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller, read_transition_closure_receipt, observe_transition_db_closed,
+    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller, read_transition_closure_receipt, observe_transition_db_closed, read_transition_rejoin_receipt,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -74,6 +74,25 @@ class TransitionServiceStartTests(unittest.TestCase):
         self.assertIn(" -ReadClosureReceipt ", command)
         self.assertIn(" -ClosureHostPid '123' ", command)
         self.assertIn(f" -BindingPath '{root}\\journal\\lease-closure-{'a'*64}.json'", command)
+
+    def test_rejoin_reader_binds_exact_mode_and_rejects_open_authority(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        windows = MagicMock()
+        receipt = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
+                   "rejoin_stage_sha256": "b"*64, "standby_rejoined": True}
+        windows.powershell.side_effect = [receipt, receipt | {"authority_opened": True}, receipt]
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        common = (windows, pin, root, "a"*64)
+        kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+                      deadline=time.monotonic()+10)
+        self.assertEqual(read_transition_rejoin_receipt(*common, "check-rejoin", **kwargs), receipt)
+        command = windows.powershell.call_args.args[0]
+        self.assertIn(" -ReadRejoinReceipt ", command)
+        self.assertIn(" -RejoinMode 'check-rejoin' ", command)
+        for mode in ("check-rejoin", "observe-rejoin-stage"):
+            with self.assertRaisesRegex(BridgeRejected, "rejoin_receipt_unconfirmed"):
+                read_transition_rejoin_receipt(*common, mode, **kwargs)
 
     def test_lost_closure_response_recovers_scm_result_without_replay(self):
         starter = MagicMock()

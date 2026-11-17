@@ -636,6 +636,32 @@ def read_transition_closure_receipt(windows, live_sha256, root, plan_sha256, gen
     return windows.powershell(source, deadline)
 
 
+def read_transition_rejoin_receipt(windows, live_sha256, root, plan_sha256, mode, *,
+                                   host_pid, started_ms, service_sid, deadline):
+    """Read the result for the exact Windows service invocation."""
+    error = "native_transition_rejoin_receipt_unconfirmed"
+    bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
+                 and bridge._hash(plan_sha256)
+                 and mode in ("stage-rejoin", "observe-rejoin-stage", "check-rejoin")
+                 and type(host_pid) is int and 0 < host_pid <= 2147483647
+                 and type(started_ms) is int and 0 < started_ms < 10**18
+                 and type(service_sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}", service_sid),
+                 error)
+    source = fixed_script("windows-ha-cutover-live-authority.ps1", live_sha256, {
+        "ReadRejoinReceipt": True, "BindingPath": root + r"\journal", "RejoinMode": mode,
+        "ClosurePlanSha256": plan_sha256, "ClosureHostPid": str(host_pid),
+        "ClosureStartedMs": str(started_ms), "ClosureServiceSid": service_sid,
+    })
+    bridge._remaining(deadline)
+    result = windows.powershell(source, deadline)
+    stage = result.get("rejoin_stage_sha256") if type(result) is dict else None
+    expected = {"status": "PASS", "phase": "rejoining", "authority_opened": False, "rejoin_stage_sha256": stage}
+    if mode == "check-rejoin":
+        expected["standby_rejoined"] = True
+    bridge._need(bridge._hash(stage) and bridge._matches(result, expected), error)
+    return result
+
+
 def observe_transition_db_closed(starter, controller, parameters, generation, *, live_sha256, root, deadline):
     """Recover a completed SCM check after a lost reply, then verify the separate DB receipt."""
     try:
