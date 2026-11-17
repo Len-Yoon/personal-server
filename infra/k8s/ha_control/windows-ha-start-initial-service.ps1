@@ -12,6 +12,7 @@ param(
     [string]$ScmVerifierPath,
     [string]$ExpectedActivationIntentSha256,
     [switch]$StartTransition,
+    [switch]$CheckLeaseClosed,
     [switch]$ObserveTransition,
     [switch]$StopTransition,
     [string]$ExpectedServicePid,
@@ -60,10 +61,12 @@ function Assert-Executable([string]$Path, [string]$Sha) {
 function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Approval) {
     $scope = $Plan.windows_enforced
     $pins = $Plan.transition_service_start
+    $allowedModes = if ($CheckLeaseClosed) { @('check-lease-closed') } else { @('transition-serve','transition-rearm') }
+
     if ($Plan.profile -cne 'enforced-vm-v1' -or $Plan.generation -lt 2 -or
         $Plan.PSObject.Properties['initial_wsl_cutover'] -or -not $Plan.PSObject.Properties['windows_transition_observer'] -or
         $scope.service_name -cne $ServiceName -or $scope.service_image_sha256 -cne $ServiceHostSha256 -or
-        $pins.preflight_sha256 -cne $PreflightSha256 -or $pins.mode -cnotin @('transition-serve','transition-rearm') -or
+        $pins.preflight_sha256 -cne $PreflightSha256 -or $pins.mode -cnotin $allowedModes -or
         $Approval.schema_version -ne 3 -or $Approval.profile -cne 'enforced-vm-v1' -or $Approval.action -cne 'ha-transition' -or
         $Approval.authority_kind -cne 'installed-runtime' -or $Approval.plan_sha256 -cne $PlanSha256 -or
         $Approval.installation_id -cne $Plan.installation_id -or $Approval.source_commit -cne $Plan.source_commit -or
@@ -146,7 +149,36 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         try { $file.Write($intentBytes,0,$intentBytes.Length); $file.Flush($true) } finally { $file.Dispose() }
         if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
             $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+        if ($CheckLeaseClosed) {
+            $startedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        }
         Start-Service -Name $ServiceName -ErrorAction Stop
+        if ($CheckLeaseClosed) {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $seenPid = 0
+            while ($watch.ElapsedMilliseconds -lt 15000) {
+                $sample = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 3
+                if ($sample.Name -cne $ServiceName -or $sample.PathName -cne $Current.PathName -or
+                    $sample.StartMode -cne 'Manual' -or $sample.StartName -cne $Current.StartName) {
+                    throw 'initial_service_closure_check_unconfirmed'
+                }
+                if ($sample.State -ceq 'Stopped') {
+                    if ($seenPid -lt 1 -or $sample.ProcessId -ne 0 -or $sample.ExitCode -ne 0 -or
+                        $sample.ServiceSpecificExitCode -ne 0 -or $watch.ElapsedMilliseconds -ge 15000) {
+                        throw 'initial_service_closure_check_unconfirmed'
+                    }
+                    [ordered]@{closure_check_completed=$true;host_pid=$seenPid;started_at_ms=$startedMs;
+                        service_sid=$sid;controller_plan_sha256=$PlanSha256}|ConvertTo-Json -Compress
+                    return
+                }
+                if ($sample.ProcessId -gt 0) {
+                    if ($seenPid -ne 0 -and $sample.ProcessId -ne $seenPid) { throw 'initial_service_closure_check_unconfirmed' }
+                    $seenPid = $sample.ProcessId
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            throw 'initial_service_closure_check_unconfirmed'
+        }
     }
     $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
     if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
@@ -217,8 +249,8 @@ public static class HaTransitionProcessStop {
 }
 
 try {
-    $transition = $StartTransition -or $ObserveTransition -or $StopTransition
-    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition) | Where-Object { $_.IsPresent }).Count
+    $transition = $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed
+    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed) | Where-Object { $_.IsPresent }).Count
     if (-not $Go -or $modes -gt 1 -or
         ($StopTransition -and ($ExpectedServicePid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
             $ExpectedServiceCreatedTicks -cnotmatch '\A[1-9][0-9]{1,19}\z')) -or
