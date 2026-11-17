@@ -46,11 +46,14 @@ class TransitionIngressTests(unittest.TestCase):
         args = dict(
             previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
-            replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50},
+            replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50,
+                    "stage_sha256": "1"*64, "manifest_sha256": "2"*64},
             assert_legacy_closed=MagicMock(),
-            controller_setup={"deadline": 50, "prepare_service": MagicMock(), "starter": MagicMock(),
+            controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
             replacement_requests=lambda _: (replacement, None),
+            stage_service={"approval": lambda *_: b"installed-approval", "previous_args_sha256": "4"*64,
+                           "preflight_path": "fixture", "scm_verifier_path": "fixture"},
             activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
         )
@@ -61,8 +64,10 @@ class TransitionIngressTests(unittest.TestCase):
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
         prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
-        args["controller_setup"]["prepare_service"].return_value = prepared
-        with patch.object(transition_ingress, "prepare_staged_transition_service", return_value=prepared), \
+        with patch.object(transition_ingress, "stage_approved_transition_service",
+                          side_effect=lambda *_a, **_kw: steps.append("stage") or prepared) as stage_service, \
+                patch.object(transition_ingress, "prepare_staged_transition_service",
+                             side_effect=lambda *_a, **_kw: steps.append("verify") or prepared), \
                 patch.object(transition_ingress, "_bind_rejoin_controller"), \
                 patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, MagicMock(), MagicMock())), \
                 patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
@@ -76,14 +81,21 @@ class TransitionIngressTests(unittest.TestCase):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             args["guests"].verify_transition_target.return_value = True
+            stage_service.side_effect = TransitionBlocked("publication unconfirmed")
+            with self.assertRaisesRegex(TransitionBlocked, "publication unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer"])
+            switch.assert_not_called()
+            steps.clear()
+            stage_service.side_effect = lambda *_a, **_kw: steps.append("stage") or prepared
             with self.assertRaisesRegex(RuntimeError, "guest failed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             switch.assert_not_called()
-            self.assertEqual(steps, ["runtime", "observer", "rejoin", "controller", "lease", "guest"])
+            self.assertEqual(steps, ["runtime", "observer", "stage", "verify", "rejoin", "controller", "lease", "guest"])
             steps.clear()
             args["activate_guest"] = lambda *_: steps.append("guest")
             transition_ingress.switch_with_observer(*routes, **args)
-            self.assertEqual(steps, ["runtime", "observer", "rejoin", "controller", "lease", "guest", "ingress"])
+            self.assertEqual(steps, ["runtime", "observer", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 
     def test_rejoin_resume_matches_exact_recorded_controller_and_parameters(self):
         controller = {"plan_sha256": "c"*64}

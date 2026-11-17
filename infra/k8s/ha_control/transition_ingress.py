@@ -14,7 +14,7 @@ from . import native_stdio_bridge as bridge
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
 from .native_windows_activation import (open_transition_controller, prepare_staged_transition_service,
-                                        prepare_transition_observer_plan)
+                                        prepare_transition_observer_plan, stage_approved_transition_service)
 from .transition_execution import observer_callback_config
 
 
@@ -222,7 +222,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed, activate_guest,
                          guests, target_request, verify_guest,
-                         replacement_requests, resume_rejoin=None, verify_public=_public_health):
+                         replacement_requests, stage_service, resume_rejoin=None, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
     After a lost guest response, supply fresh request sequences and nonces
@@ -243,6 +243,13 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
+    stage_fields = {"approval", "previous_args_sha256", "preflight_path", "scm_verifier_path"}
+    caddy._need(type(stage_service) is dict and set(stage_service) == stage_fields
+                and callable(stage_service["approval"]) and bridge._hash(stage_service["previous_args_sha256"])
+                and all(type(stage_service[key]) is str and stage_service[key] for key in
+                        ("preflight_path", "scm_verifier_path"))
+                and "prepare_service" not in controller_setup,
+                "transition_ingress_controller_unbound")
     with execution.guard(main, car):
         deadline = min(observer_setup["deadline"], controller_setup["deadline"])
         if resume_rejoin is None:
@@ -252,7 +259,14 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
                                                 generation.primary, replacement_vm, observer_release)
             controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
-            staged = controller_setup["prepare_service"](controller, generation, deadline)
+            approval = stage_service["approval"](controller, generation, deadline)
+            staged = stage_approved_transition_service(
+                controller_setup["starter"], controller, generation, approval, root=controller_setup["root"],
+                attempt=execution.spec["attempt_id"], old_vm_id=controller_setup["old_vm_id"],
+                stage_sha256=observer_setup["stage_sha256"], manifest_sha256=observer_setup["manifest_sha256"],
+                previous_args_sha256=stage_service["previous_args_sha256"], preflight_path=stage_service["preflight_path"],
+                scm_verifier_path=stage_service["scm_verifier_path"], deadline=deadline,
+            )
             parameters = prepare_staged_transition_service(
                 controller_setup["starter"], controller, generation, root=controller_setup["root"],
                 attempt=execution.spec["attempt_id"], old_vm_id=controller_setup["old_vm_id"],
