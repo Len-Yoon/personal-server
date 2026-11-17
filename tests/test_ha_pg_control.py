@@ -20,7 +20,7 @@ from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
-    WindowsActivationLease, WindowsTransitionLease, publish_transition_observer_config,
+    WindowsActivationLease, WindowsTransitionLease, bind_transition_observer_plan, publish_transition_observer_config,
     publish_transition_observer_launch, start_transition_observer,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
@@ -29,6 +29,42 @@ from ha_control import cli, scm_pg_auth_probe
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):
+    def test_plan_binds_observer_receipt_and_rejects_stale_or_foreign_evidence(self):
+        callback = b"fixture"
+        pin = hashlib.sha256(callback).hexdigest()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        service = "N100HA_" + "1"*24 + "_controller"
+        plan = {"profile": "enforced-vm-v1", "generation": 2, "untouched": [1, 2],
+                "windows_enforced": {"service_name": service, "service_sid": "S-1-5-80-1-2-3-4-5"}}
+        raw = json.dumps(plan).encode()
+        expected_sha = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": callback, "callback_config_sha256": pin, "plan": "a"*64, "attempt": "b"*64}
+        boot = {"windows_boot_sha256": "5"*64, "wsl_boot_sha256": "6"*64, "collector_sha256": "7"*64}
+        observer = boot | {"service_name": service}
+        started = boot | {"observer_pid": 123, "pipe_name": "n100ha-lease-proof-" + "2"*32,
+                          "callback_config_sha256": pin, "key_sha256": "3"*64,
+                          "callback_config_path": root + rf"\transition-observer-config-{pin}.json",
+                          "key_path": root + rf"\transition-observer-key-{pin}.key"}
+        options = {"root": root, "binding": binding, "observer": observer, "started": started, "client_sha256": "4"*64}
+        result = bind_transition_observer_plan(raw, expected_sha, **options)
+        self.assertEqual(hashlib.sha256(result["plan"]).hexdigest(), result["plan_sha256"])
+        data = json.loads(result["plan"])
+        observed = data.pop("windows_transition_observer")
+        self.assertEqual(data, plan)
+        self.assertEqual(observed, boot | {
+            "server_pid": 123, "pipe_name": started["pipe_name"], "key_sha256": started["key_sha256"],
+            "legacy_plan_sha256": binding["plan"], "legacy_attempt_id": binding["attempt"],
+            "client_sha256": options["client_sha256"], "callback_config_sha256": pin,
+        })
+        for change in ({"observer": observer | {"service_name": "foreign"}},
+                       {"started": started | {"wsl_boot_sha256": "8"*64}},
+                       {"started": started | {"key_path": root + r"\other.key"}},
+                       {"binding": binding | {"callback_config": b"tampered"}}):
+            with self.subTest(change=change), self.assertRaisesRegex(BridgeRejected, "observer_plan_invalid"):
+                bind_transition_observer_plan(raw, expected_sha, **(options | change))
+        with self.assertRaisesRegex(BridgeRejected, "observer_plan_invalid"):
+            bind_transition_observer_plan(raw, "0"*64, **options)
+
     def test_native_publication_binds_expected_location_and_rejects_uncertain_receipt(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
         stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()

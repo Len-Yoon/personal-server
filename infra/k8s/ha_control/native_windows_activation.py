@@ -1,6 +1,7 @@
 """N100 custody adapter for the first Windows write lease and A activation."""
 
 import base64
+import json
 from contextlib import contextmanager
 import re
 import secrets
@@ -289,6 +290,51 @@ def start_transition_observer(windows, root, stage_sha256, binding, manifest_sha
                  and type(result["pipe_name"]) is str and re.fullmatch(r"n100ha-lease-proof-[a-f0-9]{32}", result["pipe_name"]),
                  "native_transition_observer_start_unconfirmed")
     return result | {"callback_config_path": path, "key_path": root + rf"\transition-observer-key-{pin}.key"}
+
+
+def bind_transition_observer_plan(plan_raw, plan_sha256, *, root, binding, observer, started, client_sha256):
+    """Prepare exact plan bytes for approval, binding one Windows observer receipt."""
+    error = "native_transition_observer_plan_invalid"
+    bridge._need(type(plan_raw) is bytes and 0 < len(plan_raw) <= 1048576
+                 and bridge._digest(plan_raw) == plan_sha256, error)
+    try:
+        plan = json.loads(plan_raw, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise bridge.BridgeRejected(error) from None
+    bridge._need(type(plan) is dict and plan.get("profile") == "enforced-vm-v1"
+                 and type(plan.get("generation")) is int and plan["generation"] >= 2
+                 and not {"initial_wsl_cutover", "windows_transition_observer", "_approval_action",
+                          "_installed_runtime"}.intersection(plan)
+                 and type(plan.get("windows_enforced")) is dict
+                 and type(observer) is dict and type(binding) is dict and type(started) is dict
+                 and type(root) is str
+                 and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root), error)
+    code_pins = ("windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")
+    callback_pin = binding.get("callback_config_sha256")
+    sid = plan["windows_enforced"].get("service_sid")
+    service = plan["windows_enforced"].get("service_name")
+    bridge._need(type(service) is str and re.fullmatch(r"N100HA_[a-f0-9]{24}_controller", service)
+                 and service == observer.get("service_name")
+                 and type(sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}", sid)
+                 and all(bridge._hash(value) for value in (
+                     callback_pin, binding.get("plan"), binding.get("attempt"), client_sha256, started.get("key_sha256"),
+                 ))
+                 and type(binding.get("callback_config")) is bytes
+                 and bridge._digest(binding["callback_config"]) == callback_pin
+                 and started.get("callback_config_sha256") == callback_pin
+                 and started.get("callback_config_path") == root + rf"\transition-observer-config-{callback_pin}.json"
+                 and started.get("key_path") == root + rf"\transition-observer-key-{callback_pin}.key"
+                 and all(bridge._hash(observer.get(field)) and started.get(field) == observer[field] for field in code_pins)
+                 and type(started.get("observer_pid")) is int and 0 < started["observer_pid"] <= 2147483647
+                 and type(started.get("pipe_name")) is str
+                 and re.fullmatch(r"n100ha-lease-proof-[a-f0-9]{32}", started["pipe_name"]), error)
+    plan["windows_transition_observer"] = {field: started[field] for field in code_pins} | {
+        "pipe_name": started["pipe_name"], "server_pid": started["observer_pid"], "key_sha256": started["key_sha256"],
+        "client_sha256": client_sha256, "legacy_plan_sha256": binding["plan"], "legacy_attempt_id": binding["attempt"],
+        "callback_config_sha256": callback_pin,
+    }
+    raw = bridge._bytes(plan)
+    return {"plan": raw, "plan_sha256": bridge._digest(raw)}
 
 
 class WindowsTransitionLease:
