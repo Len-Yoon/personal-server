@@ -212,7 +212,8 @@ def _wait_for_app(context, leaf, address, service, *, expected_node="A"):
 
 def activate_prepared_a(pins, activation, stage, *, assert_lease):
     """Run the original A-only WSL cutover with its existing receipt format."""
-    _need(os.geteuid() == 0 and pins.node == "A", "guest_activation_a_root_required")
+    _need(os.geteuid() == 0 and pins.node == "A" and pins.primary_node == "A" and pins.generation == 1,
+          "guest_activation_a_root_required")
     return _activate(pins, activation, stage, INITIAL_GENERATION, assert_lease=assert_lease)
 
 
@@ -220,7 +221,8 @@ def activate_prepared_generation(pins, activation, stage, generation, *, assert_
     """Start a new primary only with live exclusion, transition and replay evidence."""
     _need(type(generation) is ServingGeneration, "guest_activation_generation_invalid")
     generation.validate()
-    _need(os.geteuid() == 0 and pins.node == generation.primary and generation.epoch > 1,
+    _need(os.geteuid() == 0 and pins.node == generation.primary and generation.epoch > 1
+          and pins.primary_node == generation.primary and pins.generation == generation.epoch,
           "guest_activation_generation_scope")
     return _activate(pins, activation, stage, generation, assert_lease=assert_lease)
 

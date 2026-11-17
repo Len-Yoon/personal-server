@@ -112,7 +112,8 @@ class NativeGuestActivationTests(unittest.TestCase):
                     patch.object(activation.json, "loads", return_value={
                         "containers": dict.fromkeys(activation.SERVICES | {"ha-broker"}),
                     }), patch.object(activation, "_authorities"), patch.object(activation, "_state"):
-                runtime_pins = SimpleNamespace(node="A", attempt_id="1" * 64, validate=lambda: None)
+                runtime_pins = SimpleNamespace(node="A", primary_node="A", generation=1,
+                                               attempt_id="1" * 64, validate=lambda: None)
                 result = activation.activate_prepared_a(
                     runtime_pins, pins, Path("/unused/attempt"),
                     assert_lease=MagicMock(side_effect=TransitionBlocked(reason)),
@@ -152,11 +153,27 @@ class NativeGuestActivationTests(unittest.TestCase):
                                                         generation, assert_lease=MagicMock())
             start.assert_not_called()
 
+    def test_failover_preparation_guard_requires_matching_generation_and_closed_old_writer(self):
+        runtime = native_guest_activation.runtime
+        common = dict(node="B", installation_id="a" * 64, attempt_id="b" * 64, plan_sha256="c" * 64,
+                      manifest_sha256="d" * 64, frozen_transfer_sha256="e" * 64, restore_receipt_sha256="f" * 64)
+        previous = dict(common, legacy_writers_closed=True, target_writes_closed=True, frozen_transfer_closed=True)
+        runtime._guard(SimpleNamespace(**common, generation=1, primary_node="A"), lambda: previous)
+        pins = SimpleNamespace(**common, generation=2, primary_node="B")
+        current = dict(previous, generation=2, primary_node="B", previous_primary_fenced=True,
+                       target_replay_verified=True)
+        runtime._guard(pins, lambda: current)
+        for stale in (previous, dict(current, generation=1), dict(current, previous_primary_fenced=False),
+                      dict(current, target_replay_verified=False)):
+            with self.assertRaisesRegex(TransitionBlocked, "guest_runtime_live_guard_rejected"):
+                runtime._guard(pins, lambda: stale)
+
     def test_readiness_blocks_next_application_start(self):
         activation = native_guest_activation
         runtime = activation.runtime
         pins = activation.ActivationPins(*("abcdef"[i] * 64 for i in range(6)))
-        runtime_pins = SimpleNamespace(node="A", attempt_id="1" * 64, validate=lambda: None,
+        runtime_pins = SimpleNamespace(node="A", primary_node="A", generation=1,
+                                       attempt_id="1" * 64, validate=lambda: None,
                                        spec_sha256=pins.primary_runtime_receipt_sha256)
         containers = {role: {"container_id": role} for role in activation.SERVICES | {"ha-broker"}}
         spec = {"node": "A", "pg_a": "192.0.2.10", "guest_ip": "192.0.2.10"}
@@ -219,7 +236,8 @@ class NativeGuestLiveTests(unittest.TestCase):
         pin = "a" * 64
         fields = dict(boot_sha256=pin, installation_id=pin, system_id="1", plan_sha256=pin,
                       manifest_sha256=pin, cluster="test", validate=lambda: None)
-        pins = SimpleNamespace(**fields, node="A", attempt_id=pin, release={"source_commit": pin})
+        pins = SimpleNamespace(**fields, node="A", primary_node="A", generation=1, attempt_id=pin,
+                               release={"source_commit": pin})
         postgres = SimpleNamespace(**fields, source_commit=pin)
         portal_complete = False
         probed = []
@@ -315,7 +333,7 @@ class NativeGuestLiveTests(unittest.TestCase):
         generation = native_guest_activation.ServingGeneration("B", 2, 2, 3)
         shared = dict(boot_sha256=pin, installation_id=pin, system_id="1", plan_sha256=pin,
                       manifest_sha256=pin, cluster="fixture", validate=lambda: None)
-        pins = SimpleNamespace(**shared, node="B", release={"source_commit": pin})
+        pins = SimpleNamespace(**shared, node="B", primary_node="B", generation=2, release={"source_commit": pin})
         postgres = SimpleNamespace(**shared, source_commit=pin)
         args = (pins, SimpleNamespace(validate=lambda: None), postgres, Path("/unused"), generation)
         authority = dict(activation_receipt_sha256=pin, authority_sha256=pin, windows_generation=2,
@@ -459,6 +477,29 @@ class NativeRestoreReadbackTests(unittest.TestCase):
         self.binding = self.bridge.Binding(*("abcdef"[i] * 64 for i in range(5)))
         self.args = dict(zip(self.bridge.RESTORE_ARGS, ("7" * 64, "8" * 64, "9" * 64)))
         self.request = self.bridge.Request(self.binding, "A", "restore", 6, "1" * 64, self.args)
+
+    def test_existing_worker_input_remains_initial_generation_only(self):
+        worker = native_guest_worker
+        runtime = worker.runtime
+        pin = "1" * 64
+        leaf = dict.fromkeys(("engine_id_sha256", "renderer_sha256", "spec_sha256", "inputs_sha256",
+                              "broker_instance"), pin)
+        leaf["release"] = {"source_commit": "a" * 40, "release_id": pin, "source_files_sha256": pin}
+        restore_fields = worker._names(worker.restore.RestorePins) - worker.RESTORE_DYNAMIC - {"retained_postgres_id"}
+        payload = dict(schema_version=1, binding=self.binding.fields(), node="A", installation_id=pin,
+                       restore=dict.fromkeys(restore_fields, pin), runtime=leaf)
+        db = SimpleNamespace(plan_sha256=pin, system_id="123", cluster="fixture", postgres_id=pin,
+                             retained_postgres_id=None, inventory_sha256=pin, source_commit="a" * 40)
+        with patch.object(worker.os, "geteuid", return_value=0), patch.object(runtime, "_directory"), \
+                patch.object(worker, "_read_json", return_value=(b"input", payload)), \
+                patch.object(worker.GuestWorker, "identity"), patch.object(worker.GuestWorker, "restore_pins", return_value=db):
+            installed = worker.GuestWorker(self.request)
+            pins = installed.runtime_pins()
+            self.assertEqual((pins.primary_node, pins.generation), ("A", 1))
+            self.assertNotIn("generation", runtime._runtime_identity(pins))
+            leaf.update(primary_node="B", generation=2)
+            with self.assertRaisesRegex(TransitionBlocked, "guest_worker_installed_scope_mismatch"):
+                worker.GuestWorker(self.request)
 
     def test_unconfirmed_ssh_exit_reads_receipt_once_without_restoring_again(self):
         bridge = self.bridge

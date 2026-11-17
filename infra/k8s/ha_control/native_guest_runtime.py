@@ -58,6 +58,8 @@ class RuntimePins:
     broker_instance: str
     postgres_id: str | None = None
     retained_postgres_id: str | None = None
+    primary_node: str = "A"
+    generation: int = 1
 
     def validate(self):
         digests = (self.boot_sha256, self.installation_id, self.protected_inventory_sha256, self.engine_id_sha256,
@@ -70,6 +72,8 @@ class RuntimePins:
                    (_match(SHA, self.retained_postgres_id) and self.postgres_id is not None
                     and self.retained_postgres_id != self.postgres_id)), "guest_runtime_postgres_pins_invalid")
         config._guest_identity(self.cluster, self.release, self.plan_sha256, self.node, self.installation_id, self.system_id)
+        _need(type(self.primary_node) is str, "guest_runtime_pins_invalid")
+        config._partner(self.primary_node, self.generation)
 
 
 def _match(pattern, value):
@@ -165,7 +169,8 @@ def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False)
 
     clients = {}
     identity = dict(cluster=pins.cluster, release=pins.release, plan_sha256=pins.plan_sha256,
-                    node=pins.node, installation_id=pins.installation_id, system_id=pins.system_id)
+                    node=pins.node, installation_id=pins.installation_id, system_id=pins.system_id,
+                    primary_node=pins.primary_node, generation=pins.generation)
     for service in sorted(SERVICES):
         root = ROOT / "apps" / service
         groups = {APP_UID, INGRESS_UID}
@@ -298,6 +303,9 @@ def _guard(pins, assert_guard):
         "frozen_transfer_sha256": pins.frozen_transfer_sha256, "restore_receipt_sha256": pins.restore_receipt_sha256,
         "legacy_writers_closed": True, "target_writes_closed": True, "frozen_transfer_closed": True,
     }
+    if pins.generation > 1:
+        expected.update(primary_node=pins.primary_node, generation=pins.generation, previous_primary_fenced=True,
+                        target_replay_verified=True)
     actual = assert_guard()
     _need(type(actual) is dict and actual.keys() == expected.keys()
           and all(type(actual[key]) is type(value) and actual[key] == value for key, value in expected.items()),
@@ -417,15 +425,20 @@ def preflight_runtime(pins, stage):
 
 
 def _runtime_identity(pins):
-    return {"node": pins.node, "installation_id": pins.installation_id, "attempt_id": pins.attempt_id,
-            "cluster": pins.cluster, "system_id_sha256": _digest(pins.system_id.encode()),
-            "source_commit": pins.release["source_commit"], "release_id": pins.release["release_id"],
-            "source_files_sha256": pins.release["source_files_sha256"], "plan_sha256": pins.plan_sha256,
-            "manifest_sha256": pins.manifest_sha256, "frozen_transfer_sha256": pins.frozen_transfer_sha256,
-            "restore_receipt_sha256": pins.restore_receipt_sha256, "boot_sha256": pins.boot_sha256,
-            "engine_id_sha256": pins.engine_id_sha256, "protected_inventory_sha256": pins.protected_inventory_sha256,
-            "renderer_sha256": pins.renderer_sha256, "spec_sha256": pins.spec_sha256,
-            "inputs_sha256": pins.inputs_sha256, "broker_instance": pins.broker_instance}
+    identity = {
+        "node": pins.node, "installation_id": pins.installation_id, "attempt_id": pins.attempt_id,
+        "cluster": pins.cluster, "system_id_sha256": _digest(pins.system_id.encode()),
+        "source_commit": pins.release["source_commit"], "release_id": pins.release["release_id"],
+        "source_files_sha256": pins.release["source_files_sha256"], "plan_sha256": pins.plan_sha256,
+        "manifest_sha256": pins.manifest_sha256, "frozen_transfer_sha256": pins.frozen_transfer_sha256,
+        "restore_receipt_sha256": pins.restore_receipt_sha256, "boot_sha256": pins.boot_sha256,
+        "engine_id_sha256": pins.engine_id_sha256, "protected_inventory_sha256": pins.protected_inventory_sha256,
+        "renderer_sha256": pins.renderer_sha256, "spec_sha256": pins.spec_sha256,
+        "inputs_sha256": pins.inputs_sha256, "broker_instance": pins.broker_instance,
+    }
+    if pins.generation > 1:
+        identity.update(primary_node=pins.primary_node, generation=pins.generation)
+    return identity
 
 
 def _runtime_intent(pins):

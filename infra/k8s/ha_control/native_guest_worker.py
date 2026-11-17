@@ -43,7 +43,7 @@ RESTORE_DYNAMIC = {"boot_sha256", "installation_id", "plan_sha256", "manifest_sh
 RUNTIME_DYNAMIC = {
     "node", "boot_sha256", "installation_id", "protected_inventory_sha256", "plan_sha256", "manifest_sha256",
     "frozen_transfer_sha256", "restore_receipt_sha256", "attempt_id", "system_id", "cluster",
-    "postgres_id", "retained_postgres_id",
+    "postgres_id", "retained_postgres_id", "primary_node", "generation",
 }
 STANDBY = """
 SELECT json_build_array(session_user, current_database(), current_setting('cluster_name'),
@@ -169,6 +169,7 @@ class GuestWorker:
                                    manifest_sha256=manifest, frozen_transfer_sha256=transfer,
                                    restore_receipt_sha256=restored, attempt_id=self.request.binding.attempt_id,
                                    system_id=db.system_id, cluster=db.cluster,
+                                   primary_node="A", generation=1,
                                    postgres_id=db.postgres_id, retained_postgres_id=db.retained_postgres_id,
                                    protected_inventory_sha256=inventory or db.inventory_sha256)
         pins.validate()

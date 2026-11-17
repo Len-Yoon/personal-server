@@ -282,7 +282,8 @@ def _probe_route(context, leaf, ip, service, deadline, *, expected_node=None):
 def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha256, authority_sha256,
                    windows_generation, windows_generation_sha256, live_lease_sha256, live_authority_sha256):
     """Return a digest only after fresh A runtime, mTLS and database observations."""
-    _need(os.geteuid() == 0 and pins.node == "A", "guest_live_a_root_required")
+    _need(os.geteuid() == 0 and pins.node == "A" and pins.primary_node == "A" and pins.generation == 1,
+          "guest_live_a_root_required")
     return _observe_live(pins, activation, postgres, stage, activation_receipt_sha256=activation_receipt_sha256,
                          authority_sha256=authority_sha256, windows_generation=windows_generation,
                          windows_generation_sha256=windows_generation_sha256, live_lease_sha256=live_lease_sha256,
@@ -295,6 +296,7 @@ def observe_live_generation(pins, activation, postgres, stage, generation, **aut
     _need(type(generation) is ServingGeneration, "guest_live_observation_unbound")
     generation.validate()
     _need(os.geteuid() == 0 and pins.node == generation.primary and generation.epoch > 1
+          and pins.primary_node == generation.primary and pins.generation == generation.epoch
           and type(authority.get("windows_generation")) is int and authority["windows_generation"] == generation.epoch,
           "guest_live_observation_unbound")
     return _observe_live(pins, activation, postgres, stage, generation=generation, **authority)
