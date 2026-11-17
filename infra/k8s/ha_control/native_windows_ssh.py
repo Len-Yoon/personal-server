@@ -156,7 +156,8 @@ class WindowsSsh:
 def fixed_script(name, digest, parameters):
     """Load an approved colocated script and pass only scalar, shell-quoted values."""
     bridge._need(name in {'windows-ha-cutover-live-authority.ps1', 'windows-ha-start-initial-service.ps1',
-                         'windows-ha-start-lease-observer.ps1', 'windows-ha-stage-initial-activation.ps1'},
+                         'windows-ha-start-lease-observer.ps1', 'windows-ha-stage-initial-activation.ps1',
+                         'windows-ha-replacement-network.ps1'},
                  'native_windows_ssh_script_unapproved')
     source = Path(__file__).with_name(name).read_bytes()
     bridge._need(bridge._hash(digest) and hashlib.sha256(source).hexdigest() == digest,

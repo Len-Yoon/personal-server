@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import json
 from email.message import Message
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -17,6 +18,44 @@ from ha_control.windows import WindowsFence
 from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_execution, transition_ingress
 from ha_control import wsl_writer_proof
 from ha_control.native_guest_activation import ServingGeneration
+from ha_control.native_replacement_network import WindowsReplacementNetwork
+
+
+class WindowsReplacementNetworkTests(unittest.TestCase):
+    def test_binds_native_result_to_fence_vm_and_switch(self):
+        bridge = transition_ingress.bridge
+        binding = bridge.Binding(*(letter * 64 for letter in "abcde"))
+        replacement = {"node": "A", "installation_id": "f" * 64, "vm_id": "replacement",
+                       "disk_paths_sha256": "1" * 64}
+        request = bridge.Request(binding, "A", bridge.GUEST_PREFLIGHT_REPLACEMENT, 2, "2" * 64,
+                                 {"installation_id": replacement["installation_id"], "bootstrap_manifest_sha256": "3" * 64})
+        stage = "4" * 64
+        windows = MagicMock()
+        windows.powershell.return_value = {"attached": True, "stage_sha256": stage, "vm_id": "replacement",
+                                           "switch_id": "live"}
+        script = ROOT / "infra/k8s/ha_control/windows-ha-replacement-network.ps1"
+        implementation = WindowsReplacementNetwork(
+            windows, sha256(script.read_bytes()).hexdigest(), primary_vm_id="survivor",
+            old_disk_paths_sha256="5" * 64, isolated_switch_id="isolated", serving_switch_id="live",
+            replacement_mac="020000000001",
+        )
+        fence = MagicMock(return_value=None)
+        with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
+            implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
+        windows.powershell.assert_not_called()
+
+        fence.reset_mock(return_value=True)
+        fence.side_effect = [stage, None]
+        with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
+            implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
+        windows.powershell.assert_called_once()
+        self.assertEqual(fence.call_count, 2)
+        fence.side_effect = None
+        fence.return_value = stage
+        self.assertTrue(implementation(replacement, "old", request, stage, 90, assert_fenced=fence))
+        windows.powershell.return_value["switch_id"] = "unexpected"
+        with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
+            implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
 
 
 class TransitionIngressTests(unittest.TestCase):
