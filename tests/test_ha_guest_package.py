@@ -1,5 +1,6 @@
 """Guest isolation and transition authority boundaries, without any deployment."""
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -367,7 +368,6 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertNotIn('portal.len.pe.kr', haproxy)
 
     def test_caddy_candidate_preserves_approved_native_crlf_and_http_host(self):
-        import hashlib
         from ha_control.caddy_cutover import render
         from ha_control.controller import TransitionBlocked
 
@@ -379,6 +379,21 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertIn(b'redir https://len.pe.kr{uri} permanent', candidate)
         with self.assertRaisesRegex(TransitionBlocked, 'caddy_cutover_source_unconfirmed'):
             render(source + b'\r\n', digest, fixture()['guest_ip'])
+
+    def test_caddy_roundtrip_requires_exact_current_routes(self):
+        from ha_control.caddy_cutover import render, retarget
+
+        source = (ROOT / 'caddy/Caddyfile').read_bytes()
+        pin = hashlib.sha256(source).hexdigest()
+        a, b = "192.168.100.2", "192.168.100.3"
+        active = render(source, pin, a)
+        candidate = retarget(source, pin, active, a, b)
+        self.assertEqual(candidate.count(f"https://{b}:10443".encode()), 7)
+        self.assertEqual(retarget(source, pin, candidate, b, a), active)
+        with self.assertRaisesRegex(TransitionBlocked, "caddy_failover_active_routes_changed"):
+            retarget(source, pin, active + b"\n", a, b)
+        with self.assertRaisesRegex(TransitionBlocked, "caddy_failover_target_unchanged"):
+            retarget(source, pin, active, a, a)
 
     def test_unpinned_images_secret_injection_and_namespace_bypass_are_rejected(self):
         changes=[lambda v:v['images'].update({'portal-web':'portal:latest'}),

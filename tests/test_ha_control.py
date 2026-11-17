@@ -16,6 +16,17 @@ from ha_control import car_callback_ingress
 
 
 class CarCallbackOriginTests(unittest.TestCase):
+    def test_retarget_requires_exact_existing_route_and_fresh_marker(self):
+        render, retarget = car_callback_ingress.render, car_callback_ingress.retarget
+        a, b, old_pin, new_pin = "192.168.100.2", "192.168.100.3", "a" * 64, "b" * 64
+        active = render(a, route_pin=old_pin)
+        candidate = retarget(active, a, old_pin, b, new_pin)
+        self.assertEqual(candidate, render(b, route_pin=new_pin))
+        self.assertNotIn(old_pin.encode(), candidate)
+        for current, host, marker in ((active + b"\n", b, new_pin), (active, a, new_pin), (active, b, old_pin)):
+            with self.assertRaises(TransitionBlocked):
+                retarget(current, a, old_pin, host, marker)
+
     def test_public_origin_requires_current_marker_and_healthy_upstream(self):
         pin = "a" * 64
         marked = car_callback_ingress.render("192.168.100.2", route_pin=pin)

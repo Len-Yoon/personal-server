@@ -84,3 +84,14 @@ def verify_public_origin(route_pin):
     finally:
         connection.close()
     return hashlib.sha256(f"{PUBLIC_HOST}\n{expected}\n{nonce}\n".encode("ascii")).hexdigest()
+
+
+def retarget(current, previous_ip, previous_pin, next_ip, next_pin):
+    """Keep the registered origin and callback paths while replacing its VM."""
+    previous_pin = _route_pin(previous_pin)
+    next_pin = _route_pin(next_pin)
+    if type(current) is not bytes or current != render(previous_ip, route_pin=previous_pin):
+        raise TransitionBlocked("car_callback_active_route_changed")
+    if next_pin == previous_pin or render(next_ip, route_pin=previous_pin) == current:
+        raise TransitionBlocked("car_callback_transition_target_unchanged")
+    return render(next_ip, route_pin=next_pin)
