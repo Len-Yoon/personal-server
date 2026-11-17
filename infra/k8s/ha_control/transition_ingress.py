@@ -321,6 +321,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
+    caddy._need(guests.assert_serving_endpoints(template.get("pg_nodes")) is True,
+                "transition_ingress_guest_endpoints_unconfirmed")
     pins = generation_handoff_pins(generation)
     caddy._need(type(pins) is dict and set(pins) == {"pins", "postgres", "activation"},
                 "transition_ingress_controller_unbound")

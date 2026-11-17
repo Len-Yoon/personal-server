@@ -18,6 +18,7 @@ from ha_control.windows import WindowsFence
 from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_execution, transition_ingress
 from ha_control import wsl_writer_proof
 from ha_control.native_guest_activation import ServingGeneration
+from ha_control.native_guest_ssh import GuestSshDispatcher
 from ha_control.native_replacement_network import WindowsReplacementNetwork
 
 
@@ -66,12 +67,27 @@ class WindowsReplacementNetworkTests(unittest.TestCase):
             implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
 
 
+class ServingEndpointTests(unittest.TestCase):
+    def test_both_pinned_ssh_hosts_must_match_postgres_plan(self):
+        dispatcher = GuestSshDispatcher.__new__(GuestSshDispatcher)
+        dispatcher.guests = {node: SimpleNamespace(host=host)
+                             for node, host in (("A", "192.168.40.11"), ("B", "192.168.40.12"))}
+        plan = {"A": {"host": "192.168.40.11"}, "B": {"host": "192.168.40.12"}}
+        self.assertTrue(dispatcher.assert_serving_endpoints(plan))
+        for changed in (None, {"A": plan["A"]},
+                        plan | {"B": {"host": "192.168.40.13"}}, {"A": plan["B"], "B": plan["A"]}):
+            with self.assertRaisesRegex(transition_ingress.bridge.BridgeRejected, "serving_endpoint_unbound"):
+                dispatcher.assert_serving_endpoints(changed)
+
+
 class TransitionIngressTests(unittest.TestCase):
     def test_observer_and_apps_precede_external_route_switch(self):
         from ha_runtime.seven_capture import encoded
 
         generation = ServingGeneration("B", 2, 2, 2)
-        candidate = encoded({"generation": 2, "node": "A", "source_lease_close_required": True})
+        pg_nodes = {"A": {"host": "192.168.40.11"}, "B": {"host": "192.168.40.12"}}
+        candidate = encoded({"generation": 2, "node": "A", "source_lease_close_required": True,
+                             "pg_nodes": pg_nodes})
         steps = []
         execution = MagicMock()
         execution.publish_observer_runtime.side_effect = lambda **_: steps.append("runtime") or {"runtime": True}
@@ -114,7 +130,8 @@ class TransitionIngressTests(unittest.TestCase):
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
             preflight_replacement=MagicMock(return_value=True),
             attach_replacement_network=MagicMock(side_effect=lambda *_a, **_kw: steps.append("attach") or True),
-            guests=SimpleNamespace(verify_prepared_transition_target=MagicMock(return_value=True),
+            guests=SimpleNamespace(assert_serving_endpoints=MagicMock(return_value=True),
+                                   verify_prepared_transition_target=MagicMock(return_value=True),
                                    preflight_replacement_standby=MagicMock(
                                        side_effect=lambda *_: steps.append("serving-preflight") or True),
                                    publish_generation_handoff=MagicMock(return_value="6"*64),
@@ -154,6 +171,14 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
                 patch.object(transition_ingress, "switch_ingress", side_effect=switch_routes) as switch:
+            endpoint_check = args["guests"].assert_serving_endpoints
+            endpoint_check.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "guest_endpoints_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            endpoint_check.assert_called_once_with(pg_nodes)
+            args["guests"].verify_prepared_transition_target.assert_not_called()
+            stage_service.assert_not_called()
+            endpoint_check.return_value = True
             args["guests"].verify_prepared_transition_target.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)

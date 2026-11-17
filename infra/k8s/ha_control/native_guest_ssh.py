@@ -330,6 +330,14 @@ class GuestSshDispatcher:
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
+    def assert_serving_endpoints(self, pg_nodes):
+        """Bind subsequent SSH requests to both approved PostgreSQL hosts."""
+        bridge._need(type(pg_nodes) is dict and set(pg_nodes) == set(self.guests)
+                     and all(type(pg_nodes[node]) is dict and pg_nodes[node].get("host") == guest.host
+                             for node, guest in self.guests.items()),
+                     "guest_ssh_serving_endpoint_unbound")
+        return True
+
     def verify_transition_target(self, request, generation, target, deadline):
         """Check the exact route address via pinned SSH, node, installation and boot identity."""
         generation.validate()
