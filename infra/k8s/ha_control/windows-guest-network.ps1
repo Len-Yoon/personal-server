@@ -31,7 +31,7 @@ function Assert-GuestNetworkSpec($Spec){
         $keys=@($keys|Where-Object{$_ -cnotin @('guest_a_ipv4','guest_b_ipv4')})
         $keys+=@('node','guest_ipv4','vm_manifest_base64')
         if($Spec.node -isnot [string] -or $Spec.node -cnotin @('A','B') -or
-            $Spec.prefix_length -ne 30 -or $Spec.vm_driver_source_commit -cne $Spec.source_commit -or
+            $Spec.prefix_length -ne 30 -or
             $Spec.vm_manifest_base64 -isnot [string] -or
             $Spec.vm_manifest_base64 -cnotmatch '^[A-Za-z0-9+/]{4,32768}={0,2}$'){throw 'guest_network_isolated_scope_rejected'}
     }
@@ -124,7 +124,8 @@ function Invoke-GuestNetwork{
         $Manifest=$networkSpec.vm_manifest_base64
         $ManifestSha256=$pins.manifest_sha256
         $vmSpec=Read-GuestVmSpec
-        if($vmSpec.schema_version -ne 3 -or $vmSpec.installation_id -cne $networkSpec.installation_id -or
+        if($vmSpec.schema_version -ne 3 -or $vmSpec.source_commit -cne $pins.source_commit -or
+            $vmSpec.installation_id -cne $networkSpec.installation_id -or
             $vmSpec.node -cne $node -or $vmSpec.config_profile.acceptance_scope -cne 'isolated-predeployment' -or
             $vmSpec.optional_egress_nic){throw 'guest_network_isolated_scope_rejected'}
     }else{

@@ -38,7 +38,7 @@ if($range.last-$range.first -ne 7 -or $range.address-$range.first -ne 3){throw '
     def test_isolated_single_guest_manifest_uses_two_hosts_in_a_slash_30(self):
         self.run_ps(r'''
 . $env:NETWORK_SOURCE
-$value=[pscustomobject]@{schema_version=3;source_commit=('a'*40);vm_driver_source_commit=('a'*40);vm_driver_sha256=('c'*64);installation_id=('d'*64);prepared_receipt_sha256=('e'*64);host_ipv4='10.8.7.1';prefix_length=30;node='A';guest_ipv4='10.8.7.2';vm_manifest_base64='eyJ2IjoxfQ=='}
+$value=[pscustomobject]@{schema_version=3;source_commit=('a'*40);vm_driver_source_commit=('b'*40);vm_driver_sha256=('c'*64);installation_id=('d'*64);prepared_receipt_sha256=('e'*64);host_ipv4='10.8.7.1';prefix_length=30;node='A';guest_ipv4='10.8.7.2';vm_manifest_base64='eyJ2IjoxfQ=='}
 Assert-GuestNetworkSpec $value
 foreach($case in @(@('prefix_length',29),@('guest_ipv4','10.8.7.3'),@('guest_ipv4','10.8.7.5'),@('guest_ipv4','10.8.7.1'),@('node','C'),@('vm_manifest_base64','?'))){
  $copy=$value.PSObject.Copy();$copy.($case[0])=$case[1];$blocked=$false
