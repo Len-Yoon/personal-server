@@ -13,6 +13,7 @@ param(
     [string]$ExpectedActivationIntentSha256,
     [switch]$StartTransition,
     [switch]$CheckLeaseClosed,
+    [switch]$RestoreClosureArgs,
     [switch]$ObserveTransition,
     [switch]$StopTransition,
     [string]$ExpectedServicePid,
@@ -83,11 +84,36 @@ function Write-TransitionArgsStage([string]$Path, [byte[]]$Bytes, $Acl) {
     try { $file.Write($Bytes,0,$Bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
 }
 
+function Confirm-ClosureArgsState([string]$ServingSha, [string]$ClosureSha) {
+    try { Assert-TransitionPreflight $ServingSha }
+    catch {
+        if ($_.Exception.Message -cne 'preflight_hash_rejected') { throw }
+        Assert-TransitionPreflight $ClosureSha
+    }
+}
+
+function Restore-TransitionServingArgs([string]$ArgsPath, [string]$RestorePath, [string]$ServingSha, [string]$ClosureSha) {
+    Confirm-ClosureArgsState $ServingSha $ClosureSha
+    $observedArgs = (Get-FileHash -LiteralPath $ArgsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($observedArgs -ceq $ClosureSha) {
+        $restoreEntry = Get-Item -LiteralPath $RestorePath -Force
+        if ($restoreEntry -isnot [IO.FileInfo] -or $restoreEntry.Length -gt 65536) {
+            throw 'initial_service_transition_restore_pin'
+        }
+        Assert-PreflightEntry $restoreEntry $authors ($authors + @($sid)) $true $false
+        if ((Get-FileHash -LiteralPath $RestorePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ServingSha) {
+            throw 'initial_service_transition_restore_pin'
+        }
+        [IO.File]::Replace($RestorePath,$ArgsPath,[NullString]::Value,$false)
+    }
+    Assert-TransitionPreflight $ServingSha
+}
+
 function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Approval) {
     $scope = $Plan.windows_enforced
     $pins = $Plan.transition_service_start
     $mode = $pins.mode
-    if ($CheckLeaseClosed) {
+    if ($CheckLeaseClosed -or $RestoreClosureArgs) {
         if ($pins.lease_closure_check -isnot [bool] -or -not $pins.lease_closure_check) {
             throw 'initial_service_transition_scope'
         }
@@ -133,7 +159,8 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     } finally { $hash.Dispose() }
     $preflightBlock = [ScriptBlock]::Create($encoder.GetString($preflight))
     . $preflightBlock -HostRoot $hostRoot -HostSha256 $ServiceHostSha256 -ArgsSha256 $argsSha -ServiceSid $sid -TrustedAdminSids $pins.trusted_admin_sids
-    Assert-TransitionPreflight $servingSha
+    if ($RestoreClosureArgs) { Confirm-ClosureArgsState $servingSha $argsSha }
+    else { Assert-TransitionPreflight $servingSha }
     if ($PlanPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z') {
         throw 'initial_service_transition_intent_scope'
     }
@@ -143,7 +170,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     for ($parent = $intentRoot.Parent; $null -ne $parent; $parent = $parent.Parent) {
         Assert-PreflightEntry $parent $authors $authors $false $true
     }
-    $intentPrefix = if ($CheckLeaseClosed) {'transition-closure-start-'} else {'transition-service-start-'}
+    $intentPrefix = if ($CheckLeaseClosed -or $RestoreClosureArgs) {'transition-closure-start-'} else {'transition-service-start-'}
     $intentPath = Join-Path $intentRoot.FullName ($intentPrefix + $PlanSha256 + '.json')
     $intent = [ordered]@{service_name=$ServiceName;controller_plan_sha256=$PlanSha256;approval_sha256=$ApprovalSha256;
         args_sha256=$argsSha;service_image_path_sha256=$pins.service_image_path_sha256;mode=$mode}
@@ -163,8 +190,8 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize,Delete',[IO.FileShare]::None,4096,
         [IO.FileOptions]::DeleteOnClose,$intentAcl)
     try {
-        Assert-TransitionPreflight $servingSha
-        if ($ObserveTransition -or $StopTransition) {
+        if (-not $RestoreClosureArgs) { Assert-TransitionPreflight $servingSha }
+        if ($ObserveTransition -or $StopTransition -or $RestoreClosureArgs) {
             $intentHash = [Security.Cryptography.SHA256]::Create()
             try { $intentSha = [BitConverter]::ToString($intentHash.ComputeHash($intentBytes)).Replace('-','').ToLowerInvariant() }
             finally { $intentHash.Dispose() }
@@ -173,6 +200,14 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
             Assert-PreflightEntry $entry $authors $authors $true $false
             if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
                 $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+            if ($RestoreClosureArgs) {
+                if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+                Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+                Assert-TransitionStopped $Plan $HostPath $Current.PathName
+                Restore-TransitionServingArgs (Join-Path $hostRoot 'service.args') ($intentPath + '.serving-args') $servingSha $argsSha
+                [ordered]@{serving_args_restored=$true;controller_plan_sha256=$PlanSha256}|ConvertTo-Json -Compress
+                return
+            }
         } else {
             if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
             Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
@@ -225,14 +260,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
                     if ($null -eq $receipt) { throw 'initial_service_closure_check_unconfirmed' }
                 } finally {
                     Assert-TransitionStopped $Plan $HostPath $Current.PathName
-                    $observedArgs = (Get-FileHash -LiteralPath $argsPath -Algorithm SHA256).Hash.ToLowerInvariant()
-                    if ($observedArgs -ceq $argsSha) {
-                        if ((Get-FileHash -LiteralPath $restore -Algorithm SHA256).Hash.ToLowerInvariant() -cne $servingSha) {
-                            throw 'initial_service_transition_restore_pin'
-                        }
-                        [IO.File]::Replace($restore,$argsPath,[NullString]::Value,$false)
-                    }
-                    Assert-TransitionPreflight $servingSha
+                    Restore-TransitionServingArgs $argsPath $restore $servingSha $argsSha
                     foreach ($leaf in @($stage,$restore)) {
                         if (Test-Path -LiteralPath $leaf) { Remove-Item -LiteralPath $leaf -ErrorAction Stop }
                     }
@@ -312,8 +340,8 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
 }
 
 try {
-    $transition = $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed
-    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed) | Where-Object { $_.IsPresent }).Count
+    $transition = $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs
+    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs) | Where-Object { $_.IsPresent }).Count
     if (-not $Go -or $modes -gt 1 -or
         ($StopTransition -and ($ExpectedServicePid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
             $ExpectedServiceCreatedTicks -cnotmatch '\A[1-9][0-9]{1,19}\z')) -or

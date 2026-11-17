@@ -166,14 +166,21 @@ class TransitionServiceStartTests(unittest.TestCase):
             "Start-Service -Name $ServiceName",
             "} finally {",
             "Assert-TransitionStopped $Plan $HostPath $Current.PathName",
-            "[IO.File]::Replace($restore,$argsPath",
-            "Assert-TransitionPreflight $servingSha",
+            "Restore-TransitionServingArgs $argsPath $restore $servingSha $argsSha",
             "$receipt | ConvertTo-Json -Compress",
             "} finally { $commandLock.Dispose() }",
         )
         cursor = 0
         for statement in statements:
             cursor = scope.index(statement, cursor) + len(statement)
+
+    def test_native_closure_restore_does_not_replay_scm_start(self):
+        script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
+        scope = script[script.index("            if ($RestoreClosureArgs) {"):
+                       script.index("        } else {\n            if ('TrustedStoppedV1.Native'")]
+        self.assertLess(scope.index("Assert-TransitionStopped"), scope.index("Restore-TransitionServingArgs"))
+        self.assertLess(scope.index("Restore-TransitionServingArgs"), scope.index("serving_args_restored"))
+        self.assertNotIn("Start-Service", scope)
 
     def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"

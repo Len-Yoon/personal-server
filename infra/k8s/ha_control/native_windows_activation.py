@@ -386,7 +386,14 @@ class WindowsTransitionServiceStart:
                      "native_transition_stop_scope_invalid")
         return self._invoke(controller, parameters, deadline, observe=False, stop=started)
 
-    def _invoke(self, controller, parameters, deadline, *, observe, stop=None):
+    def check_lease_closed(self, controller, parameters, deadline):
+        return self._invoke(controller, parameters, deadline, observe=False, closure="CheckLeaseClosed")
+
+    def restore_closure_args(self, controller, parameters, deadline):
+        """Reconcile an uncertain invocation without replaying SCM start."""
+        return self._invoke(controller, parameters, deadline, observe=False, closure="RestoreClosureArgs")
+
+    def _invoke(self, controller, parameters, deadline, *, observe, stop=None, closure=None):
         fields = START_PARAMETERS - {"BindingPath"}
         invalid = "native_transition_start_scope_invalid"
         bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
@@ -404,6 +411,29 @@ class WindowsTransitionServiceStart:
                      and type(plan.get("transition_service_start")) is dict
                      and bridge._hash(plan["transition_service_start"].get("service_image_path_sha256"))
                      and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
+        if closure is not None:
+            bridge._need(plan["transition_service_start"].get("lease_closure_check") is True, invalid)
+            source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
+                closure: True, "Go": True,
+            })
+            bridge._remaining(deadline)
+            result = self.windows.powershell(source, deadline)
+            if closure == "RestoreClosureArgs":
+                bridge._need(bridge._matches(result, {
+                    "serving_args_restored": True, "controller_plan_sha256": controller["plan_sha256"],
+                }), "native_transition_closure_restore_unconfirmed")
+            else:
+                sid = plan["windows_enforced"].get("service_sid")
+                bridge._need(type(result) is dict and set(result) == {
+                    "closure_check_completed", "controller_plan_sha256", "service_sid", "host_pid", "started_at_ms",
+                } and result["closure_check_completed"] is True
+                    and result["controller_plan_sha256"] == controller["plan_sha256"]
+                    and type(sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]+-){4}[0-9]+", sid)
+                    and result["service_sid"] == sid
+                    and type(result["host_pid"]) is int and 0 < result["host_pid"] <= 2147483647
+                    and type(result["started_at_ms"]) is int and result["started_at_ms"] > 0,
+                    "native_transition_closure_check_unconfirmed")
+            return result
         if stop is not None:
             source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
                 "StopTransition": True, "ExpectedServicePid": str(stop["service_pid"]),
