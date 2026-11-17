@@ -17,7 +17,7 @@ from ha_runtime import seven_capture
 
 from .caddy_runtime import COMPOSE as CADDY_COMPOSE, DOCKER as CADDY_DOCKER, PLUGIN_DIRS
 from .caddy_runtime import caddy_execution_authorized
-from .transition_execution import authorized as transition_execution_authorized, config_override
+from .transition_execution import assert_published_runtime, authorized as transition_execution_authorized, config_override
 from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
 from .native_wsl_launcher import checked
@@ -437,6 +437,8 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
     runtime = seven_capture.parse(reader.read(descriptor))
     _need(type(runtime) is dict and runtime.get('plan_sha256') == plan and runtime.get('attempt_id') == attempt,
           'legacy_writer_proof_scope_invalid')
+    if 'ingress_execution' in runtime:
+        assert_published_runtime(reader, path, runtime, plan, attempt)
     settled = partial(_recovery_settled, runtime=path, plan=plan, attempt=attempt,
                       coordinator=runtime.get('coordinator'), ingress_execution=runtime.get('ingress_execution'))
     proof = observe_closed(runtime['writer_baseline'], challenge, deadline,

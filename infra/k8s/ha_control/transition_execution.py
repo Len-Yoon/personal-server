@@ -1,6 +1,7 @@
 """Witness exact ingress mutations without relaxing legacy writer exclusion."""
 
 from contextlib import contextmanager
+import copy
 import fcntl
 import os
 from pathlib import Path
@@ -35,6 +36,40 @@ def config_override(spec, project):
     return None
 
 
+def _observer_paths(runtime_path, legacy_attempt, spec):
+    directory = _scope(spec)
+    caddy._need(type(legacy_attempt) is str and caddy.ID.fullmatch(legacy_attempt)
+                and spec["attempt_id"] != legacy_attempt
+                and runtime_path == directory.parent / "runtime.json"
+                and directory.name == "ingress" and directory.parent.name == spec["attempt_id"],
+                "ingress_observer_runtime_unbound")
+    return directory.parent.parent / legacy_attempt / "runtime.json"
+
+
+def _observer_runtime(reader, previous_path, previous_sha256, legacy_plan, legacy_attempt, spec):
+    caddy._need(type(previous_sha256) is str and caddy.ID.fullmatch(previous_sha256)
+                and type(legacy_plan) is str and caddy.ID.fullmatch(legacy_plan), "ingress_observer_runtime_unbound")
+    descriptor = {"path": str(previous_path), "sha256": previous_sha256,
+                  "bytes": reader.watch(previous_path).stat().st_size}
+    previous = seven_capture.parse(reader.read(descriptor))
+    caddy._need(type(previous) is dict and type(previous["schema_version"]) is int and previous["schema_version"] == 1
+                and (previous["plan_sha256"], previous["attempt_id"]) == (legacy_plan, legacy_attempt)
+                and isinstance(previous["writer_baseline"], dict) and "ingress_execution" not in previous
+                and "legacy_runtime_sha256" not in previous, "ingress_observer_runtime_unbound")
+    # Copy the closed-writer baseline. The old coordinator's command exception
+    # must not follow the new process, although the legacy fence stays bound.
+    return {key: value for key, value in previous.items() if key != "coordinator"} | {
+        "ingress_execution": spec, "legacy_runtime_sha256": previous_sha256,
+    }
+
+
+def assert_published_runtime(reader, path, runtime, legacy_plan, legacy_attempt):
+    spec = runtime["ingress_execution"]
+    previous_path = _observer_paths(path, legacy_attempt, spec)
+    expected = _observer_runtime(reader, previous_path, runtime["legacy_runtime_sha256"], legacy_plan, legacy_attempt, spec)
+    caddy._need(seven_capture.encoded(expected) == seven_capture.encoded(runtime), "ingress_observer_runtime_unbound")
+
+
 def _inputs(reader, directory, spec, kind, argv):
     outer, outer_sha = _read(reader, directory / "ingress-switch-intent.json")
     caddy._need((outer["plan_sha256"], outer["attempt_id"]) == (spec["plan_sha256"], spec["attempt_id"]),
@@ -58,8 +93,29 @@ def _inputs(reader, directory, spec, kind, argv):
 
 class TransitionExecution:
     def __init__(self, spec):
-        self.spec = spec
+        self.spec = copy.deepcopy(spec)
         self.directory = _scope(spec)
+
+    def publish_observer_runtime(self, *, previous_sha256, legacy_plan, legacy_attempt, assert_legacy_closed):
+        """Publish a fresh immutable observer input while the same coordinator holds its lock."""
+        runtime_path = self.directory.parent / "runtime.json"
+        previous_path = _observer_paths(runtime_path, legacy_attempt, self.spec)
+        caddy._private_dir(runtime_path.parent)
+        identity = caddy.CaddyExecution.identity()
+        caddy._need(identity == self.spec["coordinator"]
+                    and caddy._lock_held_by(self.directory / "ingress-switch.lock", identity["pid"]),
+                    "ingress_execution_unlocked")
+        reader = seven_capture.Reader()
+        runtime = _observer_runtime(reader, previous_path, previous_sha256, legacy_plan, legacy_attempt, self.spec)
+        assert_legacy_closed()
+        reader.unchanged()
+        payload = seven_capture.encoded(runtime)
+        caddy._write(runtime_path, payload, 0o400)
+        caddy._sync_dir(runtime_path.parent)
+        reader.unchanged()
+        assert_legacy_closed()
+        return {"runtime_path": str(runtime_path), "runtime_sha256": caddy._sha(payload),
+                "plan": legacy_plan, "attempt": legacy_attempt}
 
     @contextmanager
     def guard(self, main, car):

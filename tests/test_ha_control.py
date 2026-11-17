@@ -18,6 +18,55 @@ from ha_control.native_guest_activation import ServingGeneration
 
 
 class TransitionIngressTests(unittest.TestCase):
+    def test_observer_runtime_publishes_exact_prior_baseline_and_new_command_scope(self):
+        import os
+        import time
+
+        from ha_runtime.seven_capture import encoded
+
+        caddy = caddy_runtime
+        legacy_plan, prior_attempt, next_attempt = "a"*64, "b"*64, "c"*64
+        owner = {"pid": os.getpid(), "start": 100, "process": "d"*64}
+        with tempfile.TemporaryDirectory() as temp, patch.object(caddy, "_private_dir", side_effect=Path):
+            root = Path(temp).resolve()
+            prior = root/prior_attempt
+            next_dir = root/next_attempt
+            ingress = next_dir/"ingress"
+            for directory in (prior, next_dir, ingress):
+                directory.mkdir(mode=0o700)
+            raw = encoded({"schema_version": 1, "plan_sha256": legacy_plan, "attempt_id": prior_attempt,
+                           "writer_baseline": {"writers": ["original"]}, "coordinator": {"pid": 99}})
+            caddy._write(prior/"runtime.json", raw, 0o600)
+            spec = {"directory": str(ingress), "plan_sha256": "e"*64, "attempt_id": next_attempt,
+                    "project": "personal-server", "coordinator": owner}
+            execution = transition_execution.TransitionExecution(spec)
+            closed = MagicMock()
+            with patch.object(caddy.CaddyExecution, "identity", return_value=owner), patch.object(
+                caddy, "_lock_held_by", return_value=True,
+            ):
+                binding = execution.publish_observer_runtime(previous_sha256=caddy._sha(raw), legacy_plan=legacy_plan,
+                                                            legacy_attempt=prior_attempt, assert_legacy_closed=closed)
+            self.assertEqual(closed.call_count, 2)
+            active = next_dir/"runtime.json"
+            self.assertEqual(caddy._sha(active.read_bytes()), binding["runtime_sha256"])
+            data = json.loads(active.read_bytes())
+            self.assertEqual(data["ingress_execution"], spec)
+            self.assertNotIn("coordinator", data)
+            mount = MagicMock()
+            mount.read_bytes.return_value = b"boot"
+            with patch.object(wsl_writer_proof, "BOOT_ID", mount), patch.object(
+                wsl_writer_proof, "observe_closed", return_value="f"*64,
+            ) as observer, patch.object(wsl_writer_proof, "_recovery_settled", return_value="1"*64):
+                options = {"wsl_boot_sha256": caddy._sha(b"boot"), "challenge": "2"*64, "deadline": time.monotonic()+2}
+                wsl_writer_proof.prove_runtime(**binding, **options)
+                self.assertEqual(observer.call_args.args[0], {"writers": ["original"]})
+                forged = encoded(data | {"writer_baseline": {"writers": []}})
+                active.unlink()
+                caddy._write(active, forged, 0o400)
+                with self.assertRaisesRegex(TransitionBlocked, "ingress_observer_runtime_unbound"):
+                    wsl_writer_proof.prove_runtime(**(binding | {"runtime_sha256": caddy._sha(forged)}), **options)
+                observer.assert_called_once()
+
     def test_writer_observer_permits_only_exact_locked_ingress_commands(self):
         import fcntl
         import os
