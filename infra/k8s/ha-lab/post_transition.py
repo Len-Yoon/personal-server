@@ -8,12 +8,27 @@ def run(stage, service, node):
     import ha_runtime
     from ha_runtime.config import WEB
     from app.services import ha_backend
+    if stage == "inactive":
+        try:
+            with ha_runtime.state_transaction(service, "transition_fixture", {}) as state:
+                state["inactive_write"] = True
+        except ha_runtime.DatabaseUnavailable as error:
+            expected = "not_serving_owner" if service in WEB else "not_worker_owner"
+            if str(error) != expected:
+                raise
+            return {"status": "PASS", "stage": stage, "service": service, "node": node, "write_denied": True}
+        raise AssertionError("inactive_write_admitted")
     if service in {"book-memo", "youtube-memo"}:
         ha_backend.require_schema()
     key = "transition_fixture"
     with ha_runtime.state_transaction(service, key, {}) as state:
-        if stage == "restored" and state.get("promoted") is not True:
-            raise AssertionError("restored_business_state_missing")
+        previous = {"restored": "promoted", "returned": "failed_over"}.get(stage)
+        if previous and state.get(previous) is not True:
+            raise AssertionError("committed_business_state_missing")
+        if stage in {"failed_over", "returned"} and (
+            state.get("before") is not True or "inactive_write" in state
+        ):
+            raise AssertionError("roundtrip_business_state_mismatch")
         state[stage] = True
     if service == "book-memo":
         from app.services import book_service
@@ -34,7 +49,7 @@ def run(stage, service, node):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=("promoted", "restored"), required=True)
+    parser.add_argument("--stage", choices=("before", "promoted", "restored", "failed_over", "returned", "inactive"), required=True)
     parser.add_argument("--service", required=True)
     parser.add_argument("--node", choices=("A", "B"), default="B")
     args = parser.parse_args()

@@ -327,7 +327,7 @@ class Fixture:
             raise FixtureError(self.phase + ":application_check_failed")
         return value
 
-    def applications(self):
+    def seed_applications(self):
         for service in SERVICES:
             self.report["services"][service] = {"migration": self.execute(service, "A", "seed")}
             for component in ("main", "state", "homeops", "bookmarks"):
@@ -338,6 +338,9 @@ class Fixture:
                     continue
                 role_list = ",".join(roles)
                 self.psql("GRANT USAGE ON SCHEMA " + schema + " TO " + role_list + "; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA " + schema + " TO " + role_list + "; REVOKE UPDATE,DELETE ON " + schema + ".ha_receipts," + schema + ".ha_barriers FROM " + role_list + "; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA " + schema + " TO " + role_list)
+
+    def applications(self):
+        self.seed_applications()
         for service in SERVICES:
             self.report["services"][service]["node_A"] = self.execute(service, "A", "smoke")
         self.report["permits"] = [self.permit_check("active")]
