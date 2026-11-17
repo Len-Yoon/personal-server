@@ -20,12 +20,38 @@ from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
-    WindowsActivationLease, WindowsTransitionLease, bind_transition_observer_plan, publish_transition_observer_config,
+    WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
 from ha_control import cli, scm_pg_auth_probe
+
+
+class TransitionServiceStartTests(unittest.TestCase):
+    def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        service = "N100HA_" + "1"*24 + "_controller"
+        raw = json.dumps({"windows_enforced": {"service_name": service}, "windows_transition_observer": {}}).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        plan = {"plan": raw, "plan_sha256": pin}
+        parameters = {"ServiceName": service, "PlanSha256": pin, "ApprovalSha256": "2"*64,
+                      "ServiceHostSha256": "3"*64, "PreflightSha256": "4"*64,
+                      "PlanPath": r"C:\fixture\plan.json", "ApprovalPath": r"C:\fixture\approval.json",
+                      "PreflightPath": r"C:\fixture\preflight.ps1", "ScmVerifierPath": r"C:\fixture\scm.cs"}
+        windows = MagicMock()
+        windows.powershell.side_effect = TimeoutError("lost reply")
+        start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
+        deadline = time.monotonic() + 30
+        with self.assertRaisesRegex(BridgeRejected, "start_scope_invalid"):
+            start.start(plan, parameters | {"PlanSha256": "5"*64}, deadline)
+        windows.powershell.assert_not_called()
+        with self.assertRaises(TimeoutError):
+            start.start(plan, parameters, deadline)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -StartTransition -Go"))
+        with self.assertRaisesRegex(BridgeRejected, "start_reconciliation_required"):
+            start.start(plan, parameters, deadline)
+        windows.powershell.assert_called_once()
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):

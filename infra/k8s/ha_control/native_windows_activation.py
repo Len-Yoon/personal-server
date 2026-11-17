@@ -361,6 +361,47 @@ def prepare_transition_observer_plan(windows, *, plan_raw, plan_sha256, root, bi
                                          started=started, client_sha256=client_sha256)
 
 
+class WindowsTransitionServiceStart:
+    """Start the prepared controller once. SCM startup is not a write-lease proof."""
+
+    def __init__(self, windows, start_sha256):
+        bridge._need(bridge._hash(start_sha256), "native_transition_start_scope_invalid")
+        self.windows = windows
+        self.start_sha256 = start_sha256
+        self.attempted = False
+
+    def start(self, controller, parameters, deadline):
+        fields = START_PARAMETERS - {"BindingPath"}
+        invalid = "native_transition_start_scope_invalid"
+        bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
+                     and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 1048576
+                     and bridge._digest(controller["plan"]) == controller["plan_sha256"]
+                     and type(parameters) is dict and set(parameters) == fields
+                     and parameters["PlanSha256"] == controller["plan_sha256"]
+                     and all(bridge._hash(parameters[key]) for key in fields if key.endswith("Sha256")), invalid)
+        try:
+            plan = json.loads(controller["plan"], object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+        except (ValueError, UnicodeError, RecursionError):
+            raise bridge.BridgeRejected(invalid) from None
+        bridge._need(type(plan) is dict and type(plan.get("windows_enforced")) is dict
+                     and type(plan.get("windows_transition_observer")) is dict
+                     and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
+        source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
+            "StartTransition": True, "Go": True,
+        })
+        bridge._need(not self.attempted, "native_transition_start_reconciliation_required")
+        bridge._remaining(deadline)
+        self.attempted = True
+        result = self.windows.powershell(source, deadline)
+        bridge._need(type(result) is dict and set(result) == {
+            "transition_service_started", "service_pid", "controller_plan_sha256",
+        } and result["transition_service_started"] is True and type(result["service_pid"]) is int
+            and 0 < result["service_pid"] <= 2147483647
+            and result["controller_plan_sha256"] == controller["plan_sha256"],
+            "native_transition_service_start_unconfirmed")
+        return result
+
+
 class WindowsTransitionLease:
     """Sample the running Windows controller and the remaining writer exclusions."""
 
