@@ -324,7 +324,7 @@ class GuestSshDispatcher:
 
     def __call__(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.verb not in
-                     {bridge.GUEST_PUBLISH_REPLACEMENT, bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
+                     {bridge.GUEST_PREFLIGHT_REPLACEMENT, bridge.GUEST_PUBLISH_REPLACEMENT, bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
                       bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_OBSERVE_PREPARATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
                       bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
@@ -437,6 +437,16 @@ class GuestSshDispatcher:
         bridge._need(result.status == "PASS" and bridge._hash(result.receipt_sha256),
                      "guest_ssh_live_generation_unconfirmed")
         return result.receipt_sha256
+
+    def preflight_replacement_standby(self, request, deadline):
+        error = "guest_ssh_replacement_preflight_unconfirmed"
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_PREFLIGHT_REPLACEMENT, error)
+        receipt = self._dispatch(request, deadline)
+        expected = {"version": bridge.VERSION, "binding": request.binding.fields(), "node": request.node,
+                    "boot_sha256": request.binding.boot(request.node), "verb": request.verb,
+                    "sequence": request.sequence, "nonce": request.nonce, "args": request.args}
+        bridge._need(receipt.status == "PASS" and receipt.receipt_sha256 == bridge._digest(bridge._bytes(expected)), error)
+        return True
 
     def publish_replacement_standby(self, request, deadline, *, assert_rejoin_current):
         receipt = self._replacement(request, deadline, bridge.GUEST_PUBLISH_REPLACEMENT, assert_rejoin_current)

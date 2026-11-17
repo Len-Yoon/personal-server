@@ -44,7 +44,7 @@ class TransitionIngressTests(unittest.TestCase):
         def guest(request, deadline, *, assert_windows_current):
             steps.append("guest")
             self.assertEqual(request.verb, transition_ingress.bridge.GUEST_ACTIVATE_GENERATION)
-            self.assertEqual(request.sequence, 5)
+            self.assertEqual(request.sequence, 7)
             self.assertEqual(request.args, {"generation_handoff_sha256": "6"*64, "effects_plan_sha256": "3"*64})
             self.assertTrue(callable(assert_windows_current))
             raise RuntimeError("guest failed")
@@ -52,12 +52,12 @@ class TransitionIngressTests(unittest.TestCase):
         args = dict(
             previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
-            replacement_vm={"installation_id": "a"*64}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50,
+            replacement_vm={"installation_id": "a"*64, "node": "A"}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50,
                     "stage_sha256": "1"*64, "manifest_sha256": "2"*64},
             assert_legacy_closed=MagicMock(),
             controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
-            replacement_requests=lambda _: (replacement, observe),
+            replacement_manifest_sha256="4"*64,
             generation_handoff_pins=lambda _: {"pins": SimpleNamespace(plan_sha256="2"*64), "postgres": None,
                 "activation": SimpleNamespace(primary_runtime_receipt_sha256="a"*64)},
             stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
@@ -66,17 +66,14 @@ class TransitionIngressTests(unittest.TestCase):
                            "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
             guests=SimpleNamespace(verify_prepared_transition_target=MagicMock(return_value=True),
+                                   preflight_replacement_standby=MagicMock(return_value=True),
                                    publish_generation_handoff=MagicMock(return_value="6"*64),
                                    activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
-            target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)),
+            target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec), sequence=1),
         )
         stage = "7"*64
-        replacement = transition_ingress.bridge.Request(
-            None, "A", transition_ingress.bridge.GUEST_START_REPLACEMENT, 2, "3"*64, {"rejoin_stage_sha256": stage},
-        )
-        observe = replace(replacement, sequence=3, nonce="4"*64)
         handoff = transition_ingress.bridge.Request(
-            args["target_request"].binding, "B", transition_ingress.bridge.GUEST_PUBLISH_GENERATION, 4, "5"*64,
+            args["target_request"].binding, "B", transition_ingress.bridge.GUEST_PUBLISH_GENERATION, 6, "5"*64,
             {"generation_handoff_sha256": "6"*64, "effects_plan_sha256": "3"*64},
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
@@ -108,6 +105,12 @@ class TransitionIngressTests(unittest.TestCase):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
             args["guests"].verify_prepared_transition_target.return_value = True
+            args["guests"].preflight_replacement_standby.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_scope_invalid"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, [])
+            stage_service.assert_not_called()
+            args["guests"].preflight_replacement_standby.return_value = True
             validate_approval.side_effect = TransitionBlocked("approval invalid")
             with self.assertRaisesRegex(TransitionBlocked, "approval invalid"):
                 transition_ingress.switch_with_observer(*routes, **args)
@@ -132,7 +135,7 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(outcome.activation_sha256, "5"*64)
             verified = args["guests"].verify_live_generation.call_args.args[0]
             self.assertEqual(verified.verb, transition_ingress.bridge.GUEST_VERIFY_GENERATION)
-            self.assertEqual(verified.sequence, 7)
+            self.assertEqual(verified.sequence, 9)
             self.assertEqual(verified.args["activation_receipt_sha256"], outcome.activation_sha256)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 

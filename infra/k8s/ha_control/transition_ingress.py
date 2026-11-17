@@ -295,7 +295,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed,
                          guests, target_request,
-                         replacement_requests, generation_handoff_pins, stage_service, resume_rejoin=None,
+                         replacement_manifest_sha256, generation_handoff_pins, stage_service, resume_rejoin=None,
                          prepare_guest_runtime=False, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
@@ -309,7 +309,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     template = parse(raw)
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
                 and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
-    caddy._need(callable(replacement_requests) and callable(generation_handoff_pins)
+    caddy._need(bridge._hash(replacement_manifest_sha256) and callable(generation_handoff_pins)
                 and type(prepare_guest_runtime) is bool
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
@@ -328,6 +328,16 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                     None if prepare_guest_runtime else pins["activation"].primary_runtime_receipt_sha256,
                     observer_setup["deadline"],
                 ) is True, "transition_ingress_guest_target_unconfirmed")
+    caddy._need(type(target_request.sequence) is int and 0 < target_request.sequence <= bridge.MAX_REQUESTS - 15
+                and bridge._hash(replacement_vm.get("installation_id"))
+                and replacement_vm.get("node") == generation.partner, "transition_replacement_scope_invalid")
+    preflight = bridge.Request(
+        target_request.binding, generation.partner, bridge.GUEST_PREFLIGHT_REPLACEMENT, target_request.sequence + 1,
+        secrets.token_hex(32), {"bootstrap_manifest_sha256": replacement_manifest_sha256,
+                               "installation_id": replacement_vm["installation_id"]},
+    )
+    caddy._need(guests.preflight_replacement_standby(preflight, observer_setup["deadline"]) is True,
+                "transition_replacement_scope_invalid")
     stage_fields = {"approval", "close_previous_service", "preflight_path", "scm_verifier_path"}
     caddy._need(type(stage_service) is dict and set(stage_service) == stage_fields
                 and callable(stage_service["approval"]) and callable(stage_service["close_previous_service"])
@@ -384,10 +394,11 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],
             root=controller_setup["root"], deadline=deadline, resume=resume_rejoin is not None,
         )
-        replacement_start, replacement_observe = replacement_requests(stage)
-        caddy._need(type(replacement_start) is bridge.Request and isinstance(replacement_start.args, Mapping)
-                    and replacement_start.args.get("rejoin_stage_sha256") == stage,
-                    "transition_replacement_scope_invalid")
+        args = {"bootstrap_manifest_sha256": replacement_manifest_sha256, "rejoin_stage_sha256": stage}
+        replacement_start = replace(preflight, verb=bridge.GUEST_START_REPLACEMENT, sequence=preflight.sequence + 2,
+                                    nonce=secrets.token_hex(32), args=args)
+        replacement_observe = replace(replacement_start, verb=bridge.GUEST_OBSERVE_REPLACEMENT,
+                                      sequence=replacement_start.sequence + 1, nonce=secrets.token_hex(32))
         _rejoin_replacement(execution, guests, generation, target_request, replacement_start, replacement_observe,
                             replacement_vm["installation_id"], check_stage, check_sync, deadline)
 

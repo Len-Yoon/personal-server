@@ -25,7 +25,7 @@ from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
-    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
+    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -37,6 +37,7 @@ VERBS = {
     "preflight", "begin_receive", "finish_receive", "restore", "prepare_runtime", "verify_closed",
     "assert_activation_closed", "activate", "assert_live", "observe_restore", "observe_rollback",
     GUEST_RESTORE_READBACK,
+    GUEST_PREFLIGHT_REPLACEMENT,
     GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT,
@@ -652,6 +653,36 @@ def _replacement_bundle(request, stage, installation):
     return bundle, bootstrap, pinned_code
 
 
+def _run_replacement_bootstrap(bootstrap, code, command, bundle, arguments, timeout):
+    runner = (
+        "import sys\n"
+        "sys.argv.pop(0)\n"
+        "__file__ = sys.argv[0]\n"
+        "exec(compile(sys.stdin.buffer.read(), __file__, 'exec'))\n"
+    )
+    result = subprocess.run(("/usr/bin/python3", "-I", "-B", "-S", "-c", runner, str(bootstrap), command,
+                             "--bundle", str(bundle), *arguments), input=code, capture_output=True,
+                            check=False, timeout=timeout, env={"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C"})
+    _need(result.returncode == 0, "guest_replacement_outcome_unconfirmed")
+    return json.loads(result.stdout)
+
+
+def preflight_replacement_standby(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    boot = request.binding.boot(request.node)
+    _need(_digest(restore.BOOT_ID.read_bytes()) == boot, "guest_worker_boot_changed")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    installation = request.args["installation_id"]
+    bundle, bootstrap, code = _replacement_bundle(request, stage, installation)
+    result = _run_replacement_bootstrap(bootstrap, code, "verify", bundle, (), 30)
+    _, installed = _read_json(restore.INSTALLATION)
+    _need(_matches(result, {"status": "PASS", "source_commit": installed["source_commit"], "production_deployed": False})
+          and installed["installation_id"] == installation and installed["node"] == request.node
+          and _digest(restore.BOOT_ID.read_bytes()) == boot, "guest_replacement_manifest_unconfirmed")
+    return Receipt("PASS", _digest(_bytes(_scope(request) | {"args": request.args})))
+
+
 def publish_replacement_standby(request):
     _need(os.geteuid() == 0, "guest_worker_root_required")
     boot = request.binding.boot(request.node)
@@ -682,20 +713,12 @@ def replacement_standby(request):
         "installation_id": installation, **request.args,
     }), "guest_replacement_start_not_bound")
     bundle, bootstrap, pinned_code = _replacement_bundle(request, stage, installation)
-    runner = (
-        "import sys\n"
-        "sys.argv.pop(0)\n"
-        "__file__ = sys.argv[0]\n"
-        "exec(compile(sys.stdin.buffer.read(), __file__, 'exec'))\n"
-    )
     observe = request.verb == GUEST_OBSERVE_REPLACEMENT
     command = "observe-replacement-standby" if observe else "start-replacement-standby"
-    result = subprocess.run(("/usr/bin/python3", "-I", "-B", "-S", "-c", runner, str(bootstrap), command,
-                             "--bundle", str(bundle), "--manifest-sha256", request.args["bootstrap_manifest_sha256"],
-                             "--boot-sha256", boot), input=pinned_code, capture_output=True, check=False, timeout=75,
-                            env={"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C"})
-    _need(result.returncode == 0, "guest_replacement_outcome_unconfirmed")
-    reply = json.loads(result.stdout)
+    reply = _run_replacement_bootstrap(
+        bootstrap, pinned_code, command, bundle,
+        ("--manifest-sha256", request.args["bootstrap_manifest_sha256"], "--boot-sha256", boot), 75,
+    )
     expected = {"status": "PASS", "writer_authority_issued": False}
     if observe:
         container = reply.get("standby_container_sha256")
@@ -915,6 +938,8 @@ def handle(request, assert_windows_current=None):
         if request.verb == GUEST_TRANSITION_TARGET:
             return verify_transition_target(request)
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
+            if request.verb == GUEST_PREFLIGHT_REPLACEMENT:
+                return preflight_replacement_standby(request)
             if request.verb == GUEST_PUBLISH_REPLACEMENT:
                 return publish_replacement_standby(request)
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
