@@ -325,7 +325,7 @@ function Assert-EnforcedJournal($Config,$Policy,$Watch) {
 }
 function Assert-EnforcedParentArgv($Actual,$Config) {
     $cfg=$Config.windows_enforced
-    if($Actual.Count -lt 11 -or $Actual[4] -cnotin @('authenticate','initialize','advance','serve','stage-rejoin','transition-serve')){throw 'controller_parent_unverified'}
+    if($Actual.Count -lt 11 -or $Actual[4] -cnotin @('authenticate','initialize','advance','serve','stage-rejoin','check-rejoin','transition-serve')){throw 'controller_parent_unverified'}
     if($Actual[4] -ceq 'authenticate' -and (-not $cfg.PSObject.Properties['config_profile'] -or
         $cfg.config_profile.acceptance_scope -cne 'isolated-predeployment' -or
         $cfg.config_profile.operational_cutover_accepted -ne $false)){throw 'isolated_pg_authentication_required'}
@@ -575,6 +575,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
     $pgFiles=Get-EnforcedPgFiles $Config $policy $Watch
     $snapshot=Get-EnforcedVmSnapshot $Config $policy $Watch
     if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -ceq 'authenticate'){throw 'authenticate_cannot_fence'}
+    if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -ceq 'check-rejoin'){throw 'rejoin_check_cannot_fence'}
     if($Request.action -ceq 'fence' -and -not $snapshot.fenced){
         # The only mutating API: exact approved GUID. Lost responses require a
         # new observe; no retries, VM creation, start, checkpoints or host reboot.

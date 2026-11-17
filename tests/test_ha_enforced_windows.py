@@ -596,6 +596,10 @@ $script:powerOff=$false
 $request.sequence=[long]3;$request.nonce=('5'*48)+'0000000000000003'
 $blocked=$false;try{Get-EnforcedResponse $config $approved $planHash $approvalHash $instance $request ([Diagnostics.Stopwatch]::StartNew())|Out-Null}catch{$blocked=$_.Exception.Message -ceq 'authenticate_cannot_fence'}
 if(-not $blocked -or @($script:trace|Where-Object {$_ -ceq 'turnoff'}).Count -ne 1){throw 'authentication_mutation'}
+$script:controllerMode='check-rejoin'
+$request.sequence=[long]4;$request.nonce=('4'*48)+'0000000000000004'
+$blocked=$false;try{Get-EnforcedResponse $config $approved $planHash $approvalHash $instance $request ([Diagnostics.Stopwatch]::StartNew())|Out-Null}catch{$blocked=$_.Exception.Message -ceq 'rejoin_check_cannot_fence'}
+if(-not $blocked -or @($script:trace|Where-Object {$_ -ceq 'turnoff'}).Count -ne 1){throw 'rejoin_check_mutation'}
 'bounded-profile'
 ''', setup).strip(), 'bounded-profile')
 

@@ -333,6 +333,17 @@ class GuestSshDispatcher:
     def observe_replacement_standby(self, request, deadline, *, assert_rejoin_current):
         return self._replacement(request, deadline, bridge.GUEST_OBSERVE_REPLACEMENT, assert_rejoin_current)
 
+    def confirm_replacement_rejoin(self, request, deadline, *, assert_rejoin_current, check_synchronized):
+        """Join the exact guest-container observation with the Windows-side PostgreSQL proof."""
+        bridge._need(callable(check_synchronized), 'guest_ssh_replacement_guard_required')
+        receipt = self.observe_replacement_standby(request, deadline, assert_rejoin_current=assert_rejoin_current)
+        result = check_synchronized(deadline)
+        bridge._need(bridge._matches(result, {
+            'status': 'PASS', 'phase': 'rejoining', 'authority_opened': False, 'standby_rejoined': True,
+            'rejoin_stage_sha256': request.args['rejoin_stage_sha256'],
+        }), 'guest_ssh_replacement_replication_unconfirmed')
+        return receipt
+
     def _replacement(self, request, deadline, verb, assert_rejoin_current):
         bridge._need(type(request) is bridge.Request and request.verb == verb
                      and request.binding == self.binding and isinstance(request.args, Mapping)

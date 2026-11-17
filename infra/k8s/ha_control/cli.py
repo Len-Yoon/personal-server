@@ -60,6 +60,13 @@ def serve_ready(backend, state, *, arm=False):
             pass  # An unavailable DB is covered by the short DB-clock lease.
 
 
+def rejoin_stage_receipt(backend, state):
+    scope = {"plan_sha256": backend.fence_adapter.plan_sha256,
+             "state": {key: value for key, value in state.items() if key != "attempts"}}
+    proof = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"status": "PASS", "phase": state["phase"], "authority_opened": False, "rejoin_stage_sha256": proof}
+
+
 def run(args):
     if getattr(args, "arm", False) and args.command != "serve":
         raise TransitionBlocked("arm_only_for_serve")
@@ -98,11 +105,14 @@ def run(args):
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
             state = control.advance(stop_at_rejoin=True)
-            scope = {"plan_sha256": backend.fence_adapter.plan_sha256,
-                     "state": {key: value for key, value in state.items() if key != "attempts"}}
-            proof = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            return {"status": "PASS", "phase": state["phase"], "authority_opened": False,
-                    "rejoin_stage_sha256": proof}
+            return rejoin_stage_receipt(backend, state)
+        if args.command == "check-rejoin":
+            if p.get("profile") != "enforced-vm-v1":
+                raise TransitionBlocked("enforced_transition_service_required")
+            with exclusive(journal.with_suffix(".lock")):
+                state = Journal(journal).read()
+                backend.assert_rejoin_synchronized(state)
+                return rejoin_stage_receipt(backend, state) | {"standby_rejoined": True}
         if args.command == "advance":
             state = control.advance()
             return {"status": "PASS", "phase": state["phase"], "lease_requires_serve": state["phase"] == "ready"}
@@ -120,7 +130,8 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "stage-rejoin", "transition-serve"))
+    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "stage-rejoin",
+                                            "check-rejoin", "transition-serve"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")

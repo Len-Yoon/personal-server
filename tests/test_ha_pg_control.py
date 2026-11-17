@@ -366,6 +366,22 @@ class PGControlTests(unittest.TestCase):
             with self.assertRaisesRegex(TransitionBlocked, "new_standby_required"):
                 self.backend.rejoin(self.state)
 
+    def test_rejoin_replication_check_rejects_lag_and_open_lease(self):
+        state = dict(self.state, phase="rejoining")
+        primary = dict(self.observation(), remaining=-1)
+        peer = dict(primary, node="ha_A", recovery=True)
+        for changes, reason in (
+            ({"replay": "0/1F"}, "replacement_standby_replay_not_current"),
+            ({"remaining": 2}, "rejoin_primary_authority_not_closed"),
+            ({"recovery": False}, "strict_replication_required"),
+        ):
+            with self.subTest(changes=changes), patch.object(self.backend, "_read", side_effect=[primary, peer | changes]):
+                with self.assertRaisesRegex(TransitionBlocked, reason):
+                    self.backend.assert_rejoin_synchronized(state)
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]) as read:
+            self.backend.assert_rejoin_synchronized(state)
+            self.assertEqual([call.args[0] for call in read.call_args_list], ["B", "A"])
+
     def test_pair_rejects_async_wrong_timeline_role_revision_and_wrong_node(self):
         good, peer = self.observation(), self.observation("A", recovery=True)
         self.backend._pair(good, peer, self.state)

@@ -647,16 +647,37 @@ class PgBackend:
         if state["phase"] not in {"promoting", "rejoining", "validating", "ready"}:
             _deny("unexpected_primary_before_promotion_intent")
 
+    @staticmethod
+    def _require_closed_lease(value):
+        remaining = value["remaining"]
+        if (value["writes"] is not False or value["history"] is not False
+                or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
+            _deny("rejoin_primary_authority_not_closed")
+
     def assert_rejoin_pending(self, state):
         self.bind(state)
         if state["phase"] != "rejoining" or not self.fenced(state):
             _deny("rejoin_staging_phase_invalid")
         value = self._read(state["target"], state)
         self._recorded_primary(value, state)
-        remaining = value["remaining"]
-        if (value["writes"] is not False or value["history"] is not False
-                or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
-            _deny("rejoin_primary_authority_not_closed")
+        self._require_closed_lease(value)
+        if not self.fenced(state):
+            _deny("positive_fence_required")
+
+    def assert_rejoin_synchronized(self, state):
+        """Read-only verification of both private PostgreSQL endpoints with writes closed."""
+        self.bind(state)
+        if state["phase"] != "rejoining" or not self.fenced(state):
+            _deny("rejoin_staging_phase_invalid")
+        primary = self._read(state["target"], state)
+        peer = self._read(state["old"], state)
+        self._pair(primary, peer, state)
+        self._require_closed_lease(primary)
+        self._require_closed_lease(peer)
+        floor = (self._planned_promotion_floor(state) if self.plan.get("source_lease_close_required", False)
+                 else self._promotion_replay_floor())
+        if self._lsn(peer["replay"]) < max(floor or 0, self._lsn(primary["flush"])):
+            _deny("replacement_standby_replay_not_current")
         if not self.fenced(state):
             _deny("positive_fence_required")
 

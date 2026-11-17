@@ -34,6 +34,28 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
 class ReplacementStandbyBridgeTests(unittest.TestCase):
+    def test_confirmation_requires_matching_windows_replication_receipt_after_guest(self):
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*("abcdef"[i]*64 for i in range(5)))
+        stage = "3"*64
+        request = bridge.Request(binding, "A", bridge.GUEST_OBSERVE_REPLACEMENT, 1, "1"*64, {
+            "bootstrap_manifest_sha256": "2"*64, "rejoin_stage_sha256": stage,
+        })
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        receipt = bridge.Receipt("PASS", "5"*64)
+        proof = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
+                 "standby_rejoined": True, "rejoin_stage_sha256": stage}
+        guard = MagicMock(return_value=stage)
+        with patch.object(dispatcher, "observe_replacement_standby", return_value=receipt) as observe:
+            for result in (proof | {"rejoin_stage_sha256": "4"*64}, proof | {"standby_rejoined": False}):
+                with self.assertRaisesRegex(bridge.BridgeRejected, "guest_ssh_replacement_replication_unconfirmed"):
+                    dispatcher.confirm_replacement_rejoin(request, 100, assert_rejoin_current=guard,
+                                                          check_synchronized=lambda _: result)
+            self.assertEqual(dispatcher.confirm_replacement_rejoin(
+                request, 100, assert_rejoin_current=guard, check_synchronized=lambda _: proof,
+            ), receipt)
+            observe.assert_called_with(request, 100, assert_rejoin_current=guard)
+
     def test_worker_runs_only_boot_and_stage_bound_standby_package(self):
         bridge, worker = native_stdio_bridge, native_guest_worker
         boot, code = b"replacement boot", b"pinned bootstrap program"
