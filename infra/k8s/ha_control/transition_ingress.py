@@ -1,12 +1,15 @@
 """Switch both public routes for one independently verified serving generation."""
 
 from dataclasses import replace
+from collections.abc import Mapping
 import os
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 from ha_runtime.seven_capture import encoded, parse
 
 from . import caddy_runtime as caddy
+from . import native_stdio_bridge as bridge
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
 from .native_windows_activation import open_transition_controller, prepare_transition_observer_plan
@@ -123,13 +126,61 @@ def resume_ingress(main, car, previous, relay, prepared, generation, target, rou
                    main_receipt, car_receipt, assert_guard, verify_guest, verify_public)
 
 
+def _rejoin_replacement(execution, guests, generation, target_request, start, observe, check_stage, check_sync, deadline):
+    """Start only once, then establish the exact guest and Windows replication evidence."""
+    pin = (start.args.get("rejoin_stage_sha256")
+           if type(start) is bridge.Request and isinstance(start.args, Mapping) else None)
+    caddy._need(type(start) is bridge.Request and type(observe) is bridge.Request
+                and start.verb == bridge.GUEST_START_REPLACEMENT
+                and observe.verb == bridge.GUEST_OBSERVE_REPLACEMENT
+                and start.binding == observe.binding == target_request.binding
+                and start.node == observe.node == generation.partner
+                and start.args == observe.args
+                and type(start.sequence) is int and type(observe.sequence) is int
+                and target_request.sequence < start.sequence < observe.sequence <= bridge.MAX_REQUESTS
+                and bridge._hash(start.nonce) and bridge._hash(observe.nonce)
+                and len({target_request.nonce, start.nonce, observe.nonce}) == 3 and bridge._hash(pin)
+                and callable(check_stage) and callable(check_sync),
+                "transition_replacement_scope_invalid")
+    bridge._args(start.verb, start.node, dict(start.args))
+    directory = caddy._private_dir(execution.directory)
+    intent = directory / "replacement-start-intent.json"
+    expected = {
+        "plan_sha256": execution.spec["plan_sha256"], "attempt_id": execution.spec["attempt_id"],
+        "generation": generation.epoch, "timeline": generation.timeline,
+        "replacement_node": start.node, "replacement_boot_sha256": start.binding.boot(start.node),
+        "bootstrap_manifest_sha256": start.args["bootstrap_manifest_sha256"], "rejoin_stage_sha256": pin,
+    }
+    caddy._need(check_stage(deadline) == pin, "transition_replacement_stage_unconfirmed")
+    if os.path.lexists(intent):
+        caddy._need(parse(caddy._read(intent)) == expected, "transition_replacement_intent_unconfirmed")
+    else:
+        caddy._write(intent, encoded(expected), 0o600)
+        caddy._sync_dir(directory)
+        try:
+            guests.start_replacement_standby(start, deadline, assert_rejoin_current=check_stage)
+        except (bridge.BridgeRejected, TimeoutExpired, OSError):
+            # The guest may have started. Only observation may settle that outcome.
+            pass
+    receipt = guests.confirm_replacement_rejoin(
+        observe, deadline, assert_rejoin_current=check_stage, check_synchronized=check_sync,
+    )
+    caddy._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256),
+                "transition_replacement_replication_unconfirmed")
+
+
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed, activate_guest,
                          guests, target_request, verify_guest,
+                         replacement_start, replacement_observe, check_rejoin_stage, check_rejoin_sync,
                          verify_public=_public_health):
-    """Prepare the Windows controller, activate the guest, then switch ingress under one lock."""
+    """Rejoin standby, activate the guest, then switch ingress under one lock.
+
+    After a lost guest response, supply fresh request sequences and nonces
+    against the same binding. The recorded start intent suppresses replay.
+    """
     _route_scope(previous, relay, generation, target, route_pin, execution.spec["plan_sha256"], execution.spec["attempt_id"])
     raw = observer_setup["plan_raw"]
     caddy._need(type(raw) is bytes and 0 < len(raw) <= 1048576 and caddy._sha(raw) == observer_setup["plan_sha256"],
@@ -142,6 +193,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
                 "transition_ingress_guest_target_unconfirmed")
     with execution.guard(main, car):
+        _rejoin_replacement(execution, guests, generation, target_request, replacement_start, replacement_observe,
+                            check_rejoin_stage, check_rejoin_sync, observer_setup["deadline"])
         binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
                                                      legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,
                                                      assert_legacy_closed=assert_legacy_closed)

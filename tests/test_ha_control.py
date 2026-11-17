@@ -1,5 +1,6 @@
 """Transition ordering, durable retry bounds and legacy exclusion contracts."""
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 from email.message import Message
 from pathlib import Path
@@ -47,12 +48,14 @@ class TransitionIngressTests(unittest.TestCase):
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
             replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50},
             assert_legacy_closed=MagicMock(), controller_setup={},
+            replacement_start=None, replacement_observe=None, check_rejoin_stage=None, check_rejoin_sync=None,
             activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
-        with patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
+        with patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
+                patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
@@ -65,11 +68,43 @@ class TransitionIngressTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "guest failed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             switch.assert_not_called()
-            self.assertEqual(steps, ["runtime", "observer", "controller", "lease", "guest"])
+            self.assertEqual(steps, ["rejoin", "runtime", "observer", "controller", "lease", "guest"])
             steps.clear()
             args["activate_guest"] = lambda *_: steps.append("guest")
             transition_ingress.switch_with_observer(*routes, **args)
-            self.assertEqual(steps, ["runtime", "observer", "controller", "lease", "guest", "ingress"])
+            self.assertEqual(steps, ["rejoin", "runtime", "observer", "controller", "lease", "guest", "ingress"])
+
+    def test_replacement_unknown_start_reconciles_without_replay(self):
+        bridge = transition_ingress.bridge
+        binding = bridge.Binding(*(character * 64 for character in "abcde"))
+        pin = "1" * 64
+        args = {"bootstrap_manifest_sha256": "2" * 64, "rejoin_stage_sha256": pin}
+        target = bridge.Request(binding, "B", bridge.GUEST_TRANSITION_TARGET, 1, "3" * 64, {})
+        start = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 2, "4" * 64, args)
+        observe = bridge.Request(binding, "A", bridge.GUEST_OBSERVE_REPLACEMENT, 3, "5" * 64, args)
+        guests = MagicMock()
+        guests.start_replacement_standby.side_effect = OSError("connection interrupted")
+        guests.confirm_replacement_rejoin.side_effect = [
+            bridge.BridgeRejected("rejoin not yet visible"), bridge.Receipt("PASS", "6" * 64),
+        ]
+        stage, sync = MagicMock(return_value=pin), MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            execution = SimpleNamespace(directory=Path(directory).resolve(), spec=binding.fields())
+            call = (execution, guests, ServingGeneration("B", 2, 2, 2), target, start, observe, stage, sync, 90)
+            with self.assertRaisesRegex(bridge.BridgeRejected, "rejoin not yet visible"):
+                transition_ingress._rejoin_replacement(*call)
+            self.assertTrue((execution.directory / "replacement-start-intent.json").is_file())
+            fresh_target = replace(target, sequence=4, nonce="7" * 64)
+            fresh_start = replace(start, sequence=5, nonce="8" * 64)
+            fresh_observe = replace(observe, sequence=6, nonce="9" * 64)
+            transition_ingress._rejoin_replacement(
+                execution, guests, call[2], fresh_target, fresh_start, fresh_observe, stage, sync, 90,
+            )
+        guests.start_replacement_standby.assert_called_once_with(start, 90, assert_rejoin_current=stage)
+        self.assertEqual(guests.confirm_replacement_rejoin.call_count, 2)
+        guests.confirm_replacement_rejoin.assert_called_with(
+            fresh_observe, 90, assert_rejoin_current=stage, check_synchronized=sync,
+        )
 
     def test_callback_rotation_preserves_primary_and_legacy_pins_in_both_directions(self):
         from ha_runtime.seven_capture import encoded
