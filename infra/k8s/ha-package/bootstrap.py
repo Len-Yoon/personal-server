@@ -484,8 +484,8 @@ def replacement_container(lock):
     return hashlib.sha256(identifier.encode()).hexdigest()
 
 
-def start_replacement_standby(bundle, expected_manifest, boot_sha256, *, observe=False):
-    """Start once or inspect the pinned replacement container without mutation."""
+def start_replacement_standby(bundle, expected_manifest, boot_sha256, *, observe=False, preflight=False):
+    """Check a fresh standby, start it once, or inspect a recorded start."""
     bundle = Path(bundle).absolute()
     need(os.geteuid() == 0 and os.uname().machine == 'x86_64', 'fresh_amd64_guest_root_required')
     need(HEX.fullmatch(expected_manifest) and digest(regular(bundle/'manifest.json')) == expected_manifest,
@@ -536,6 +536,9 @@ def start_replacement_standby(bundle, expected_manifest, boot_sha256, *, observe
         return {'status':'PASS','standby_container_sha256':replacement_container(lock),'writer_authority_issued':False}
     need(not any(data.iterdir()), 'replacement_standby_data_not_empty')
     need(not standby_docker(['ps','--all','--quiet'],timeout=10).strip(), 'replacement_standby_engine_not_empty')
+    if preflight:
+        need(not os.path.lexists(intent), 'replacement_standby_intent_unconfirmed')
+        return {'status':'PASS','source_commit':lock['source_commit'],'production_deployed':False}
     # Record before Docker mutates. A lost response leaves the attempt for
     # inspection, with the old database and its storage outside this guest.
     fd = os.open(intent, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -559,7 +562,7 @@ def main():
     p = subs.add_parser('prepare'); p.add_argument('--lock',required=True); p.add_argument('--inputs',required=True); p.add_argument('--output',required=True)
     p = subs.add_parser('verify'); p.add_argument('--bundle',required=True)
     p = subs.add_parser('install'); p.add_argument('--bundle',required=True); p.add_argument('--manifest-sha256',required=True)
-    for action in ('start-replacement-standby','observe-replacement-standby'):
+    for action in ('preflight-replacement-standby','start-replacement-standby','observe-replacement-standby'):
         p = subs.add_parser(action); p.add_argument('--bundle',required=True)
         p.add_argument('--manifest-sha256',required=True); p.add_argument('--boot-sha256',required=True)
     args = parser.parse_args()
@@ -573,7 +576,8 @@ def main():
             result = install(args.bundle,args.manifest_sha256)
         else:
             result = start_replacement_standby(args.bundle,args.manifest_sha256,args.boot_sha256,
-                                               observe=args.action == 'observe-replacement-standby')
+                                               observe=args.action == 'observe-replacement-standby',
+                                               preflight=args.action == 'preflight-replacement-standby')
     except Exception as error:
         # Never emit dpkg output, credentials, endpoint values, SQL or exception text.
         result = {'status':'FAIL','reason':str(error) if isinstance(error,BootstrapError) else 'bootstrap_failed'}

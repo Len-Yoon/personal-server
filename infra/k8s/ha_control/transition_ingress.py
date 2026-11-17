@@ -336,8 +336,6 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
         secrets.token_hex(32), {"bootstrap_manifest_sha256": replacement_manifest_sha256,
                                "installation_id": replacement_vm["installation_id"]},
     )
-    caddy._need(guests.preflight_replacement_standby(preflight, observer_setup["deadline"]) is True,
-                "transition_replacement_scope_invalid")
     stage_fields = {"approval", "close_previous_service", "preflight_path", "scm_verifier_path"}
     caddy._need(type(stage_service) is dict and set(stage_service) == stage_fields
                 and callable(stage_service["approval"]) and callable(stage_service["close_previous_service"])
@@ -348,6 +346,10 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     with execution.guard(main, car):
         observer_binding = None
         deadline = min(observer_setup["deadline"], controller_setup["deadline"])
+        start_intent = execution.directory / "replacement-start-intent.json"
+        if resume_rejoin is None or not os.path.lexists(start_intent):
+            caddy._need(guests.preflight_replacement_standby(preflight, deadline) is True,
+                        "transition_replacement_scope_invalid")
         if resume_rejoin is None:
             binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
                                                          legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,

@@ -97,6 +97,81 @@ class BootstrapTests(unittest.TestCase):
                     B.start_replacement_standby(bundle, B.digest(manifest), "invalid")
                 command.assert_not_called()
 
+    def test_replacement_preflight_requires_empty_storage_and_never_starts(self):
+        lock = fixture()
+        lock.update(schema_version=3, primary_node="B", source_node="B")
+        lock["postgres"]["uid"] = 0
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            bundle, root, state, socket_dir = (base / name for name in ("bundle", "etc", "state", "socket"))
+            data = state / "pgdata"
+            for directory, mode in ((bundle, 0o700), (root, 0o700), (state, 0o700), (socket_dir, 0o700),
+                                    (root / "pg-bootstrap", 0o750), (root / "pg-private", 0o700), (data, 0o700)):
+                directory.mkdir()
+                directory.chmod(mode)
+            boot = base / "boot"
+            boot.write_bytes(b"fixture boot")
+            manifest = bundle / "manifest.json"
+            manifest.write_bytes(b"{}")
+            manifest_pin = B.digest(manifest)
+            boot_pin = B.digest(boot)
+            journal = state / "bootstrap.json"
+            journal.write_bytes(B.encode({
+                "installation_id": lock["installation_id"], "status": "engine_installed_pg_not_started",
+                "manifest_sha256": manifest_pin, "writer_authority_issued": False, "production_deployed": False,
+            }))
+            journal.chmod(0o600)
+            for name in ("server.crt", "server.key", "ca.crt", "postgres-password", "repl.pgpass"):
+                credential = root / "pg-private" / name
+                credential.write_bytes(b"fixture")
+                credential.chmod(0o600)
+            for name, packaged in (
+                ("pg-compose.json", "generated/pg-compose.json"),
+                ("pg-bootstrap/postgresql.conf", "generated/postgresql.conf"),
+                ("pg-bootstrap/pg_hba.conf", "generated/pg_hba.conf"),
+                ("pg-bootstrap/pg-entrypoint.sh", "assets/pg-entrypoint.sh"),
+            ):
+                (root / name).write_bytes(b"fixture configuration")
+                destination = bundle / packaged
+                destination.parent.mkdir(exist_ok=True)
+                destination.write_bytes(b"fixture configuration")
+
+            paths = {"/etc/n100-ha": root, "/var/lib/n100-ha": state, "/run/n100-ha/pg": socket_dir,
+                     "/proc/sys/kernel/random/boot_id": boot}
+            stat_path = type(base)
+            original = stat_path.stat
+
+            def owned(path, **kwargs):
+                info = list(original(path, **kwargs))
+                info[4] = 0
+                return B.os.stat_result(info)
+
+            with patch.object(B, "Path", side_effect=lambda path: paths.get(str(path), Path(path))), patch.object(
+                stat_path, "stat", owned,
+            ), patch.object(B.os, "geteuid", return_value=0), patch.object(B.os, "uname") as uname, patch.object(
+                B, "verify", return_value=(lock, {}),
+            ), patch.object(B, "standby_docker", return_value=b"") as docker:
+                uname.return_value.machine = "x86_64"
+                check = lambda: B.start_replacement_standby(bundle, manifest_pin, boot_pin, preflight=True)
+                self.assertEqual(check()["status"], "PASS")
+                docker.assert_called_once_with(["ps", "--all", "--quiet"], timeout=10)
+                intent = state / "replacement-standby-start.json"
+                self.assertFalse(intent.exists())
+
+                stale = data / "PG_VERSION"
+                stale.write_text("17")
+                with self.assertRaisesRegex(B.BootstrapError, "replacement_standby_data_not_empty"):
+                    check()
+                stale.unlink()
+                docker.return_value = b"existing container"
+                with self.assertRaisesRegex(B.BootstrapError, "replacement_standby_engine_not_empty"):
+                    check()
+                docker.return_value = b""
+                intent.symlink_to(state / "nonexistent")
+                with self.assertRaisesRegex(B.BootstrapError, "replacement_standby_intent_unconfirmed"):
+                    check()
+                self.assertTrue(intent.is_symlink())
+
     def test_lock_is_exact_offline_and_rejects_mutable_or_foreign_inputs(self):
         self.assertEqual(B.validate(fixture()),fixture())
         changes = [lambda v:v.update(node='C'),lambda v:v.update(unknown=True),lambda v:v.update(pg_b=v['pg_a']),

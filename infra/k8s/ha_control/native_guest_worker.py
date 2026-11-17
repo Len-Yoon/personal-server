@@ -675,7 +675,8 @@ def preflight_replacement_standby(request):
     runtime._directory(stage, 0)
     installation = request.args["installation_id"]
     bundle, bootstrap, code = _replacement_bundle(request, stage, installation)
-    result = _run_replacement_bootstrap(bootstrap, code, "verify", bundle, (), 30)
+    arguments = ("--manifest-sha256", request.args["bootstrap_manifest_sha256"], "--boot-sha256", boot)
+    result = _run_replacement_bootstrap(bootstrap, code, "preflight-replacement-standby", bundle, arguments, 30)
     _, installed = _read_json(restore.INSTALLATION)
     _need(_matches(result, {"status": "PASS", "source_commit": installed["source_commit"], "production_deployed": False})
           and installed["installation_id"] == installation and installed["node"] == request.node
