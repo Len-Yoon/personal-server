@@ -158,8 +158,9 @@ def run(args):
             if (p.get("profile") != "enforced-vm-v1" or p["generation"] < 2
                     or "windows_transition_observer" not in p):
                 raise TransitionBlocked("transition_db_closure_unconfirmed")
-            timeline = p.get("transition_service_start", {}).get("target_timeline")
-            if type(timeline) is not int or timeline <= p["timeline"]:
+            scope = p.get("transition_service_start", {})
+            timeline = scope.get("target_timeline")
+            if scope.get("lease_closure_check") is not True or type(timeline) is not int or timeline <= p["timeline"]:
                 raise TransitionBlocked("transition_db_closure_unconfirmed")
             with exclusive(journal.with_suffix(".lock")):
                 state = Journal(journal).read()

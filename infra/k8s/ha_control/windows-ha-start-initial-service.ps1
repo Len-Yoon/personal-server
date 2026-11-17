@@ -61,12 +61,18 @@ function Assert-Executable([string]$Path, [string]$Sha) {
 function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Approval) {
     $scope = $Plan.windows_enforced
     $pins = $Plan.transition_service_start
-    $allowedModes = if ($CheckLeaseClosed) { @('check-lease-closed') } else { @('transition-serve','transition-rearm') }
+    $mode = $pins.mode
+    if ($CheckLeaseClosed) {
+        if ($pins.lease_closure_check -isnot [bool] -or -not $pins.lease_closure_check) {
+            throw 'initial_service_transition_scope'
+        }
+        $mode = 'check-lease-closed'
+    }
 
     if ($Plan.profile -cne 'enforced-vm-v1' -or $Plan.generation -lt 2 -or
         $Plan.PSObject.Properties['initial_wsl_cutover'] -or -not $Plan.PSObject.Properties['windows_transition_observer'] -or
         $scope.service_name -cne $ServiceName -or $scope.service_image_sha256 -cne $ServiceHostSha256 -or
-        $pins.preflight_sha256 -cne $PreflightSha256 -or $pins.mode -cnotin $allowedModes -or
+        $pins.preflight_sha256 -cne $PreflightSha256 -or $pins.mode -cnotin @('transition-serve','transition-rearm') -or
         $Approval.schema_version -ne 3 -or $Approval.profile -cne 'enforced-vm-v1' -or $Approval.action -cne 'ha-transition' -or
         $Approval.authority_kind -cne 'installed-runtime' -or $Approval.plan_sha256 -cne $PlanSha256 -or
         $Approval.installation_id -cne $Plan.installation_id -or $Approval.source_commit -cne $Plan.source_commit -or
@@ -82,7 +88,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     $settings = [ordered]@{format='enforced-service-v1';service_name=$ServiceName;service_sid=$sid;
         python_path=$scope.python_path;python_sha256=$scope.python_sha256;launcher_path=$scope.launcher_path;
         launcher_sha256=$scope.launcher_sha256;plan_path=$PlanPath;plan_sha256=$PlanSha256;
-        approval_path=$ApprovalPath;approval_sha256=$ApprovalSha256;mode=$pins.mode;host_sha256=$ServiceHostSha256}
+        approval_path=$ApprovalPath;approval_sha256=$ApprovalSha256;mode=$mode;host_sha256=$ServiceHostSha256}
     $lines = @($settings.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value })
     $encoder = [Text.UTF8Encoding]::new($false,$true)
     $hash = [Security.Cryptography.SHA256]::Create()
@@ -112,9 +118,10 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     for ($parent = $intentRoot.Parent; $null -ne $parent; $parent = $parent.Parent) {
         Assert-PreflightEntry $parent $authors $authors $false $true
     }
-    $intentPath = Join-Path $intentRoot.FullName ('transition-service-start-' + $PlanSha256 + '.json')
+    $intentPrefix = if ($CheckLeaseClosed) {'transition-closure-start-'} else {'transition-service-start-'}
+    $intentPath = Join-Path $intentRoot.FullName ($intentPrefix + $PlanSha256 + '.json')
     $intent = [ordered]@{service_name=$ServiceName;controller_plan_sha256=$PlanSha256;approval_sha256=$ApprovalSha256;
-        args_sha256=$argsSha;service_image_path_sha256=$pins.service_image_path_sha256;mode=$pins.mode}
+        args_sha256=$argsSha;service_image_path_sha256=$pins.service_image_path_sha256;mode=$mode}
     $intentBytes = $encoder.GetBytes((ConvertTo-Json -InputObject $intent -Compress))
     $intentAcl = [Security.AccessControl.FileSecurity]::new()
     $intentAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))

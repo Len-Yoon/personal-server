@@ -942,13 +942,18 @@ class PGControlTests(unittest.TestCase):
         Journal(journal / "controller-state.json").save(self.state)
         backend = MagicMock()
         backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_transition_observer={},
-                            transition_service_start={"target_timeline": 2})
+                            transition_service_start={"target_timeline": 2, "lease_closure_check": True})
         backend.fence_adapter.plan_sha256 = "a"*64
         expected = {"plan_sha256": "a"*64, "generation": 7, "node_proofs": {"A": "b"*64, "B": "c"*64}}
         backend.observe_transition_lease_closed.return_value = expected
         args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
                                journal=None, command="check-lease-closed")
         with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"):
+            backend.plan["transition_service_start"]["lease_closure_check"] = 1
+            with self.assertRaisesRegex(TransitionBlocked, "closure_unconfirmed"):
+                cli.run(args)
+            backend.observe_transition_lease_closed.assert_not_called()
+            backend.plan["transition_service_start"]["lease_closure_check"] = True
             self.assertEqual(cli.run(args), {"status": "PASS", **expected})
             receipt = journal / ("lease-closure-" + "a"*64 + ".json")
             raw = receipt.read_bytes()
