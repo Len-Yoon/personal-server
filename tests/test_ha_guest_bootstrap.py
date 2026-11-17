@@ -42,6 +42,43 @@ def pg_archive(path, *, arch='amd64', major='17', altered=False):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_replacement_container_readback_rejects_stopped_or_wrong_storage(self):
+        lock = fixture()
+        compose = json.loads(B.pg_files(lock)['pg-compose.json'])
+        expected = compose['services']['postgres']
+        identifier = 'a'*64
+        image = {'Id':expected['image'],'Config':{'Env':['BASE=synthetic']}}
+        config = {'Labels':{'com.docker.compose.project':compose['name'],'com.docker.compose.service':'postgres'},
+                  'Entrypoint':expected['entrypoint'],'Cmd':None,'User':expected['user'],
+                  'Env':['BASE=synthetic',*(f'{key}={value}' for key,value in expected['environment'].items())]}
+        host = {'NetworkMode':'host','Privileged':False,'ReadonlyRootfs':True,'RestartPolicy':{'Name':'no'},
+                'CapAdd':None,'CapDrop':['ALL'],'SecurityOpt':expected['security_opt'],
+                'ExtraHosts':[f'{name}:{ip}' for name,ip in expected['extra_hosts'].items()],
+                'Tmpfs':dict(entry.split(':',1) for entry in expected['tmpfs'])}
+        mounts = [{'Type':'bind','Source':row['source'],'Destination':row['target'],'RW':not row['read_only']}
+                  for row in expected['volumes']]
+        item = {'Id':identifier,'Image':image['Id'],'Config':config,'HostConfig':host,'Mounts':mounts,'RestartCount':0,
+                'State':{'Status':'running','Running':True,'Restarting':False,'Paused':False,'Dead':False,'OOMKilled':False}}
+        for wrong in (None, 'stopped', 'storage', 'paused', 'host'):
+            inspected = copy.deepcopy(item)
+            if wrong == 'stopped':
+                inspected['State']['Running'] = False
+            if wrong == 'storage':
+                inspected['Mounts'][0]['Source'] = '/wrong-standby-storage'
+            if wrong == 'paused':
+                inspected['State']['Paused'] = True
+            if wrong == 'host':
+                inspected['HostConfig']['ExtraHosts'] = ['ha-a:192.0.2.99']
+            with patch.object(B, 'standby_docker', side_effect=[
+                identifier.encode(), B.encode([inspected]), B.encode([image]),
+            ]) as docker:
+                if wrong:
+                    with self.assertRaisesRegex(B.BootstrapError, 'replacement_standby_container_unconfirmed'):
+                        B.replacement_container(lock)
+                else:
+                    self.assertEqual(B.replacement_container(lock), hashlib.sha256(identifier.encode()).hexdigest())
+                self.assertEqual([call.args[0][0] for call in docker.call_args_list], ['ps','container','image'])
+
     def test_replacement_start_rejects_primary_and_unbound_boot_before_engine_access(self):
         value = fixture()
         value.update(schema_version=3, primary_node="A", source_node=None)

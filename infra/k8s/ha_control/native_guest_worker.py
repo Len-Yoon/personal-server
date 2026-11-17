@@ -25,7 +25,7 @@ from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
-    MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    GUEST_OBSERVE_REPLACEMENT, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -37,6 +37,7 @@ VERBS = {
     "assert_activation_closed", "activate", "assert_live", "observe_restore", "observe_rollback",
     GUEST_RESTORE_READBACK,
     GUEST_START_REPLACEMENT,
+    GUEST_OBSERVE_REPLACEMENT,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -619,7 +620,7 @@ class GuestWorker:
         return handlers[self.request.verb]()
 
 
-def start_replacement_standby(request):
+def replacement_standby(request):
     _need(os.geteuid() == 0, "guest_worker_root_required")
     boot = request.binding.boot(request.node)
     _need(_digest(restore.BOOT_ID.read_bytes()) == boot, "guest_worker_boot_changed")
@@ -653,14 +654,24 @@ def start_replacement_standby(request):
         "__file__ = sys.argv[0]\n"
         "exec(compile(sys.stdin.buffer.read(), __file__, 'exec'))\n"
     )
-    result = subprocess.run(("/usr/bin/python3", "-I", "-B", "-S", "-c", runner, str(bootstrap), "start-replacement-standby",
+    observe = request.verb == GUEST_OBSERVE_REPLACEMENT
+    command = "observe-replacement-standby" if observe else "start-replacement-standby"
+    result = subprocess.run(("/usr/bin/python3", "-I", "-B", "-S", "-c", runner, str(bootstrap), command,
                              "--bundle", str(bundle), "--manifest-sha256", request.args["bootstrap_manifest_sha256"],
                              "--boot-sha256", boot), input=pinned_code, capture_output=True, check=False, timeout=75,
                             env={"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C"})
-    _need(result.returncode == 0 and _matches(json.loads(result.stdout), {
-        "status": "PASS", "standby_start_requested": True, "writer_authority_issued": False,
-    }), "guest_replacement_start_unconfirmed")
-    return Receipt("PASS", _digest(_bytes(_scope(request) | {"args": request.args, "installation_id": installation})))
+    _need(result.returncode == 0, "guest_replacement_outcome_unconfirmed")
+    reply = json.loads(result.stdout)
+    expected = {"status": "PASS", "writer_authority_issued": False}
+    if observe:
+        container = reply.get("standby_container_sha256")
+        _need(_hash(container), "guest_replacement_outcome_unconfirmed")
+        expected["standby_container_sha256"] = container
+    else:
+        expected["standby_start_requested"] = True
+    _need(_matches(reply, expected), "guest_replacement_outcome_unconfirmed")
+    return Receipt("PASS", _digest(_bytes(_scope(request) | {"args": request.args, "installation_id": installation,
+                                                          "result": expected})))
 
 
 def handle(request, assert_windows_current=None):
@@ -668,8 +679,8 @@ def handle(request, assert_windows_current=None):
         _need(type(request) is Request and request.verb in VERBS, "guest_worker_request_scope")
         _args(request.verb, request.node, request.args)
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
-            if request.verb == GUEST_START_REPLACEMENT:
-                return start_replacement_standby(request)
+            if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
+                return replacement_standby(request)
             return GuestWorker(request).dispatch(descriptor, assert_windows_current)
     except (TransitionBlocked, BridgeRejected, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         return Receipt("UNKNOWN")

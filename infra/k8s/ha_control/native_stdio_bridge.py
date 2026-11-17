@@ -41,6 +41,8 @@ HEX = re.compile(r"[a-f0-9]{64}\Z")
 NODES = ("A", "B")
 GUEST_RESTORE_READBACK = "read_restore_receipt"
 GUEST_START_REPLACEMENT = "start_replacement_standby"
+GUEST_OBSERVE_REPLACEMENT = "observe_replacement_standby"
+REPLACEMENT_ARGS = ("bootstrap_manifest_sha256", "rejoin_stage_sha256")
 RESTORE_ARGS = ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")
 VERBS = {
     # allowed nodes, maximum seconds, mutation, additional typed request fields
@@ -49,7 +51,8 @@ VERBS = {
     "finish_receive": ("A", 615, False, ("manifest_sha256", "receiver_sha256", "transfer_proof_sha256")),
     "restore": ("A", 1845, True, RESTORE_ARGS),
     GUEST_RESTORE_READBACK: ("A", 60, False, RESTORE_ARGS),
-    GUEST_START_REPLACEMENT: ("AB", 90, True, ("bootstrap_manifest_sha256", "rejoin_stage_sha256")),
+    GUEST_START_REPLACEMENT: ("AB", 90, True, REPLACEMENT_ARGS),
+    GUEST_OBSERVE_REPLACEMENT: ("AB", 90, False, REPLACEMENT_ARGS),
     "prepare_runtime": ("AB", 295, True, ("manifest_sha256", "restore_receipt_sha256", "transfer_receipt_sha256",
                                           "target_receipt_sha256")),
     "verify_closed": ("AB", 45, False, ("manifest_sha256", "restore_receipt_sha256", "prepared_receipt_sha256")),
@@ -248,7 +251,8 @@ class _Chain:
         self.recovery = False
 
     def check(self, verb, node, args):
-        _need(verb not in {GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT}, "bridge_guest_only_request")
+        _need(verb not in {GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT},
+              "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":
             _need(verb in OBSERVE, "bridge_reconciliation_read_only")

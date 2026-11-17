@@ -54,15 +54,23 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
                 patch.object(worker.runtime, "_read") as read_file, patch.object(worker.subprocess, "run") as run:
             read.side_effect = [(b"grant", grant | {"rejoin_stage_sha256": "0"*64})]
             with self.assertRaisesRegex(TransitionBlocked, "guest_replacement_start_not_bound"):
-                worker.start_replacement_standby(request)
+                worker.replacement_standby(request)
             run.assert_not_called()
             read.side_effect = [(b"grant", grant), (b"installation", installed)]
             read_file.side_effect = [manifest, encoded(lock), code]
             run.return_value = SimpleNamespace(returncode=0, stdout=reply)
-            self.assertEqual(worker.start_replacement_standby(request).status, "PASS")
+            self.assertEqual(worker.replacement_standby(request).status, "PASS")
             self.assertEqual(run.call_args.args[0][0], "/usr/bin/python3")
             self.assertEqual(run.call_args.args[0][-1], sha(boot))
             self.assertEqual(run.call_args.kwargs["input"], code)
+            read.side_effect = [(b"grant", grant), (b"installation", installed)]
+            read_file.side_effect = [manifest, encoded(lock), code]
+            run.return_value.stdout = encoded({
+                "status": "PASS", "standby_container_sha256": "1"*64, "writer_authority_issued": False,
+            })
+            result = worker.replacement_standby(replace(request, verb=bridge.GUEST_OBSERVE_REPLACEMENT))
+            self.assertEqual(result.status, "PASS")
+            self.assertIn("observe-replacement-standby", run.call_args.args[0])
 
     def test_dispatch_requires_current_windows_and_db_stage_around_start(self):
         bridge = native_stdio_bridge

@@ -322,12 +322,19 @@ class GuestSshDispatcher:
         self.inflight = False
 
     def __call__(self, request, deadline, *, assert_windows_current=None):
-        bridge._need(type(request) is bridge.Request and request.verb != bridge.GUEST_START_REPLACEMENT,
+        bridge._need(type(request) is bridge.Request and request.verb not in
+                     {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
     def start_replacement_standby(self, request, deadline, *, assert_rejoin_current):
-        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_START_REPLACEMENT
+        return self._replacement(request, deadline, bridge.GUEST_START_REPLACEMENT, assert_rejoin_current)
+
+    def observe_replacement_standby(self, request, deadline, *, assert_rejoin_current):
+        return self._replacement(request, deadline, bridge.GUEST_OBSERVE_REPLACEMENT, assert_rejoin_current)
+
+    def _replacement(self, request, deadline, verb, assert_rejoin_current):
+        bridge._need(type(request) is bridge.Request and request.verb == verb
                      and request.binding == self.binding and isinstance(request.args, Mapping)
                      and callable(assert_rejoin_current),
                      'guest_ssh_request_unbound')

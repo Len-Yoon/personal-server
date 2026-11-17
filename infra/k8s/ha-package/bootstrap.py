@@ -451,8 +451,41 @@ def standby_docker(args, *, timeout, compose=False):
     return result.stdout
 
 
-def start_replacement_standby(bundle, expected_manifest, boot_sha256):
-    """Start the installed standby-only package once on the pinned replacement guest."""
+def replacement_container(lock):
+    compose = json.loads(pg_files(lock)['pg-compose.json'])
+    expected = compose['services']['postgres']
+    identifiers = standby_docker(['ps','--all','--quiet','--no-trunc','--filter',
+                                  'label=com.docker.compose.project='+compose['name']],timeout=10).decode().split()
+    need(len(identifiers) == 1 and HEX.fullmatch(identifiers[0]), 'replacement_standby_container_unconfirmed')
+    identifier = identifiers[0]
+    item, = json.loads(standby_docker(['container','inspect',identifier],timeout=10))
+    image, = json.loads(standby_docker(['image','inspect',expected['image']],timeout=10))
+    config, host, state = item['Config'], item['HostConfig'], item['State']
+    base = image['Config']
+    expected_env = dict(entry.split('=',1) for entry in base.get('Env') or []) | expected['environment']
+    actual_env = config['Env'] or []
+    mounts = {(row['Source'], row['Destination'], row['RW']) for row in item['Mounts'] if row['Type'] == 'bind'}
+    expected_mounts = {(row['source'], row['target'], not row['read_only']) for row in expected['volumes']}
+    need(item['Id'] == identifier and item['Image'] == image['Id'] == expected['image']
+         and state['Status'] == 'running' and state['Running'] is True and item['RestartCount'] == 0
+         and all(state[key] is False for key in ('Paused','Restarting','OOMKilled','Dead'))
+         and config['Labels']['com.docker.compose.project'] == compose['name']
+         and config['Labels']['com.docker.compose.service'] == 'postgres'
+         and config['Entrypoint'] == expected['entrypoint'] and config['Cmd'] in (None, [])
+         and config['User'] == expected['user']
+         and len(actual_env) == len(expected_env) and dict(entry.split('=',1) for entry in actual_env) == expected_env
+         and host['NetworkMode'] == 'host' and host['Privileged'] is False and host['ReadonlyRootfs'] is True
+         and host['RestartPolicy']['Name'] == 'no' and (host['CapAdd'] or []) == [] and host['CapDrop'] == ['ALL']
+         and host['SecurityOpt'] == expected['security_opt']
+         and sorted(host['ExtraHosts']) == sorted(f'{name}:{ip}' for name,ip in expected['extra_hosts'].items())
+         and host['Tmpfs'] == dict(entry.split(':',1) for entry in expected['tmpfs'])
+         and len(item['Mounts']) == len(expected_mounts) and mounts == expected_mounts,
+         'replacement_standby_container_unconfirmed')
+    return hashlib.sha256(identifier.encode()).hexdigest()
+
+
+def start_replacement_standby(bundle, expected_manifest, boot_sha256, *, observe=False):
+    """Start once or inspect the pinned replacement container without mutation."""
     bundle = Path(bundle).absolute()
     need(os.geteuid() == 0 and os.uname().machine == 'x86_64', 'fresh_amd64_guest_root_required')
     need(HEX.fullmatch(expected_manifest) and digest(regular(bundle/'manifest.json')) == expected_manifest,
@@ -484,7 +517,7 @@ def start_replacement_standby(bundle, expected_manifest, boot_sha256):
     data = state/'pgdata'
     info = data.lstat()
     need(stat.S_ISDIR(info.st_mode) and info.st_uid == lock['postgres']['uid']
-         and stat.S_IMODE(info.st_mode) == 0o700 and not any(data.iterdir()), 'replacement_standby_data_not_empty')
+         and stat.S_IMODE(info.st_mode) == 0o700, 'replacement_standby_data_untrusted')
     for installed, packaged in (
         ('pg-compose.json', 'generated/pg-compose.json'),
         ('pg-bootstrap/postgresql.conf', 'generated/postgresql.conf'),
@@ -494,13 +527,20 @@ def start_replacement_standby(bundle, expected_manifest, boot_sha256):
         path = regular(root/installed)
         need(path.stat().st_uid == 0 and not path.stat().st_mode & 0o022
              and digest(path) == digest(bundle/packaged), 'replacement_standby_config_changed')
+    intent = state/'replacement-standby-start.json'
+    recorded = expected | {'boot_sha256':boot_sha256, 'source_node':source, 'node':lock['node']}
+    if observe:
+        path = regular(intent)
+        need(path.stat().st_uid == 0 and stat.S_IMODE(path.stat().st_mode) == 0o600
+             and json.loads(path.read_bytes()) == recorded, 'replacement_standby_intent_unconfirmed')
+        return {'status':'PASS','standby_container_sha256':replacement_container(lock),'writer_authority_issued':False}
+    need(not any(data.iterdir()), 'replacement_standby_data_not_empty')
     need(not standby_docker(['ps','--all','--quiet'],timeout=10).strip(), 'replacement_standby_engine_not_empty')
     # Record before Docker mutates. A lost response leaves the attempt for
     # inspection, with the old database and its storage outside this guest.
-    intent = state/'replacement-standby-start.json'
     fd = os.open(intent, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'wb') as stream:
-        stream.write(encode(expected | {'boot_sha256':boot_sha256, 'source_node':source, 'node':lock['node']}))
+        stream.write(encode(recorded))
         stream.flush()
         os.fsync(stream.fileno())
     directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -519,8 +559,9 @@ def main():
     p = subs.add_parser('prepare'); p.add_argument('--lock',required=True); p.add_argument('--inputs',required=True); p.add_argument('--output',required=True)
     p = subs.add_parser('verify'); p.add_argument('--bundle',required=True)
     p = subs.add_parser('install'); p.add_argument('--bundle',required=True); p.add_argument('--manifest-sha256',required=True)
-    p = subs.add_parser('start-replacement-standby'); p.add_argument('--bundle',required=True)
-    p.add_argument('--manifest-sha256',required=True); p.add_argument('--boot-sha256',required=True)
+    for action in ('start-replacement-standby','observe-replacement-standby'):
+        p = subs.add_parser(action); p.add_argument('--bundle',required=True)
+        p.add_argument('--manifest-sha256',required=True); p.add_argument('--boot-sha256',required=True)
     args = parser.parse_args()
     try:
         if args.action == 'prepare':
@@ -531,7 +572,8 @@ def main():
         elif args.action == 'install':
             result = install(args.bundle,args.manifest_sha256)
         else:
-            result = start_replacement_standby(args.bundle,args.manifest_sha256,args.boot_sha256)
+            result = start_replacement_standby(args.bundle,args.manifest_sha256,args.boot_sha256,
+                                               observe=args.action == 'observe-replacement-standby')
     except Exception as error:
         # Never emit dpkg output, credentials, endpoint values, SQL or exception text.
         result = {'status':'FAIL','reason':str(error) if isinstance(error,BootstrapError) else 'bootstrap_failed'}
