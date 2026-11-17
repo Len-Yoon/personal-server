@@ -52,7 +52,7 @@ class TransitionIngressTests(unittest.TestCase):
         args = dict(
             previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
-            replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50,
+            replacement_vm={"installation_id": "a"*64}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50,
                     "stage_sha256": "1"*64, "manifest_sha256": "2"*64},
             assert_legacy_closed=MagicMock(),
             controller_setup={"deadline": 50, "starter": MagicMock(),
@@ -330,8 +330,8 @@ class TransitionIngressTests(unittest.TestCase):
         pin = "1" * 64
         args = {"bootstrap_manifest_sha256": "2" * 64, "rejoin_stage_sha256": pin}
         target = bridge.Request(binding, "B", bridge.GUEST_TRANSITION_TARGET, 1, "3" * 64, {})
-        start = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 2, "4" * 64, args)
-        observe = bridge.Request(binding, "A", bridge.GUEST_OBSERVE_REPLACEMENT, 3, "5" * 64, args)
+        start = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 3, "4" * 64, args)
+        observe = bridge.Request(binding, "A", bridge.GUEST_OBSERVE_REPLACEMENT, 4, "5" * 64, args)
         guests = MagicMock()
         guests.start_replacement_standby.side_effect = OSError("connection interrupted")
         guests.confirm_replacement_rejoin.side_effect = [
@@ -340,16 +340,20 @@ class TransitionIngressTests(unittest.TestCase):
         stage, sync = MagicMock(return_value=pin), MagicMock()
         with tempfile.TemporaryDirectory() as directory:
             execution = SimpleNamespace(directory=Path(directory).resolve(), spec=binding.fields())
-            call = (execution, guests, ServingGeneration("B", 2, 2, 2), target, start, observe, stage, sync, 90)
+            call = (execution, guests, ServingGeneration("B", 2, 2, 2), target, start, observe, "a"*64, stage, sync, 90)
             with self.assertRaisesRegex(bridge.BridgeRejected, "rejoin not yet visible"):
                 transition_ingress._rejoin_replacement(*call)
             self.assertTrue((execution.directory / "replacement-start-intent.json").is_file())
-            fresh_target = replace(target, sequence=4, nonce="7" * 64)
-            fresh_start = replace(start, sequence=5, nonce="8" * 64)
-            fresh_observe = replace(observe, sequence=6, nonce="9" * 64)
+            fresh_target = replace(target, sequence=5, nonce="7" * 64)
+            fresh_start = replace(start, sequence=7, nonce="8" * 64)
+            fresh_observe = replace(observe, sequence=8, nonce="9" * 64)
             transition_ingress._rejoin_replacement(
-                execution, guests, call[2], fresh_target, fresh_start, fresh_observe, stage, sync, 90,
+                execution, guests, call[2], fresh_target, fresh_start, fresh_observe, "a"*64, stage, sync, 90,
             )
+        guests.publish_replacement_standby.assert_called_once()
+        published = guests.publish_replacement_standby.call_args.args[0]
+        self.assertEqual(published.sequence, start.sequence - 1)
+        self.assertEqual(published.args["installation_id"], "a"*64)
         guests.start_replacement_standby.assert_called_once_with(start, 90, assert_rejoin_current=stage)
         self.assertEqual(guests.confirm_replacement_rejoin.call_count, 2)
         guests.confirm_replacement_rejoin.assert_called_with(

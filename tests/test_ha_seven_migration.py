@@ -116,15 +116,15 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
     def test_worker_runs_only_boot_and_stage_bound_standby_package(self):
         bridge, worker = native_stdio_bridge, native_guest_worker
         boot, code = b"replacement boot", b"pinned bootstrap program"
-        manifest = encoded({"files": {"bootstrap.py": sha(code)}})
         binding = bridge.Binding("a"*64, "b"*64, "c"*64, sha(boot), "d"*64)
+        installed = {"node": "A", "source_commit": "1"*40, "installation_id": "2"*64}
+        lock = installed | {"primary_node": "B", "source_node": "B", "plan_sha256": binding.plan_sha256}
+        manifest = encoded({"files": {"bootstrap.py": sha(code), "lock.json": sha(encoded(lock))}})
         request = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 1, "e"*64, {
             "bootstrap_manifest_sha256": sha(manifest), "rejoin_stage_sha256": "f"*64,
         })
-        installed = {"node": "A", "source_commit": "1"*40, "installation_id": "2"*64}
         grant = {"schema_version": 1, "binding": binding.fields(), "node": "A",
                  "installation_id": installed["installation_id"], **request.args}
-        lock = installed | {"primary_node": "B", "source_node": "B", "plan_sha256": binding.plan_sha256}
         reply = encoded({"status": "PASS", "standby_start_requested": True, "writer_authority_issued": False})
         boot_file = MagicMock()
         boot_file.read_bytes.return_value = boot

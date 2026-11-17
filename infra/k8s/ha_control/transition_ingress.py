@@ -130,7 +130,8 @@ def resume_ingress(main, car, previous, relay, prepared, generation, target, rou
                    main_receipt, car_receipt, assert_guard, verify_guest, verify_public)
 
 
-def _rejoin_replacement(execution, guests, generation, target_request, start, observe, check_stage, check_sync, deadline):
+def _rejoin_replacement(execution, guests, generation, target_request, start, observe, installation_id,
+                        check_stage, check_sync, deadline):
     """Start only once, then establish the exact guest and Windows replication evidence."""
     pin = (start.args.get("rejoin_stage_sha256")
            if type(start) is bridge.Request and isinstance(start.args, Mapping) else None)
@@ -141,10 +142,10 @@ def _rejoin_replacement(execution, guests, generation, target_request, start, ob
                 and start.node == observe.node == generation.partner
                 and start.args == observe.args
                 and type(start.sequence) is int and type(observe.sequence) is int
-                and target_request.sequence < start.sequence < observe.sequence <= bridge.MAX_REQUESTS
+                and target_request.sequence < start.sequence - 1 < start.sequence < observe.sequence <= bridge.MAX_REQUESTS
                 and bridge._hash(start.nonce) and bridge._hash(observe.nonce)
                 and len({target_request.nonce, start.nonce, observe.nonce}) == 3 and bridge._hash(pin)
-                and callable(check_stage) and callable(check_sync),
+                and bridge._hash(installation_id) and callable(check_stage) and callable(check_sync),
                 "transition_replacement_scope_invalid")
     bridge._args(start.verb, start.node, dict(start.args))
     directory = caddy._private_dir(execution.directory)
@@ -153,12 +154,16 @@ def _rejoin_replacement(execution, guests, generation, target_request, start, ob
         "plan_sha256": execution.spec["plan_sha256"], "attempt_id": execution.spec["attempt_id"],
         "generation": generation.epoch, "timeline": generation.timeline,
         "replacement_node": start.node, "replacement_boot_sha256": start.binding.boot(start.node),
+        "replacement_installation_id": installation_id,
         "bootstrap_manifest_sha256": start.args["bootstrap_manifest_sha256"], "rejoin_stage_sha256": pin,
     }
     caddy._need(check_stage(deadline) == pin, "transition_replacement_stage_unconfirmed")
     if os.path.lexists(intent):
         caddy._need(parse(caddy._read(intent)) == expected, "transition_replacement_intent_unconfirmed")
     else:
+        publication = replace(start, verb=bridge.GUEST_PUBLISH_REPLACEMENT, sequence=start.sequence - 1,
+                              nonce=secrets.token_hex(32), args=dict(start.args) | {"installation_id": installation_id})
+        guests.publish_replacement_standby(publication, deadline, assert_rejoin_current=check_stage)
         caddy._write(intent, encoded(expected), 0o600)
         caddy._sync_dir(directory)
         try:
@@ -384,7 +389,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                     and replacement_start.args.get("rejoin_stage_sha256") == stage,
                     "transition_replacement_scope_invalid")
         _rejoin_replacement(execution, guests, generation, target_request, replacement_start, replacement_observe,
-                            check_stage, check_sync, deadline)
+                            replacement_vm["installation_id"], check_stage, check_sync, deadline)
 
         publish_sequence = replacement_observe.sequence + 1
         if prepare_guest_runtime:

@@ -25,7 +25,7 @@ from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
-    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
+    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -37,6 +37,7 @@ VERBS = {
     "preflight", "begin_receive", "finish_receive", "restore", "prepare_runtime", "verify_closed",
     "assert_activation_closed", "activate", "assert_live", "observe_restore", "observe_rollback",
     GUEST_RESTORE_READBACK,
+    GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT,
     GUEST_ACTIVATE_GENERATION,
@@ -630,6 +631,44 @@ class GuestWorker:
         return handlers[self.request.verb]()
 
 
+def _replacement_bundle(request, stage, installation):
+    _, installed = _read_json(restore.INSTALLATION)
+    bundle = stage / "replacement-bootstrap"
+    runtime._directory(bundle, 0)
+    manifest = runtime._read(bundle / "manifest.json", 0, {0o400, 0o444})
+    _need(_digest(manifest) == request.args["bootstrap_manifest_sha256"], "guest_replacement_manifest_unconfirmed")
+    lock = runtime._read(bundle / "lock.json", 0, {0o400, 0o444})
+    index = json.loads(manifest, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+    _need(_digest(lock) == index["files"]["lock.json"], "guest_replacement_manifest_unconfirmed")
+    spec = json.loads(lock, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+    source = "B" if request.node == "A" else "A"
+    _need(all(installed[key] == spec[key] for key in ("node", "installation_id", "source_commit"))
+          and spec["node"] == request.node and spec["installation_id"] == installation
+          and spec["plan_sha256"] == request.binding.plan_sha256
+          and spec["primary_node"] == spec["source_node"] == source, "guest_replacement_installation_changed")
+    bootstrap = bundle / "bootstrap.py"
+    pinned_code = runtime._read(bootstrap, 0, {0o400, 0o444, 0o500, 0o555})
+    _need(_digest(pinned_code) == index["files"]["bootstrap.py"], "guest_replacement_bootstrap_unconfirmed")
+    return bundle, bootstrap, pinned_code
+
+
+def publish_replacement_standby(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    boot = request.binding.boot(request.node)
+    _need(_digest(restore.BOOT_ID.read_bytes()) == boot, "guest_worker_boot_changed")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    installation = request.args["installation_id"]
+    _replacement_bundle(request, stage, installation)
+    grant = _bytes({"schema_version": 1, "binding": request.binding.fields(), "node": request.node, **request.args})
+    path = stage / "replacement-standby-input.json"
+    if not os.path.lexists(path):
+        runtime._write(path, grant, 0o400)
+    _need(runtime._read(path, 0, {0o400}) == grant and _digest(restore.BOOT_ID.read_bytes()) == boot,
+          "guest_replacement_start_not_bound")
+    return Receipt("PASS", _digest(grant))
+
+
 def replacement_standby(request):
     _need(os.geteuid() == 0, "guest_worker_root_required")
     boot = request.binding.boot(request.node)
@@ -642,22 +681,7 @@ def replacement_standby(request):
         "schema_version": 1, "binding": request.binding.fields(), "node": request.node,
         "installation_id": installation, **request.args,
     }), "guest_replacement_start_not_bound")
-    _, installed = _read_json(restore.INSTALLATION)
-    bundle = stage / "replacement-bootstrap"
-    runtime._directory(bundle, 0)
-    manifest = runtime._read(bundle / "manifest.json", 0, {0o400, 0o444})
-    _need(_digest(manifest) == request.args["bootstrap_manifest_sha256"], "guest_replacement_manifest_unconfirmed")
-    spec = json.loads(runtime._read(bundle / "lock.json", 0, {0o400, 0o444}), object_pairs_hook=_pairs,
-                      parse_constant=_reject_constant)
-    source = "B" if request.node == "A" else "A"
-    _need(all(installed[key] == spec[key] for key in ("node", "installation_id", "source_commit"))
-          and spec["node"] == request.node and spec["installation_id"] == installation
-          and spec["plan_sha256"] == request.binding.plan_sha256
-          and spec["primary_node"] == spec["source_node"] == source, "guest_replacement_installation_changed")
-    bootstrap = bundle / "bootstrap.py"
-    pinned_code = runtime._read(bootstrap, 0, {0o400, 0o444, 0o500, 0o555})
-    index = json.loads(manifest, object_pairs_hook=_pairs, parse_constant=_reject_constant)
-    _need(_digest(pinned_code) == index["files"]["bootstrap.py"], "guest_replacement_bootstrap_unconfirmed")
+    bundle, bootstrap, pinned_code = _replacement_bundle(request, stage, installation)
     runner = (
         "import sys\n"
         "sys.argv.pop(0)\n"
@@ -891,6 +915,8 @@ def handle(request, assert_windows_current=None):
         if request.verb == GUEST_TRANSITION_TARGET:
             return verify_transition_target(request)
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
+            if request.verb == GUEST_PUBLISH_REPLACEMENT:
+                return publish_replacement_standby(request)
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
                 return replacement_standby(request)
             if request.verb == GUEST_OBSERVE_PREPARATION:

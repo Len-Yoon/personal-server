@@ -41,6 +41,7 @@ TRANSFER_BYTES = 8 * 1024**3
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 NODES = ("A", "B")
 GUEST_RESTORE_READBACK = "read_restore_receipt"
+GUEST_PUBLISH_REPLACEMENT = "publish_replacement_standby"
 GUEST_START_REPLACEMENT = "start_replacement_standby"
 GUEST_OBSERVE_REPLACEMENT = "observe_replacement_standby"
 GUEST_PREPARE_GENERATION = "prepare_generation_runtime"
@@ -65,6 +66,7 @@ VERBS = {
     "finish_receive": ("A", 615, False, ("manifest_sha256", "receiver_sha256", "transfer_proof_sha256")),
     "restore": ("A", 1845, True, RESTORE_ARGS),
     GUEST_RESTORE_READBACK: ("A", 60, False, RESTORE_ARGS),
+    GUEST_PUBLISH_REPLACEMENT: ("AB", 35, True, (*REPLACEMENT_ARGS, "installation_id")),
     GUEST_START_REPLACEMENT: ("AB", 90, True, REPLACEMENT_ARGS),
     GUEST_OBSERVE_REPLACEMENT: ("AB", 90, False, REPLACEMENT_ARGS),
     "prepare_runtime": ("AB", 295, True, ("manifest_sha256", "restore_receipt_sha256", "transfer_receipt_sha256",
@@ -288,7 +290,7 @@ class _Chain:
         self.recovery = False
 
     def check(self, verb, node, args):
-        _need(verb not in {GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
+        _need(verb not in {GUEST_RESTORE_READBACK, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
                           GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET},
               "bridge_guest_only_request")
         _args(verb, node, args)
