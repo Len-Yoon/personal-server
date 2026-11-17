@@ -44,9 +44,10 @@ class TransitionIngressTests(unittest.TestCase):
         args = dict(
             previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
-            replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate)},
+            replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50},
             assert_legacy_closed=MagicMock(), open_controller=open_controller,
-            activate_guest=guest, verify_target=MagicMock(return_value=True), verify_guest=MagicMock(),
+            activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
+            target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
@@ -54,11 +55,11 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
                 patch.object(transition_ingress, "switch_ingress", side_effect=lambda *a, **kw: steps.append("ingress")) as switch:
-            args["verify_target"].return_value = False
+            args["guests"].verify_transition_target.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(steps, [])
-            args["verify_target"].return_value = True
+            args["guests"].verify_transition_target.return_value = True
             with self.assertRaisesRegex(RuntimeError, "guest failed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             switch.assert_not_called()

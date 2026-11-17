@@ -33,6 +33,41 @@ def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
+class TransitionTargetBridgeTests(unittest.TestCase):
+    def test_exact_route_address_and_authenticated_guest_required(self):
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*("abcde"[i]*64 for i in range(5)))
+        request = bridge.Request(binding, "B", bridge.GUEST_TRANSITION_TARGET, 1, "f"*64, {"installation_id": "9"*64})
+        generation = native_guest_activation.ServingGeneration("B", 2, 2, 2)
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        dispatcher.guests = {"B": SimpleNamespace(host="192.168.20.2")}
+        with patch.object(dispatcher, "_dispatch", return_value=bridge.Receipt("PASS", "8"*64)) as dispatch:
+            with self.assertRaisesRegex(bridge.BridgeRejected, "target_unbound"):
+                dispatcher.verify_transition_target(request, generation, "192.168.20.8", 45)
+            with self.assertRaises(bridge.BridgeRejected):
+                dispatcher(request, 45)
+            dispatch.assert_not_called()
+            self.assertIs(dispatcher.verify_transition_target(request, generation, "192.168.20.2", 45), True)
+            dispatch.assert_called_once_with(request, 45)
+
+    def test_target_worker_reads_only_installation_and_current_boot(self):
+        bridge = native_stdio_bridge
+        boot = b"boot-identifier"
+        binding = bridge.Binding("a"*64, "b"*64, "c"*64, "d"*64, sha(boot))
+        request = bridge.Request(binding, "B", bridge.GUEST_TRANSITION_TARGET, 1, "f"*64, {"installation_id": "9"*64})
+        payload = {"node": "B", "installation_id": "9"*64}
+        with patch.object(native_guest_worker, "_read_json", return_value=(encoded(payload), payload)) as read, \
+                patch.object(native_guest_restore, "BOOT_ID", SimpleNamespace(read_bytes=lambda: boot)), \
+                patch.object(native_guest_worker.os, "geteuid", return_value=0), \
+                patch.object(native_guest_worker, "mutation_lock") as lock:
+            result = native_guest_worker.handle(request)
+            self.assertEqual(result.status, "PASS")
+            read.assert_called_once_with(native_guest_restore.INSTALLATION)
+            payload["node"] = "A"
+            self.assertEqual(native_guest_worker.handle(request).status, "UNKNOWN")
+            lock.assert_not_called()
+
+
 class ReplacementStandbyBridgeTests(unittest.TestCase):
     def test_confirmation_requires_matching_windows_replication_receipt_after_guest(self):
         bridge = native_stdio_bridge

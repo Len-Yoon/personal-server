@@ -323,9 +323,21 @@ class GuestSshDispatcher:
 
     def __call__(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.verb not in
-                     {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT, bridge.GUEST_ACTIVATE_GENERATION},
+                     {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
+                      bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
+
+    def verify_transition_target(self, request, generation, target, deadline):
+        """Check the exact route address via pinned SSH, node, installation and boot identity."""
+        generation.validate()
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_TRANSITION_TARGET
+                     and generation.epoch > 1 and request.node == generation.primary
+                     and target == self.guests[request.node].host, "guest_ssh_transition_target_unbound")
+        receipt = self._dispatch(request, deadline)
+        bridge._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256),
+                     "guest_ssh_transition_target_unconfirmed")
+        return True
 
     def activate_generation(self, request, deadline, *, assert_windows_current):
         """Require an authenticated Windows proof for each challenge and boundary."""

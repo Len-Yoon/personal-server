@@ -43,6 +43,7 @@ GUEST_RESTORE_READBACK = "read_restore_receipt"
 GUEST_START_REPLACEMENT = "start_replacement_standby"
 GUEST_OBSERVE_REPLACEMENT = "observe_replacement_standby"
 GUEST_ACTIVATE_GENERATION = "activate_generation"
+GUEST_TRANSITION_TARGET = "verify_transition_target"
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
 REPLACEMENT_ARGS = ("bootstrap_manifest_sha256", "rejoin_stage_sha256")
 RESTORE_ARGS = ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")
@@ -63,6 +64,7 @@ VERBS = {
     # Includes Windows service start and seven serial application readiness waits.
     "activate": ("A", 300, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
     GUEST_ACTIVATE_GENERATION: ("AB", 300, True, ("generation_handoff_sha256", "effects_plan_sha256")),
+    GUEST_TRANSITION_TARGET: ("AB", 30, False, ("installation_id",)),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
     "observe_restore": ("A", 60, False, ("manifest_sha256", "restore_intent_sha256")),
@@ -255,7 +257,7 @@ class _Chain:
 
     def check(self, verb, node, args):
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
-                          GUEST_ACTIVATE_GENERATION},
+                          GUEST_ACTIVATE_GENERATION, GUEST_TRANSITION_TARGET},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":

@@ -126,7 +126,8 @@ def resume_ingress(main, car, previous, relay, prepared, generation, target, rou
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
-                         observer_setup, assert_legacy_closed, open_controller, activate_guest, verify_target, verify_guest,
+                         observer_setup, assert_legacy_closed, open_controller, activate_guest,
+                         guests, target_request, verify_guest,
                          verify_public=_public_health):
     """Prepare the Windows controller, activate the guest, then switch ingress under one lock."""
     _route_scope(previous, relay, generation, target, route_pin, execution.spec["plan_sha256"], execution.spec["attempt_id"])
@@ -136,7 +137,10 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     template = parse(raw)
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
                 and template.get("node") == generation.partner, "transition_ingress_controller_unbound")
-    caddy._need(verify_target(generation, target) is True, "transition_ingress_guest_target_unconfirmed")
+    caddy._need((target_request.binding.plan_sha256, target_request.binding.attempt_id)
+                == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
+                and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
+                "transition_ingress_guest_target_unconfirmed")
     with execution.guard(main, car):
         binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
                                                      legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,

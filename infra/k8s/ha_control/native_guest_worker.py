@@ -26,7 +26,7 @@ from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
-    GUEST_OBSERVE_REPLACEMENT, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -40,6 +40,7 @@ VERBS = {
     GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT,
     GUEST_ACTIVATE_GENERATION,
+    GUEST_TRANSITION_TARGET,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -735,10 +736,21 @@ def activate_generation(request, assert_windows_current):
     return Receipt("PASS", _digest(receipt))
 
 
+def verify_transition_target(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    boot = request.binding.boot(request.node)
+    raw, identity = _read_json(restore.INSTALLATION)
+    _need(identity.get("node") == request.node and identity.get("installation_id") == request.args["installation_id"]
+          and _digest(restore.BOOT_ID.read_bytes()) == boot, "guest_transition_target_unconfirmed")
+    return Receipt("PASS", _digest(_bytes(_scope(request) | {"installation_sha256": _digest(raw)})))
+
+
 def handle(request, assert_windows_current=None):
     try:
         _need(type(request) is Request and request.verb in VERBS, "guest_worker_request_scope")
         _args(request.verb, request.node, request.args)
+        if request.verb == GUEST_TRANSITION_TARGET:
+            return verify_transition_target(request)
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
                 return replacement_standby(request)
