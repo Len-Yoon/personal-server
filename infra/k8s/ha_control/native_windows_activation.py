@@ -486,6 +486,25 @@ def transition_authority_records(controller, started, generation, *, root, attem
     }
 
 
+def publish_transition_authority_records(windows, stage_sha256, records, controller_sha256, deadline):
+    """Install the exact service binding first, then its generation grant."""
+    instance = records["service_instance_sha256"]
+    bridge._need(bridge._hash(controller_sha256) and bridge._hash(instance)
+                 and bridge._digest(records["binding"]) == instance, "native_transition_authority_record_invalid")
+    for name, parent_pin in (("binding", controller_sha256), ("grant", instance)):
+        raw = records[name]
+        pin = bridge._digest(raw)
+        source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
+            "InputPath": records[f"{name}_path"], "InputSha256": pin, "ExpectedSourceManifestSha256": parent_pin,
+            "IntentBase64": base64.b64encode(raw).decode("ascii"), "PublishTransitionAuthority": True, "Go": True,
+        })
+        bridge._remaining(deadline)
+        result = windows.powershell(source, deadline)
+        bridge._need(result == {"transition_authority_record_sha256": pin},
+                     "native_transition_authority_record_unconfirmed")
+    return instance
+
+
 class WindowsTransitionLease:
     """Sample the running Windows controller and the remaining writer exclusions."""
 

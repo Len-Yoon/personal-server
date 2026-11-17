@@ -2,7 +2,7 @@
 param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
       [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig,
       [switch]$ObserveTransitionObserverConfig, [switch]$StartTransitionObserver,
-      [switch]$PublishTransitionObserverLaunch)
+      [switch]$PublishTransitionObserverLaunch, [switch]$PublishTransitionAuthority)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -303,6 +303,44 @@ try {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)
+    if ($PublishTransitionAuthority) {
+        if (-not $Go -or $StartTransitionObserver -or $PublishTransitionObserverLaunch -or
+            $PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
+            $RuntimeSha256 -cne '' -or $IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) {
+            throw 'initial_stage_transition_authority'
+        }
+        $raw = [Convert]::FromBase64String($IntentBase64)
+        if ($raw.Length -gt 4096 -or (Digest $raw) -cne $InputSha256) { throw 'initial_stage_transition_authority' }
+        $record = ConvertFrom-Json -InputObject ($encoding.GetString($raw))
+        Assert-Pin $record.attempt_id
+        $bindingPath = Join-Path $root ('transition-service-' + $record.attempt_id + '.json')
+        $grantPath = Join-Path $root ('transition-grant-' + $record.attempt_id + '.json')
+        if ($InputPath -ceq $bindingPath) {
+            Assert-Fields $record @('attempt_id','controller_plan_sha256','generation','legacy_plan_sha256',
+                'old_disk_paths_sha256','old_vm_id','python_command_sha256','python_path_sha256','service_created_ticks',
+                'service_image_path_sha256','service_name','service_pid','state_path','target','timeline')
+            if ($record.controller_plan_sha256 -cne $ExpectedSourceManifestSha256 -or
+                $record.state_path -cne (Join-Path $root 'journal\controller-state.json')) {
+                throw 'initial_stage_transition_authority'
+            }
+        } elseif ($InputPath -ceq $grantPath) {
+            Assert-Fields $record @('attempt_id','handoff_sha256','service_instance_sha256')
+            Assert-Pin $record.handoff_sha256
+            if ($record.service_instance_sha256 -cne $ExpectedSourceManifestSha256) { throw 'initial_stage_transition_authority' }
+            $null = Read-Protected $bindingPath $record.service_instance_sha256 4096
+        } else { throw 'initial_stage_transition_authority' }
+        Assert-ReservedLeaf $InputPath $root
+        $authorityRoot = Get-Item -LiteralPath $root -Force
+        if ($authorityRoot -isnot [IO.DirectoryInfo]) { throw 'initial_stage_transition_authority' }
+        Assert-ProtectedPath $authorityRoot
+        if (Test-Path -LiteralPath $InputPath) {
+            $null = Read-Protected $InputPath $InputSha256 4096
+            if ((Get-Acl -LiteralPath $InputPath).GetSecurityDescriptorSddlForm($sections) -cne
+                (File-Access).GetSecurityDescriptorSddlForm($sections)) { throw 'initial_stage_published_acl' }
+        } else { $null = Write-New $InputPath $raw }
+        [ordered]@{transition_authority_record_sha256=$InputSha256}|ConvertTo-Json -Compress
+        return
+    }
     if ($StartTransitionObserver -or $PublishTransitionObserverLaunch) {
         if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
             $StartTransitionObserver.IsPresent -eq $PublishTransitionObserverLaunch.IsPresent) { throw 'initial_stage_observer' }

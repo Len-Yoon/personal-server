@@ -22,7 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
-    transition_authority_records,
+    transition_authority_records, publish_transition_authority_records,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -64,6 +64,23 @@ class TransitionServiceStartTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(BridgeRejected, "authority_record_invalid"):
             transition_authority_records(controller, started, generation, **(args | {"old_vm_id": "9"*8 + vm_id[8:]}))
+
+        stage = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(stage.read_bytes()).hexdigest()
+        windows = MagicMock()
+        record_pins = [hashlib.sha256(records[name]).hexdigest() for name in ("binding", "grant")]
+        windows.powershell.side_effect = [{"transition_authority_record_sha256": digest} for digest in record_pins]
+        deadline = time.monotonic() + 30
+        self.assertEqual(publish_transition_authority_records(windows, stage_pin, records, pin, deadline), record_pins[0])
+        sent = [call.args[0] for call in windows.powershell.call_args_list]
+        for command, name in zip(sent, ("binding", "grant"), strict=True):
+            self.assertIn(records[f"{name}_path"], command)
+            self.assertIn("-PublishTransitionAuthority", command)
+        windows.powershell.reset_mock()
+        windows.powershell.side_effect = [{"blocked": "incorrect binding"}]
+        with self.assertRaisesRegex(BridgeRejected, "record_unconfirmed"):
+            publish_transition_authority_records(windows, stage_pin, records, pin, deadline)
+        windows.powershell.assert_called_once()
 
     def test_native_start_records_durable_intent_before_scm(self):
         script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
