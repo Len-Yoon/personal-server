@@ -152,19 +152,28 @@ class TransitionServiceStartTests(unittest.TestCase):
         script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
         scope = script[script.index("function Start-PreparedTransitionService"):script.index("    if (-not $Go")]
         statements = (
-            "Test-EnforcedServicePreflight",
             "transition-service-start-",
-            "[TrustedStoppedV1.Contract]::Verify",
+            "$commandLock =",
+            "Assert-TransitionPreflight $servingSha",
+            "Assert-TransitionStopped $Plan $HostPath $Current.PathName",
             "Test-Path -LiteralPath $intentPath",
             "[IO.FileMode]::CreateNew",
             "[IO.FileOptions]::WriteThrough",
             "$file.Flush($true)",
             "Get-Acl -LiteralPath $intentPath",
+            "[IO.File]::Replace($stage,$argsPath",
+            "Assert-TransitionPreflight $argsSha",
             "Start-Service -Name $ServiceName",
+            "} finally {",
+            "Assert-TransitionStopped $Plan $HostPath $Current.PathName",
+            "[IO.File]::Replace($restore,$argsPath",
+            "Assert-TransitionPreflight $servingSha",
+            "$receipt | ConvertTo-Json -Compress",
+            "} finally { $commandLock.Dispose() }",
         )
-        start_only = scope.index("[TrustedStoppedV1.Contract]::Verify")
-        positions = [scope.index(line, start_only if line.startswith("Get-Acl") else 0) for line in statements]
-        self.assertEqual(positions, sorted(positions))
+        cursor = 0
+        for statement in statements:
+            cursor = scope.index(statement, cursor) + len(statement)
 
     def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"

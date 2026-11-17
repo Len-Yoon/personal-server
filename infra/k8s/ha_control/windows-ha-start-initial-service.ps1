@@ -58,6 +58,31 @@ function Assert-Executable([string]$Path, [string]$Sha) {
     }
 }
 
+function Assert-TransitionPreflight([string]$ExpectedArgs) {
+    $ArgsSha256 = $ExpectedArgs
+    $checked = ConvertFrom-Json -InputObject (Test-EnforcedServicePreflight)
+    if ($checked.scope -cne 'pre_StartService_inventory_and_ACL' -or $checked.host_sha256 -cne $ServiceHostSha256 -or
+        $checked.args_sha256 -cne $ExpectedArgs -or $checked.execution_performed -isnot [bool] -or $checked.execution_performed) {
+        throw 'initial_service_preflight_unconfirmed'
+    }
+}
+
+function Assert-TransitionStopped($Plan, [string]$HostPath, [string]$ImagePath) {
+    $scm = [TrustedStoppedV1.Native]::new()
+    try {
+        $scm.OpenForRead($ServiceName)
+        [TrustedStoppedV1.Contract]::Inputs($Plan.installation_id,$ServiceName,$HostPath)
+        [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$ImagePath)
+    } finally { $scm.Dispose() }
+}
+
+function Write-TransitionArgsStage([string]$Path, [byte[]]$Bytes, $Acl) {
+    $file = [IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,
+        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
+        [IO.FileOptions]::WriteThrough,$Acl)
+    try { $file.Write($Bytes,0,$Bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+}
+
 function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Approval) {
     $scope = $Plan.windows_enforced
     $pins = $Plan.transition_service_start
@@ -90,11 +115,15 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         launcher_sha256=$scope.launcher_sha256;plan_path=$PlanPath;plan_sha256=$PlanSha256;
         approval_path=$ApprovalPath;approval_sha256=$ApprovalSha256;mode=$mode;host_sha256=$ServiceHostSha256}
     $lines = @($settings.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value })
+    $settings['mode'] = $pins.mode
+    $servingLines = @($settings.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value })
     $encoder = [Text.UTF8Encoding]::new($false,$true)
     $hash = [Security.Cryptography.SHA256]::Create()
     try {
         $argsBytes = $encoder.GetBytes(($lines -join [char]10) + [char]10)
         $argsSha = [BitConverter]::ToString($hash.ComputeHash($argsBytes)).Replace('-','').ToLowerInvariant()
+        $servingBytes = $encoder.GetBytes(($servingLines -join [char]10) + [char]10)
+        $servingSha = [BitConverter]::ToString($hash.ComputeHash($servingBytes)).Replace('-','').ToLowerInvariant()
         $preflight = [IO.File]::ReadAllBytes($PreflightPath)
         $scmSource = [IO.File]::ReadAllBytes($ScmVerifierPath)
         if ([BitConverter]::ToString($hash.ComputeHash($preflight)).Replace('-','').ToLowerInvariant() -cne $PreflightSha256 -or
@@ -104,11 +133,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     } finally { $hash.Dispose() }
     $preflightBlock = [ScriptBlock]::Create($encoder.GetString($preflight))
     . $preflightBlock -HostRoot $hostRoot -HostSha256 $ServiceHostSha256 -ArgsSha256 $argsSha -ServiceSid $sid -TrustedAdminSids $pins.trusted_admin_sids
-    $checked = ConvertFrom-Json -InputObject (Test-EnforcedServicePreflight)
-    if ($checked.scope -cne 'pre_StartService_inventory_and_ACL' -or $checked.host_sha256 -cne $ServiceHostSha256 -or
-        $checked.args_sha256 -cne $argsSha -or $checked.execution_performed -isnot [bool] -or $checked.execution_performed) {
-        throw 'initial_service_preflight_unconfirmed'
-    }
+    Assert-TransitionPreflight $servingSha
     if ($PlanPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z') {
         throw 'initial_service_transition_intent_scope'
     }
@@ -131,128 +156,159 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
             [Security.Principal.SecurityIdentifier]::new($writer),'FullControl','Allow'))
     }
     $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
-    if ($ObserveTransition -or $StopTransition) {
-        $intentHash = [Security.Cryptography.SHA256]::Create()
-        try { $intentSha = [BitConverter]::ToString($intentHash.ComputeHash($intentBytes)).Replace('-','').ToLowerInvariant() }
-        finally { $intentHash.Dispose() }
-        $null = Read-PinnedJson $intentPath $intentSha
-        $entry = Get-Item -LiteralPath $intentPath -Force
-        Assert-PreflightEntry $entry $authors $authors $true $false
-        if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
-            $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
-    } else {
-        if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
-        Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
-        $scm = [TrustedStoppedV1.Native]::new()
-        try {
-            $scm.OpenForRead($ServiceName)
-            [TrustedStoppedV1.Contract]::Inputs($Plan.installation_id,$ServiceName,$HostPath)
-            [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$Current.PathName)
-        } finally { $scm.Dispose() }
-        if (Test-Path -LiteralPath $intentPath) { throw 'initial_service_transition_reconciliation_required' }
-        $file = [IO.FileStream]::new($intentPath,[IO.FileMode]::CreateNew,
-            [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
-            [IO.FileOptions]::WriteThrough,$intentAcl)
-        try { $file.Write($intentBytes,0,$intentBytes.Length); $file.Flush($true) } finally { $file.Dispose() }
-        if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
-            $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
-        if ($CheckLeaseClosed) {
-            $startedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        }
-        Start-Service -Name $ServiceName -ErrorAction Stop
-        if ($CheckLeaseClosed) {
-            $watch = [Diagnostics.Stopwatch]::StartNew()
-            $seenPid = 0
-            while ($watch.ElapsedMilliseconds -lt 15000) {
-                $sample = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 3
-                if ($sample.Name -cne $ServiceName -or $sample.PathName -cne $Current.PathName -or
-                    $sample.StartMode -cne 'Manual' -or $sample.StartName -cne $Current.StartName) {
-                    throw 'initial_service_closure_check_unconfirmed'
-                }
-                if ($sample.State -ceq 'Stopped') {
-                    if ($seenPid -lt 1 -or $sample.ProcessId -ne 0 -or $sample.ExitCode -ne 0 -or
-                        $sample.ServiceSpecificExitCode -ne 0 -or $watch.ElapsedMilliseconds -ge 15000) {
-                        throw 'initial_service_closure_check_unconfirmed'
-                    }
-                    [ordered]@{closure_check_completed=$true;host_pid=$seenPid;started_at_ms=$startedMs;
-                        service_sid=$sid;controller_plan_sha256=$PlanSha256}|ConvertTo-Json -Compress
-                    return
-                }
-                if ($sample.ProcessId -gt 0) {
-                    if ($seenPid -ne 0 -and $sample.ProcessId -ne $seenPid) { throw 'initial_service_closure_check_unconfirmed' }
-                    $seenPid = $sample.ProcessId
-                }
-                Start-Sleep -Milliseconds 100
-            }
-            throw 'initial_service_closure_check_unconfirmed'
-        }
-    }
-    $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
-    if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
-        $running.PathName -cne $Current.PathName -or
-        (($ObserveTransition -or $StopTransition) -and $running.ProcessId -ne $Current.ProcessId)) { throw 'initial_service_transition_start_unconfirmed' }
-    $process = Get-Process -Id $running.ProcessId -ErrorAction Stop
+    # The host parent has already passed the pinned private ACL check.
+    # Use the same lock for all transition commands, across plan generations.
+    $lockPath = Join-Path ([IO.Path]::GetDirectoryName($hostRoot)) ($ServiceName + '.transition.lock')
+    $commandLock = [IO.FileStream]::new($lockPath,[IO.FileMode]::CreateNew,
+        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize,Delete',[IO.FileShare]::None,4096,
+        [IO.FileOptions]::DeleteOnClose,$intentAcl)
     try {
-        if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $HostPath) {
-            throw 'initial_service_transition_start_unconfirmed'
-        }
-        $created = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
-        $confirmed = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
-        if ($confirmed.State -cne 'Running' -or $confirmed.Name -cne $ServiceName -or
-            $confirmed.ProcessId -ne $running.ProcessId -or $confirmed.PathName -cne $running.PathName -or
-            $process.HasExited) { throw 'initial_service_transition_start_unconfirmed' }
-        if ($StopTransition) {
-            if ([string]$confirmed.ProcessId -cne $ExpectedServicePid -or $created -cne $ExpectedServiceCreatedTicks) {
-                throw 'initial_service_transition_stop_unconfirmed'
+        Assert-TransitionPreflight $servingSha
+        if ($ObserveTransition -or $StopTransition) {
+            $intentHash = [Security.Cryptography.SHA256]::Create()
+            try { $intentSha = [BitConverter]::ToString($intentHash.ComputeHash($intentBytes)).Replace('-','').ToLowerInvariant() }
+            finally { $intentHash.Dispose() }
+            $null = Read-PinnedJson $intentPath $intentSha
+            $entry = Get-Item -LiteralPath $intentPath -Force
+            Assert-PreflightEntry $entry $authors $authors $true $false
+            if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
+                $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+        } else {
+            if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+            Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+            Assert-TransitionStopped $Plan $HostPath $Current.PathName
+            if (Test-Path -LiteralPath $intentPath) { throw 'initial_service_transition_reconciliation_required' }
+            $file = [IO.FileStream]::new($intentPath,[IO.FileMode]::CreateNew,
+                [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
+                [IO.FileOptions]::WriteThrough,$intentAcl)
+            try { $file.Write($intentBytes,0,$intentBytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+            if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
+                $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+            if ($CheckLeaseClosed) {
+                $argsPath = Join-Path $hostRoot 'service.args'
+                $argsAcl = Get-Acl -LiteralPath $argsPath
+                $stage = $intentPath + '.closure-args'
+                $restore = $intentPath + '.serving-args'
+                Write-TransitionArgsStage $stage $argsBytes $argsAcl
+                Write-TransitionArgsStage $restore $servingBytes $argsAcl
+                Assert-TransitionStopped $Plan $HostPath $Current.PathName
+                Assert-TransitionPreflight $servingSha
+                $receipt = $null
+                try {
+                    [IO.File]::Replace($stage,$argsPath,[NullString]::Value,$false)
+                    Assert-TransitionPreflight $argsSha
+                    $startedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                    Start-Service -Name $ServiceName -ErrorAction Stop
+                    $watch = [Diagnostics.Stopwatch]::StartNew()
+                    $seenPid = 0
+                    while ($watch.ElapsedMilliseconds -lt 15000) {
+                        $sample = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 3
+                        if ($sample.Name -cne $ServiceName -or $sample.PathName -cne $Current.PathName -or
+                            $sample.StartMode -cne 'Manual' -or $sample.StartName -cne $Current.StartName) {
+                            throw 'initial_service_closure_check_unconfirmed'
+                        }
+                        if ($sample.State -ceq 'Stopped') {
+                            if ($seenPid -lt 1 -or $sample.ProcessId -ne 0 -or $sample.ExitCode -ne 0 -or
+                                $sample.ServiceSpecificExitCode -ne 0 -or $watch.ElapsedMilliseconds -ge 15000) {
+                                throw 'initial_service_closure_check_unconfirmed'
+                            }
+                            $receipt = [ordered]@{closure_check_completed=$true;host_pid=$seenPid;started_at_ms=$startedMs;
+                                service_sid=$sid;controller_plan_sha256=$PlanSha256}
+                            break
+                        }
+                        if ($sample.ProcessId -gt 0) {
+                            if ($seenPid -ne 0 -and $sample.ProcessId -ne $seenPid) { throw 'initial_service_closure_check_unconfirmed' }
+                            $seenPid = $sample.ProcessId
+                        }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    if ($null -eq $receipt) { throw 'initial_service_closure_check_unconfirmed' }
+                } finally {
+                    Assert-TransitionStopped $Plan $HostPath $Current.PathName
+                    $observedArgs = (Get-FileHash -LiteralPath $argsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($observedArgs -ceq $argsSha) {
+                        if ((Get-FileHash -LiteralPath $restore -Algorithm SHA256).Hash.ToLowerInvariant() -cne $servingSha) {
+                            throw 'initial_service_transition_restore_pin'
+                        }
+                        [IO.File]::Replace($restore,$argsPath,[NullString]::Value,$false)
+                    }
+                    Assert-TransitionPreflight $servingSha
+                    foreach ($leaf in @($stage,$restore)) {
+                        if (Test-Path -LiteralPath $leaf) { Remove-Item -LiteralPath $leaf -ErrorAction Stop }
+                    }
+                }
+                $receipt | ConvertTo-Json -Compress
+                return
             }
-            if ($confirmed.StartMode -cne 'Manual') { throw 'initial_service_transition_stop_unconfirmed' }
-            Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-public static class HaTransitionProcessStop {
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern SafeWaitHandle OpenProcess(uint access, bool inherit, uint pid);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern bool GetProcessTimes(SafeWaitHandle process, out long born, out long exited, out long kernel, out long user);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern bool TerminateProcess(SafeWaitHandle process, uint code);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern uint WaitForSingleObject(SafeWaitHandle process, uint milliseconds);
-    public static bool Stop(uint pid, long expectedTicks) {
-        // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE.
-        using (var process = OpenProcess(0x101001, false, pid)) {
-            long born, exited, kernel, user;
-            if (process.IsInvalid || !GetProcessTimes(process, out born, out exited, out kernel, out user)
-                || DateTime.FromFileTimeUtc(born).Ticks != expectedTicks) return false;
-            if (WaitForSingleObject(process, 0) != 258) return false;
-            return TerminateProcess(process, 1) && WaitForSingleObject(process, 8000) == 0;
+            Start-Service -Name $ServiceName -ErrorAction Stop
+        }
+        $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+        if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
+            $running.PathName -cne $Current.PathName -or
+            (($ObserveTransition -or $StopTransition) -and $running.ProcessId -ne $Current.ProcessId)) { throw 'initial_service_transition_start_unconfirmed' }
+        $process = Get-Process -Id $running.ProcessId -ErrorAction Stop
+        try {
+            if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $HostPath) {
+                throw 'initial_service_transition_start_unconfirmed'
+            }
+            $created = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+            $confirmed = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+            if ($confirmed.State -cne 'Running' -or $confirmed.Name -cne $ServiceName -or
+                $confirmed.ProcessId -ne $running.ProcessId -or $confirmed.PathName -cne $running.PathName -or
+                $process.HasExited) { throw 'initial_service_transition_start_unconfirmed' }
+            if ($StopTransition) {
+                if ([string]$confirmed.ProcessId -cne $ExpectedServicePid -or $created -cne $ExpectedServiceCreatedTicks) {
+                    throw 'initial_service_transition_stop_unconfirmed'
+                }
+                if ($confirmed.StartMode -cne 'Manual') { throw 'initial_service_transition_stop_unconfirmed' }
+                Add-Type -TypeDefinition @'
+    using System;
+    using System.Runtime.InteropServices;
+    using Microsoft.Win32.SafeHandles;
+    public static class HaTransitionProcessStop {
+        [DllImport("kernel32.dll", SetLastError=true)]
+        static extern SafeWaitHandle OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        static extern bool GetProcessTimes(SafeWaitHandle process, out long born, out long exited, out long kernel, out long user);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        static extern bool TerminateProcess(SafeWaitHandle process, uint code);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        static extern uint WaitForSingleObject(SafeWaitHandle process, uint milliseconds);
+        public static bool Stop(uint pid, long expectedTicks) {
+            // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE.
+            using (var process = OpenProcess(0x101001, false, pid)) {
+                long born, exited, kernel, user;
+                if (process.IsInvalid || !GetProcessTimes(process, out born, out exited, out kernel, out user)
+                    || DateTime.FromFileTimeUtc(born).Ticks != expectedTicks) return false;
+                if (WaitForSingleObject(process, 0) != 258) return false;
+                return TerminateProcess(process, 1) && WaitForSingleObject(process, 8000) == 0;
+            }
         }
     }
-}
 '@ -ErrorAction Stop
-            if (-not [HaTransitionProcessStop]::Stop([uint32]$ExpectedServicePid,[long]$ExpectedServiceCreatedTicks)) {
-                throw 'initial_service_transition_stop_unconfirmed'
+                if (-not [HaTransitionProcessStop]::Stop([uint32]$ExpectedServicePid,[long]$ExpectedServiceCreatedTicks)) {
+                    throw 'initial_service_transition_stop_unconfirmed'
+                }
+                $stopped = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+                if ($stopped.Name -cne $ServiceName -or $stopped.State -cne 'Stopped' -or $stopped.ProcessId -ne 0 -or
+                    $stopped.StartMode -cne 'Manual' -or $stopped.PathName -cne $Current.PathName) {
+                    throw 'initial_service_transition_stop_unconfirmed'
+                }
+                [ordered]@{transition_service_stopped=$true;controller_plan_sha256=$PlanSha256} | ConvertTo-Json -Compress
+                return
             }
-            $stopped = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
-            if ($stopped.Name -cne $ServiceName -or $stopped.State -cne 'Stopped' -or $stopped.ProcessId -ne 0 -or
-                $stopped.StartMode -cne 'Manual' -or $stopped.PathName -cne $Current.PathName) {
-                throw 'initial_service_transition_stop_unconfirmed'
-            }
-            [ordered]@{transition_service_stopped=$true;controller_plan_sha256=$PlanSha256} | ConvertTo-Json -Compress
-            return
-        }
-        $statePath = Join-Path $intentRoot.FullName 'journal\controller-state.json'
-        $command = '"{0}" -I -B "{1}" {2} --plan "{3}" --approval "{4}" --journal "{5}"' -f
-            $scope.python_path,$scope.launcher_path,$pins.mode,$PlanPath,$ApprovalPath,$statePath
-        $commandHasher = [Security.Cryptography.SHA256]::Create()
-        try { $commandSha = [BitConverter]::ToString($commandHasher.ComputeHash($encoder.GetBytes($command))).Replace('-','').ToLowerInvariant() }
-        finally { $commandHasher.Dispose() }
-        $result = [ordered]@{service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256;
-            service_created_ticks=$created;service_image_path_sha256=$pins.service_image_path_sha256;python_command_sha256=$commandSha}
-        $result[$(if ($ObserveTransition) {'transition_service_observed'} else {'transition_service_started'})] = $true
-        $result | ConvertTo-Json -Compress
-    } finally { $process.Dispose() }
+            $statePath = Join-Path $intentRoot.FullName 'journal\controller-state.json'
+            $command = '"{0}" -I -B "{1}" {2} --plan "{3}" --approval "{4}" --journal "{5}"' -f
+                $scope.python_path,$scope.launcher_path,$pins.mode,$PlanPath,$ApprovalPath,$statePath
+            $commandHasher = [Security.Cryptography.SHA256]::Create()
+            try { $commandSha = [BitConverter]::ToString($commandHasher.ComputeHash($encoder.GetBytes($command))).Replace('-','').ToLowerInvariant() }
+            finally { $commandHasher.Dispose() }
+            $result = [ordered]@{service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256;
+                service_created_ticks=$created;service_image_path_sha256=$pins.service_image_path_sha256;python_command_sha256=$commandSha}
+            $result[$(if ($ObserveTransition) {'transition_service_observed'} else {'transition_service_started'})] = $true
+            $result | ConvertTo-Json -Compress
+        } finally { $process.Dispose() }
+    } finally { $commandLock.Dispose() }
 }
 
 try {
