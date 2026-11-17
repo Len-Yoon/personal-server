@@ -1024,6 +1024,8 @@ class NativeApplicationsTests(unittest.TestCase):
                                 writers_closed=True, services=module.ALL_SERVICES)
 
             def capture(self, fence):
+                if failure == 'capture_transport':
+                    raise module.BridgeRejected('bridge_capture_transport_unconfirmed_bridge_deadline_exceeded')
                 return evidence('capture', self.identity['plan_sha256'], self.attempt,
                                 fence_sha256=fence, manifest_sha256='3' * 64)
 
@@ -1186,6 +1188,16 @@ class NativeApplicationsTests(unittest.TestCase):
         self.assertIn('vm_live_authority', self.trace)
         self.assertNotIn('apply_caddy', self.trace)
         self.assertNotIn('restore_wsl', self.trace)
+
+    def test_capture_transport_failure_is_durable_without_advancing_to_restore(self):
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rollback_reconciliation_required'):
+            self.run_attempt('capture_transport')
+        state = json.loads(self.journal.read_bytes())
+        self.assertEqual(state['failure_phase'], 'capture_intent')
+        self.assertEqual(state['failure_reason'], 'bridge_capture_transport_unconfirmed_bridge_deadline_exceeded')
+        self.assertNotIn('capture', state['receipts'])
+        self.assertNotIn('vm_restore', self.trace)
+        self.assertNotIn('apply_caddy', self.trace)
 
     def test_wsl_rollback_requires_fresh_settlement_for_known_restore_failure(self):
         with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rolled_back'):

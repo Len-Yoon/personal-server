@@ -2,15 +2,19 @@
 
 from contextlib import contextmanager, nullcontext
 import hashlib
+import re
 from pathlib import Path
 
 from ha_runtime import seven_capture
 from ha_runtime.config import SERVICES
+from ha_runtime.seven_migration import MigrationRejected
 
+from .controller import TransitionBlocked
 from .legacy_cutover import LegacyCutover, _pin, _receipt
 from .legacy_writers import _need
 from .native_cutover import NativeCutover
 from .native_frozen_capture import NativeFrozenCapture
+from .native_stdio_bridge import BridgeRejected
 
 
 ALL_SERVICES = sorted(SERVICES)
@@ -167,8 +171,20 @@ class NativeApplications:
         self._plan(plan)
         self._phase('capture_intent', fence_writers=self.fence)
         _need(fence == self.fence and self.manifest is None, 'native_application_fence_unbound')
-        with self.capture_connection():
-            receipt = self.capture_side.capture(fence)
+        try:
+            with self.capture_connection():
+                receipt = self.capture_side.capture(fence)
+        except BridgeRejected as error:
+            reason = str(error)
+            if not re.fullmatch(r'bridge_[a-z_]{1,85}', reason):
+                reason = 'native_capture_transport_unconfirmed'
+            raise TransitionBlocked(reason) from None
+        except MigrationRejected as error:
+            reason = str(error)
+            code = 'native_capture_' + reason if re.fullmatch(r'[a-z][a-z_]{1,65}', reason) else 'native_capture_source_unconfirmed'
+            raise TransitionBlocked(code) from None
+        except OSError:
+            raise TransitionBlocked('native_capture_io_unconfirmed') from None
         manifest = _pin(receipt['manifest_sha256'])
         self.capture_receipt = self._accept(receipt, fence_sha256=fence, manifest_sha256=manifest)
         self.manifest = manifest

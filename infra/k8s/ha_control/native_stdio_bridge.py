@@ -34,6 +34,7 @@ MAX_REQUESTS = 64
 MAX_SESSION_SECONDS = 3600
 HEARTBEAT_INTERVAL = 20
 HEARTBEAT_TIMEOUT = 8
+HEARTBEAT_ACK_GRACE = 12
 MAX_HEARTBEATS = 1 + MAX_SESSION_SECONDS // HEARTBEAT_INTERVAL
 TRANSFER_BYTES = 8 * 1024**3
 HEX = re.compile(r"[a-f0-9]{64}\Z")
@@ -408,21 +409,34 @@ class Client(_Session):
         """Keep the authenticated pipe active while the caller captures locally."""
         _need(not self.poisoned and not self.heartbeat_active, "bridge_session_unavailable")
         stopped = threading.Event()
+        failure = None
 
         def pulse():
+            nonlocal failure
             try:
                 while not stopped.is_set():
                     count = self.heartbeat + 1
                     _need(count <= MAX_HEARTBEATS, "bridge_heartbeat_limit")
                     deadline = self.limit(HEARTBEAT_TIMEOUT)
                     self.channel.write(self.heartbeat_frame("heartbeat", count), deadline)
-                    answer = self.channel.read(deadline)
+                    try:
+                        answer = self.channel.read(deadline)
+                    except BridgeRejected as error:
+                        if str(error) != "bridge_deadline_exceeded":
+                            raise
+                        # A fully sent heartbeat can have a late reply. Continue
+                        # reading that same frame, without sending anything again.
+                        answer = self.channel.read(min(self.deadline, deadline + HEARTBEAT_ACK_GRACE))
                     _need(_matches(answer, self.heartbeat_frame("heartbeat_ack", count)),
                           "bridge_heartbeat_unbound")
                     self.heartbeat = count
                     if stopped.wait(HEARTBEAT_INTERVAL):
                         return
-            except (BridgeRejected, OSError, ValueError, TypeError):
+            except (BridgeRejected, OSError, ValueError, TypeError) as error:
+                reason = str(error)
+                failure = "bridge_heartbeat_io"
+                if isinstance(error, BridgeRejected) and re.fullmatch(r"bridge_[a-z_]{1,45}", reason):
+                    failure = reason
                 self.poisoned = True
 
         thread = threading.Thread(target=pulse, daemon=True)
@@ -434,7 +448,7 @@ class Client(_Session):
             stopped.set()
             thread.join()
             self.heartbeat_active = False
-        _need(not self.poisoned, "bridge_capture_transport_unconfirmed")
+        _need(not self.poisoned, f"bridge_capture_transport_unconfirmed_{failure}")
 
     def call(self, verb, node, /, **args):
         _need(not self.poisoned and not self.heartbeat_active and self.sequence < MAX_REQUESTS,
