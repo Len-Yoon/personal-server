@@ -243,6 +243,32 @@ def publish_transition_observer_config(windows, root, stage_sha256, binding, man
     return path
 
 
+def publish_transition_observer_launch(windows, root, stage_sha256, binding, manifest_sha256, observer, deadline):
+    """Publish a launch descriptor derived from the exact active exclusion binding."""
+    pin_fields = {"launcher_sha256", "server_sha256", "callback_sha256", "windows_boot_sha256",
+                  "wsl_boot_sha256", "collector_sha256", "reactivation_plan_sha256", "marker_sha256"}
+    bridge._need(type(observer) is dict and set(observer) == pin_fields | {"service_name"}
+                 and all(bridge._hash(observer[key]) for key in pin_fields)
+                 and type(observer["service_name"]) is str
+                 and re.fullmatch(r"N100HA_[a-f0-9]{24}_controller", observer["service_name"])
+                 and all(bridge._hash(binding.get(key)) for key in ("plan", "attempt")),
+                 "native_transition_observer_launch_invalid")
+    publish_transition_observer_config(windows, root, stage_sha256, binding, manifest_sha256, deadline, observe_only=True)
+    pin = binding["callback_config_sha256"]
+    raw = bridge._bytes(observer | {"callback_config_sha256": pin, "legacy_plan_sha256": binding["plan"],
+                                   "legacy_attempt_id": binding["attempt"]})
+    digest = bridge._digest(raw)
+    source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
+        "InputPath": root + rf"\transition-observer-launch-{pin}.json", "InputSha256": digest,
+        "ExpectedSourceManifestSha256": manifest_sha256, "RuntimeSha256": binding["runtime_sha256"],
+        "IntentBase64": base64.b64encode(raw).decode("ascii"), "PublishTransitionObserverLaunch": True, "Go": True,
+    })
+    result = windows.powershell(source, deadline)
+    bridge._need(result == {"transition_observer_launch_sha256": digest},
+                 "native_transition_observer_launch_unconfirmed")
+    return digest
+
+
 def start_transition_observer(windows, root, stage_sha256, binding, manifest_sha256, launch_sha256, deadline):
     """Launch one prepared Windows observer after verifying its published config."""
     bridge._need(bridge._hash(launch_sha256), "native_transition_observer_launch_invalid")

@@ -1,7 +1,8 @@
 # Prepare the initial Windows observer and one installed controller approval.
 param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
       [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig,
-      [switch]$ObserveTransitionObserverConfig, [switch]$StartTransitionObserver)
+      [switch]$ObserveTransitionObserverConfig, [switch]$StartTransitionObserver,
+      [switch]$PublishTransitionObserverLaunch)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -203,11 +204,17 @@ function Assert-ManualHost($Scope, $Start) {
     if ($existing.Count -ne 1 -or $existing[0].Name -cne 'windows-service-host.exe') { throw 'initial_stage_service' }
 }
 
-function Start-TransitionObserver([string]$Root) {
-    if (-not $Go -or $Preflight -or $IntentBase64 -cne '' -or $RuntimeSha256 -cnotmatch $hashPattern) {
-        throw 'initial_stage_observer'
+function Invoke-TransitionObserverLaunch([string]$Root, [bool]$Publish) {
+    if (-not $Go -or $Preflight -or $RuntimeSha256 -cnotmatch $hashPattern) { throw 'initial_stage_observer' }
+    if ($Publish) {
+        if ($IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) { throw 'initial_stage_observer' }
+        $launchRaw = [Convert]::FromBase64String($IntentBase64)
+        if ($launchRaw.Length -gt 4096 -or (Digest $launchRaw) -cne $InputSha256) { throw 'initial_stage_observer' }
+    } else {
+        if ($IntentBase64 -cne '') { throw 'initial_stage_observer' }
+        $launchRaw = Read-Protected $InputPath $InputSha256 4096
     }
-    $launch = ConvertFrom-Json -InputObject ($encoding.GetString((Read-Protected $InputPath $InputSha256 8192)))
+    $launch = ConvertFrom-Json -InputObject ($encoding.GetString($launchRaw))
     Assert-Fields $launch @('callback_config_sha256','launcher_sha256','server_sha256','callback_sha256','service_name',
         'legacy_plan_sha256','legacy_attempt_id','windows_boot_sha256','wsl_boot_sha256','collector_sha256',
         'reactivation_plan_sha256','marker_sha256')
@@ -235,6 +242,11 @@ function Start-TransitionObserver([string]$Root) {
     $null = Read-Protected $callbackPath $launch.callback_sha256 65536
     Assert-ReservedLeaf $config.vm_observer_path $Root
     $null = Read-Protected $config.vm_observer_path $config.vm_observer_sha256 65536
+    if ($Publish) {
+        Assert-Absent $InputPath
+        [ordered]@{transition_observer_launch_sha256=(Write-New $InputPath $launchRaw)} | ConvertTo-Json -Compress
+        return
+    }
     $keyPath = Join-Path $Root ('transition-observer-key-' + $pin + '.key')
     $readyPath = Join-Path $Root ('lease-observer-transition-ready-' + $pin + '.json')
     $taskInput = Join-Path $Root ('transition-observer-task-' + $pin + '.json')
@@ -291,9 +303,10 @@ try {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)
-    if ($StartTransitionObserver) {
-        if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig) { throw 'initial_stage_observer' }
-        Start-TransitionObserver $root
+    if ($StartTransitionObserver -or $PublishTransitionObserverLaunch) {
+        if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
+            $StartTransitionObserver.IsPresent -eq $PublishTransitionObserverLaunch.IsPresent) { throw 'initial_stage_observer' }
+        Invoke-TransitionObserverLaunch $root $PublishTransitionObserverLaunch.IsPresent
         return
     }
     if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig) {

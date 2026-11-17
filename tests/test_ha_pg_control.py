@@ -1,4 +1,5 @@
 """Native-adapter unit evidence only; no Windows/N100 actions are executed."""
+import base64
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,8 @@ from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
-    WindowsActivationLease, WindowsTransitionLease, publish_transition_observer_config, start_transition_observer,
+    WindowsActivationLease, WindowsTransitionLease, publish_transition_observer_config,
+    publish_transition_observer_launch, start_transition_observer,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -67,6 +69,40 @@ class TransitionObserverPublicationTests(unittest.TestCase):
         self.assertNotIn("-IntentBase64", observed_only)
         self.assertEqual(windows.powershell.call_count, 3)
 
+
+    def test_launch_publication_binds_exact_legacy_plan_and_attempt(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        raw = b'{"fixture":true}\n'
+        pin = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": raw, "callback_config_sha256": pin, "runtime_sha256": "a"*64,
+                   "plan": "e"*64, "attempt": "f"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        deadline = time.monotonic() + 30
+        observer = {key: "2"*64 for key in (
+            "launcher_sha256", "server_sha256", "callback_sha256", "windows_boot_sha256",
+            "wsl_boot_sha256", "collector_sha256", "reactivation_plan_sha256", "marker_sha256",
+        )}
+        observer["service_name"] = "N100HA_" + "1"*24 + "_controller"
+
+        def execute(source, _):
+            if source.endswith(" -ObserveTransitionObserverConfig"):
+                return {"observed_transition_observer_config_sha256": pin}
+            self.assertIn(f"transition-observer-launch-{pin}.json", source)
+            self.assertIn(" -PublishTransitionObserverLaunch ", source)
+            self.assertNotIn(" -StartTransitionObserver ", source)
+            submitted = base64.b64decode(source.split(" -IntentBase64 '", 1)[1].split("'", 1)[0])
+            self.assertEqual(json.loads(submitted), observer | {
+                "callback_config_sha256": pin, "legacy_plan_sha256": binding["plan"],
+                "legacy_attempt_id": binding["attempt"],
+            })
+            return {"transition_observer_launch_sha256": hashlib.sha256(submitted).hexdigest()}
+
+        windows = MagicMock()
+        windows.powershell.side_effect = execute
+        digest = publish_transition_observer_launch(windows, root, stage_pin, binding, "b"*64, observer, deadline)
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(windows.powershell.call_count, 2)
 
     def test_transition_observer_rechecks_publication_and_starts_exact_launch_once(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
