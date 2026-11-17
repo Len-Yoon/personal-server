@@ -186,7 +186,8 @@ def validate_spec(value,lock):
     need(type(value) is dict and type(value.get('schema_version')) is int and value['schema_version'] in (1,2),'seed_spec_fields_invalid')
     fields={'schema_version','source_commit','installation_id','node','seed_id','bootstrap_manifest_sha256',
             'expected_kernel_release','mac_address','ipv4_cidr','operator_public_key_path','operator_public_key_sha256'}
-    need(set(value)==fields or (value['schema_version']==2 and set(value)==fields|{'egress_mac_address'}),'seed_spec_fields_invalid')
+    optional = {'egress_mac_address', 'isolated_ipv4_cidr'} if value['schema_version'] == 2 else set()
+    need(fields <= set(value) <= fields | optional, 'seed_spec_fields_invalid')
     need(all(type(value[k]) is str and HEX.fullmatch(value[k]) for k in
              ('installation_id','seed_id','bootstrap_manifest_sha256','operator_public_key_sha256')))
     need(type(value['source_commit']) is str and COMMIT.fullmatch(value['source_commit']))
@@ -210,6 +211,21 @@ def validate_spec(value,lock):
     need(str(address.ip)==lock['pg_a' if value['node']=='A' else 'pg_b'],'seed_network_bundle_mismatch')
     if lock.get('schema_version') == 3:
         need(address.network.prefixlen == lock['management_prefix_length'], 'seed_controller_network_mismatch')
+    if 'isolated_ipv4_cidr' in value:
+        error = 'invalid_isolated_guest_network'
+        raw = value['isolated_ipv4_cidr']
+        need(lock.get('schema_version') == 3 and lock.get('source_node') in ('A', 'B')
+             and lock['source_node'] == lock.get('primary_node') != value['node']
+             and egress is None and type(raw) is str, error)
+        try:
+            isolated = ipaddress.IPv4Interface(raw)
+        except ValueError:
+            raise SeedError(error) from None
+        private_networks = tuple(map(ipaddress.IPv4Network, ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')))
+        need(str(isolated) == raw and 24 <= isolated.network.prefixlen <= 30
+             and isolated.ip not in (isolated.network.network_address, isolated.network.broadcast_address)
+             and any(isolated.network.subnet_of(network) for network in private_networks)
+             and not isolated.network.overlaps(address.network), error)
     need(type(value['operator_public_key_path']) is str and Path(value['operator_public_key_path']).is_absolute())
     return value
 
@@ -218,6 +234,8 @@ def network(value):
     result={'version':2,'ethernets':{'ha0':{'match':{'macaddress':value['mac_address']},'set-name':'ha0',
         'dhcp4':False,'dhcp6':False,'accept-ra':False,'link-local':[],
         'addresses':[value['ipv4_cidr']]}}}
+    if 'isolated_ipv4_cidr' in value:
+        result['ethernets']['ha0']['addresses'].append(value['isolated_ipv4_cidr'])
     if value.get('schema_version')==2 and value.get('egress_mac_address') is not None:
         result['renderer']='networkd'
         result['ethernets']['ha-egress']={'match':{'macaddress':value['egress_mac_address']},'set-name':'ha-egress',

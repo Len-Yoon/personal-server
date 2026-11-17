@@ -71,6 +71,30 @@ class SeedTests(unittest.TestCase):
             with self.assertRaisesRegex(S.SeedError, 'seed_controller_network_mismatch'):
                 S.validate_spec(dict(value, ipv4_cidr='192.168.27.10/24'), lock)
 
+    def test_replacement_seed_can_add_a_non_overlapping_isolated_address(self):
+        lock = fixture()
+        lock.update(schema_version=3, pg_a="192.168.27.10", pg_b="192.168.27.11",
+                    windows_controller_ipv4="192.168.27.9", management_prefix_length=29,
+                    os_packages=[{"package": "linux-image-6.8.0-149-generic"}],
+                    primary_node="B", source_node="B")
+        with tempfile.TemporaryDirectory() as name:
+            key = Path(name).resolve() / "operator.pub"
+            key.write_text("public fixture")
+            value = dict(spec_value(lock, key), schema_version=2, ipv4_cidr="192.168.27.10/29",
+                         isolated_ipv4_cidr="192.168.28.2/30")
+            self.assertEqual(S.validate_spec(value, lock), value)
+            rendered = S.network(value)["ethernets"]
+            self.assertEqual(set(rendered), {"ha0"})
+            self.assertEqual(rendered["ha0"]["addresses"], ["192.168.27.10/29", "192.168.28.2/30"])
+            for cidr in ("192.168.27.4/28", "192.168.28.0/30", "192.168.28.3/30", "192.0.2.1/30",
+                         "127.0.0.1/30", "192.168.28.2", "fd00::2/64", "192.168.28.2/31", None):
+                with self.assertRaisesRegex(S.SeedError, "invalid_isolated_guest_network"):
+                    S.validate_spec(dict(value, isolated_ipv4_cidr=cidr), lock)
+            with self.assertRaisesRegex(S.SeedError, "invalid_isolated_guest_network"):
+                S.validate_spec(dict(value, egress_mac_address="02:00:00:00:00:03"), lock)
+            with self.assertRaisesRegex(S.SeedError, "invalid_isolated_guest_network"):
+                S.validate_spec(value, dict(lock, primary_node="A", source_node=None))
+
     def test_cloud_init_has_no_new_sudo_user_or_password_and_does_not_wait_on_itself(self):
         with tempfile.TemporaryDirectory() as name:
             key=Path(name).resolve()/'operator.pub';key.write_text('public fixture')
