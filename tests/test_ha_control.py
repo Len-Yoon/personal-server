@@ -12,7 +12,69 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Controller, Journal, TransitionBlocked, exclusive
 from ha_control.windows import WindowsFence
-from ha_control import car_callback_ingress, car_callback_runtime
+from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_ingress
+from ha_control.native_guest_activation import ServingGeneration
+
+
+class TransitionIngressTests(unittest.TestCase):
+    def test_relay_first_then_caddy_and_readback_after_unknown_response(self):
+        old_ip, new_ip = "192.168.100.2", "192.168.100.3"
+        old_main = {"container_sha256": "a"*64}
+        new_main = {"container_sha256": "b"*64, "candidate_sha256": "c"*64, "live_sha256": "d"*64}
+        car_receipt = {"container_sha256": "e"*64, "candidate_sha256": "f"*64, "public_proof_sha256": []}
+        main, car, public, guard = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        guest = MagicMock(return_value="1"*64)
+        generation = ServingGeneration("B", 2, 2, 3)
+        order = []
+        with tempfile.TemporaryDirectory() as temp, patch.object(transition_ingress.caddy, "_private_dir", side_effect=Path):
+            root = Path(temp).resolve()
+            old_prepared = caddy_runtime.PreparedCaddy({}, root/"previous.json", root/"previous.caddy", "", "", "", "")
+            active = caddy_runtime.ActiveCaddy(old_prepared, old_main, b"fixed source", old_ip, "2"*64)
+            relay = car_callback_runtime.Relay("2"*64, "sha256:"+"3"*64, "4"*64, "192.168.100.4",
+                                               root/"relay.caddy", old_ip, "5"*64, "6"*64, "7"*64)
+            (root/"main").mkdir()
+            prepared = caddy_runtime.PreparedCaddy({}, root/"main"/"caddy-ha-compose.json",
+                                                   root/"main"/"Caddyfile", "", "c"*64, "", "")
+            main.prepare.return_value = prepared
+            car.replace.side_effect = lambda *args, **kwargs: order.append("relay") or car_receipt
+
+            def uncertain_main(*args):
+                self.assertTrue((root/transition_ingress.INTENT).is_file())
+                order.append("main")
+                (root/"main"/"caddy-apply-intent.json").touch()
+                raise TransitionBlocked("caddy_reconciliation_required")
+
+            route = "8"*64
+            main.apply.side_effect = uncertain_main
+            with self.assertRaisesRegex(TransitionBlocked, "caddy_reconciliation_required"):
+                transition_ingress.switch_ingress(main, car, active, relay, generation, new_ip, route, root,
+                                                   expected_mtls_sha256={}, assert_guard=guard, verify_guest=guest,
+                                                   plan_sha256="a"*64, attempt_id="b"*64,
+                                                   verify_public=public)
+            self.assertEqual(order, ["relay", "main"])
+            public.assert_not_called()
+            main.observe_applied.return_value, car.observe.return_value = new_main, car_receipt
+            with self.assertRaisesRegex(TransitionBlocked, "docker_not_settled"):
+                transition_ingress.resume_ingress(
+                    main, car, active, relay, prepared, generation, new_ip, route, root,
+                    assert_guard=guard, assert_settled=MagicMock(side_effect=TransitionBlocked("docker_not_settled")),
+                    verify_guest=guest, verify_public=public, plan_sha256="a"*64, attempt_id="b"*64,
+                )
+            main.observe_applied.assert_not_called()
+            current, new_relay, receipt = transition_ingress.resume_ingress(
+                main, car, active, relay, prepared, generation, new_ip, route, root,
+                assert_guard=guard, assert_settled=MagicMock(), verify_guest=guest, verify_public=public,
+                plan_sha256="a"*64, attempt_id="b"*64,
+            )
+            main.apply.assert_called_once()
+            car.replace.assert_called_once()
+            public.assert_called_once_with(3)
+            self.assertEqual((current.primary_ip, new_relay.guest), (new_ip, new_ip))
+            self.assertEqual(current.relay_container_sha256, new_relay.container_sha256)
+            self.assertTrue((root/transition_ingress.RECEIPT).is_file())
+            self.assertEqual(json.loads((root/transition_ingress.RECEIPT).read_bytes()), receipt)
+            main.adopt_unapplied.assert_not_called()
+            car.resume.assert_not_called()
 
 
 class CarCallbackOriginTests(unittest.TestCase):

@@ -757,3 +757,37 @@ class CaddyRuntime:
             except OSError:
                 pass
             raise TransitionBlocked('caddy_reconciliation_required') from None
+
+    def observe_applied(self, prepared, prior, assert_guard):
+        """Read back an ambiguous main Caddy recreation without issuing it again."""
+        assert_guard()
+        item = self._container(isolated=True)
+        upstreams = self._upstreams(item)
+        isolated = self._isolated(self._prepared(prepared, upstreams), prepared)
+        intent = json.loads(_read(prepared.override.parent / 'caddy-apply-intent.json'))
+        actual = _sha(item['Id'].encode())
+        _need(intent == {'original_container_sha256': prior.receipt['container_sha256'],
+                         'candidate_sha256': prepared.candidate_sha256,
+                         'overlay_sha256': prepared.overlay_sha256, 'isolated_sha256': _sha(isolated)}
+              and actual != prior.receipt['container_sha256'], 'caddy_reconciliation_required')
+        raw, live = self._live_config(item['Id'])
+        _need(_sha(raw) == prepared.candidate_sha256, 'caddy_live_config_unconfirmed')
+        receipt = {'container_sha256': actual, 'live_sha256': live, 'candidate_sha256': prepared.candidate_sha256}
+        self._active_snapshot(replace(prior, previous=prepared, receipt=receipt), require_exclusive_compose_service=True)
+        assert_guard()
+        return receipt
+
+    def adopt_unapplied(self, prepared, prior, target, assert_guard):
+        """Load a durably validated candidate only while the exact old Caddy still runs."""
+        directory = _private_dir(prepared.override.parent)
+        _need(not self.attempted and not os.path.lexists(directory / 'caddy-apply-intent.json')
+              and prepared.baseline == prior.previous.baseline, 'caddy_reconciliation_required')
+        assert_guard()
+        _, raw, upstreams = self._active_snapshot(prior, require_exclusive_compose_service=True)
+        candidate = retarget(prior.source, prepared.baseline['source_sha256'], raw, prior.primary_ip, target)
+        _need(_read(prepared.candidate) == candidate and _sha(candidate) == prepared.candidate_sha256,
+              'caddy_candidate_not_validated')
+        self._isolated(self._prepared(prepared, upstreams), prepared)
+        self._check_prepared_credentials(prepared)
+        assert_guard()
+        self.prepared, self.active = copy.deepcopy(prepared), copy.deepcopy(prior)
