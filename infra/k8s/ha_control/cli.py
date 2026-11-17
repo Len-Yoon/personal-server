@@ -180,11 +180,14 @@ def run(args):
                 raise TransitionBlocked("enforced_transition_service_required")
             state = control.advance(stop_at_rejoin=True)
             return rejoin_stage_receipt(backend, state)
-        if args.command == "check-rejoin":
+        if args.command in {"observe-rejoin-stage", "check-rejoin"}:
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
             with exclusive(journal.with_suffix(".lock")):
                 state = Journal(journal).read()
+                if args.command == "observe-rejoin-stage":
+                    backend.assert_rejoin_pending(state)
+                    return rejoin_stage_receipt(backend, state)
                 backend.assert_rejoin_synchronized(state)
                 return rejoin_stage_receipt(backend, state) | {"standby_rejoined": True}
         if args.command == "advance":
@@ -220,7 +223,7 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "stage-rejoin",
-                                            "check-rejoin", "transition-serve", "transition-rearm", "check-lease-closed"))
+                                            "observe-rejoin-stage", "check-rejoin", "transition-serve", "transition-rearm", "check-lease-closed"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")

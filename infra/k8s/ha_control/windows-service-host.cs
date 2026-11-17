@@ -32,7 +32,7 @@ namespace EnforcedServiceV1 {
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string prefix=Keys[i]+"=";if(!lines[i].StartsWith(prefix,StringComparison.Ordinal))throw new InvalidOperationException();string v=lines[i].Substring(prefix.Length);if(v.Length==0)throw new InvalidOperationException();Values.Add(Keys[i],v);}
-   if(Values["format"]!="enforced-service-v1"||!Regex.IsMatch(Values["service_name"],"\\A[A-Za-z0-9_-]{1,80}\\z")||!Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")|| (Values["mode"]!="authenticate"&&Values["mode"]!="initialize"&&Values["mode"]!="advance"&&Values["mode"]!="serve"&&Values["mode"]!="transition-serve"&&Values["mode"]!="transition-rearm"&&Values["mode"]!="stage-rejoin"&&Values["mode"]!="check-rejoin"&&Values["mode"]!="check-lease-closed"))throw new InvalidOperationException();
+   if(Values["format"]!="enforced-service-v1"||!Regex.IsMatch(Values["service_name"],"\\A[A-Za-z0-9_-]{1,80}\\z")||!Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")|| (Values["mode"]!="authenticate"&&Values["mode"]!="initialize"&&Values["mode"]!="advance"&&Values["mode"]!="serve"&&Values["mode"]!="transition-serve"&&Values["mode"]!="transition-rearm"&&Values["mode"]!="stage-rejoin"&&Values["mode"]!="observe-rejoin-stage"&&Values["mode"]!="check-rejoin"&&Values["mode"]!="check-lease-closed"))throw new InvalidOperationException();
    foreach(string k in new[]{"python_sha256","launcher_sha256","plan_sha256","approval_sha256","host_sha256"})if(!Regex.IsMatch(Values[k],"\\A[0-9a-f]{64}\\z"))throw new InvalidOperationException();
    foreach(string k in new[]{"python_path","launcher_path","plan_path","approval_path"})CheckPath(Values[k]);
   }
@@ -51,7 +51,7 @@ namespace EnforcedServiceV1 {
     "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3}}}",
     Values["plan_sha256"],childPid,hostPid,startedMs);
   }
-  public static int ServiceExitCode(string mode,uint childCode){return (mode=="authenticate"||mode=="initialize"||mode=="advance"||mode=="stage-rejoin"||mode=="check-rejoin"||mode=="check-lease-closed")&&childCode==0?0:1;}
+  public static int ServiceExitCode(string mode,uint childCode){return (mode=="authenticate"||mode=="initialize"||mode=="advance"||mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin"||mode=="check-lease-closed")&&childCode==0?0:1;}
  }
 #if !PORTABLE_FIXTURE
  public static class Protection {

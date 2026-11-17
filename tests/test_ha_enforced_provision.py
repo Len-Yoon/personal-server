@@ -68,7 +68,7 @@ if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner 
         good=settings()
         raw=P.render_args(good)
         self.assertEqual(raw.decode().splitlines()[0], 'format=enforced-service-v1')
-        for mode in ('authenticate','initialize','advance','serve'):
+        for mode in ('authenticate','initialize','advance','serve','observe-rejoin-stage'):
             self.assertIn(('mode='+mode+'\n').encode(),P.render_args(good|{'mode':mode}))
         for key, value in [('mode','shell'),('python_path',r'\\host\python.exe'),
                 ('plan_path',r'C:\Private\..\other'),('approval_path',r'C:\Private\file:stream'),
@@ -116,6 +116,8 @@ $rearm=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mo
 if($rearm.CommandLine() -cne $expected.Replace(' serve ',' transition-rearm ').Replace(' --arm','')){throw 'rearm_not_exact_fixed_command'}
 $stage=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=stage-rejoin'))
 if($stage.CommandLine() -cne $expected.Replace(' serve ',' stage-rejoin ').Replace(' --arm','')){throw 'stage_not_exact_fixed_command'}
+$observe=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=observe-rejoin-stage'))
+if($observe.CommandLine() -cne $expected.Replace(' serve ',' observe-rejoin-stage ').Replace(' --arm','')){throw 'observe_not_exact_fixed_command'}
 $check=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-rejoin'))
 if($check.CommandLine() -cne $expected.Replace(' serve ',' check-rejoin ').Replace(' --arm','')){throw 'check_not_exact_fixed_command'}
 $closure=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-lease-closed'))
@@ -129,7 +131,7 @@ if(-not [EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($ti,'c:\','C:\',2)){t
 foreach($case in @(@($ti,'C:\','C:\',0),@($ti,'C:\','C:\',1),@($ti,'C:\Private','C:\',3),@($ti,'D:\','C:\',3),@($ti,'C:\..\','C:\',3),@('S-1-1-0','C:\','C:\',3))){
  if([EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($case[0],$case[1],$case[2],[int]$case[3])){throw 'unsafe_owner_exception'}
 }
-foreach($mode in @('authenticate','initialize','advance','stage-rejoin','check-rejoin','check-lease-closed')){
+foreach($mode in @('authenticate','initialize','advance','stage-rejoin','observe-rejoin-stage','check-rejoin','check-lease-closed')){
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }

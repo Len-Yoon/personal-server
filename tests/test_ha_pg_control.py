@@ -1169,6 +1169,24 @@ class PGControlTests(unittest.TestCase):
             self.assertFalse(cli.run(args)["authority_opened"])
             controller.return_value.advance.assert_called_once_with(stop_at_rejoin=True)
 
+    def test_observe_rejoin_stage_never_runs_fencing_or_promotion(self):
+        (self.root / "journal").mkdir()
+        backend = MagicMock(spec=cli.PgBackend)
+        backend.plan = dict(self.plan, profile="enforced-vm-v1")
+        backend.fence_adapter = SimpleNamespace(plan_sha256="a" * 64)
+        state = {"phase": "rejoining", "attempts": 1}
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="observe-rejoin-stage")
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
+                patch.object(cli, "Controller") as controller, patch.object(cli, "Journal") as journal:
+            journal.return_value.read.return_value = state
+            observed = cli.run(args)
+            controller.return_value.advance.assert_not_called()
+        backend.assert_rejoin_pending.assert_called_once_with(state)
+        backend.assert_rejoin_synchronized.assert_not_called()
+        self.assertEqual(observed, cli.rejoin_stage_receipt(backend, state))
+        self.assertFalse(observed["authority_opened"])
+
     def test_transition_rearm_holds_observer_and_reopens_only_a_ready_generation(self):
         journal = self.root / "journal"
         journal.mkdir()
