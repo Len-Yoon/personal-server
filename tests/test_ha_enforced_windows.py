@@ -256,7 +256,12 @@ function Get-EnforcedJournalChildren($Root){
  if($Root -cne 'C:\Private\journal'){throw 'wrong_journal_root'}
  $names=@('controller-state.json','controller-state.lock','.ha-journal-abcdefgh')
  if($script:bad -ceq 'extra'){$names+=@('plan.json')}
- return @($names|ForEach-Object {[pscustomobject]@{Name=$_;FullName=($Root+'\'+$_);PSIsContainer=$false;Attributes=0}})
+ if($script:bad -cin @('evidence','oversize')){
+  $names+=@(('lease-closure-launch-'+('a'*64)+'.json'),('rejoin-result-'+('a'*64)+'-'+('b'*32)+'.json'))
+ }
+ if($script:bad -ceq 'foreign'){$names+=@(('rejoin-launch-'+('b'*64)+'-'+('c'*32)+'.json'))}
+ return @($names|ForEach-Object {[pscustomobject]@{Name=$_;FullName=($Root+'\'+$_);PSIsContainer=$false;Attributes=0;
+  Length=$(if($script:bad -ceq 'oversize'){1025}else{200})}})
 }
 function Get-EnforcedPathDescriptor($Path){return $Path}
 function Assert-EnforcedDescriptor($Descriptor,$Allowed,$Mask,$IgnoreInheritOnly){
@@ -286,6 +291,13 @@ foreach($bad in @('notdir','extra','write','read','hardlink','readonly','denied'
  $script:bad=$bad;try{& $script:fixtureJournal $config $policy ([Diagnostics.Stopwatch]::StartNew())}catch{$closed++}
 }
 if($closed -ne 7){throw 'journal_boundary_accepted'}
+$script:bad='evidence'
+& $script:fixtureJournal $config $policy ([Diagnostics.Stopwatch]::StartNew()) ('a'*64)
+foreach($bad in @('foreign','oversize')){
+ $script:bad=$bad;$closed=$false
+ try{& $script:fixtureJournal $config $policy ([Diagnostics.Stopwatch]::StartNew()) ('a'*64)}catch{$closed=$true}
+ if(-not $closed){throw 'unexpected_journal_evidence_accepted'}
+}
 'journal-provider-only'
 ''').strip(),'journal-provider-only')
 

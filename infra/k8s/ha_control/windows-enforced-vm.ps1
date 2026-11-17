@@ -299,7 +299,7 @@ function Read-EnforcedJournalGrant([string]$Path,[string]$Sid) {
     }
     Assert-EnforcedJournalGrant $granted $denied
 }
-function Assert-EnforcedJournal($Config,$Policy,$Watch) {
+function Assert-EnforcedJournal($Config,$Policy,$Watch,[string]$PlanHash) {
     Assert-EnforcedDeadline $Watch
     $path=Get-EnforcedJournalPath;$root=$path.Substring(0,$path.LastIndexOf('\'))
     # The plan parent remains immutable. Only its dedicated journal child is
@@ -313,10 +313,17 @@ function Assert-EnforcedJournal($Config,$Policy,$Watch) {
     Read-EnforcedJournalGrant $root $Config.windows_enforced.service_sid
     $children=@(Get-EnforcedJournalChildren $root)
     if($children.Count -gt 64){throw 'journal_inventory_rejected'}
+    $evidencePattern=if($PlanHash -cmatch '\A[a-f0-9]{64}\z'){
+        '\A(?:lease-closure(?:-launch)?-'+$PlanHash+'|rejoin-(?:launch|result)-'+$PlanHash+'-[a-f0-9]{32})\.json\z'
+    }else{'(?!)'}
     foreach($child in $children){
         Assert-EnforcedDeadline $Watch
+        $evidence=$child.Name -cmatch $evidencePattern
         if($child.PSIsContainer -or ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            $child.Name -cnotmatch '^(controller-state\.(json|lock)|\.ha-journal-[a-z0-9_]{8})$'){throw 'journal_inventory_rejected'}
+            ($evidence -and ($child.Length -lt 1 -or $child.Length -gt 1024)) -or
+            (-not $evidence -and $child.Name -cnotmatch '\A(?:controller-state\.(?:json|lock)|\.ha-journal-[a-z0-9_]{8})\z')){
+            throw 'journal_inventory_rejected'
+        }
         Assert-EnforcedDescriptor (Get-EnforcedPathDescriptor $child.FullName) $writers 3490513239 $true
         Read-EnforcedJournalGrant $child.FullName $Config.windows_enforced.service_sid
         $null=Get-EnforcedFileIdentity $child.FullName
@@ -571,7 +578,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
     foreach($name in @('session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root')){if($policy.$name -cne $cfg.$name){throw 'policy_binding_changed'}}
     if($policy.profile -cne 'enforced-vm-v1' -or $policy.schema_version -ne 1 -or $policy.cluster -cne $Config.cluster -or $policy.generation -ne $Config.generation -or
         ($policy.disks|ConvertTo-Json -Depth 5 -Compress) -cne ($cfg.disks|ConvertTo-Json -Depth 5 -Compress)){throw 'policy_binding_changed'}
-    Assert-EnforcedJournal $Config $policy $Watch
+    Assert-EnforcedJournal $Config $policy $Watch $PlanHash
     $pgFiles=Get-EnforcedPgFiles $Config $policy $Watch
     $snapshot=Get-EnforcedVmSnapshot $Config $policy $Watch
     if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -ceq 'authenticate'){throw 'authenticate_cannot_fence'}
@@ -586,7 +593,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
         $snapshot=Get-EnforcedVmSnapshot $Config $policy $Watch
     }
     Assert-EnforcedApproval $Config $Approved $PlanHash
-    Assert-EnforcedJournal $Config $policy $Watch
+    Assert-EnforcedJournal $Config $policy $Watch $PlanHash
     if((Get-EnforcedPgFiles $Config $policy $Watch) -cne $pgFiles){throw 'pg_private_file_changed'}
     foreach($binding in @(@($Plan,$PlanHash),@($Approval,$ApprovalHash),@($cfg.policy_path,$cfg.policy_sha256))){
         if((Read-EnforcedPrivate $binding[0] $Watch).sha256 -cne $binding[1]){throw 'authority_bytes_changed'}

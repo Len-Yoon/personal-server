@@ -118,6 +118,10 @@ $stage=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mo
 if($stage.CommandLine() -cne $expected.Replace(' serve ',' stage-rejoin ').Replace(' --arm','')){throw 'stage_not_exact_fixed_command'}
 $observe=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=observe-rejoin-stage'))
 if($observe.CommandLine() -cne $expected.Replace(' serve ',' observe-rejoin-stage ').Replace(' --arm','')){throw 'observe_not_exact_fixed_command'}
+$rejoin=$observe.RejoinLaunchRecord(('a'*32),123,456,1731712345000)|ConvertFrom-Json
+if($rejoin.probe -cne ('a'*32) -or $rejoin.mode -cne 'observe-rejoin-stage' -or
+   $rejoin.plan_sha256 -cne $observe.Values['plan_sha256'] -or $rejoin.python_pid -ne 123 -or
+   $rejoin.host_pid -ne 456 -or $rejoin.started_at_ms -ne 1731712345000){throw 'rejoin_launch_record_unbound'}
 $check=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-rejoin'))
 if($check.CommandLine() -cne $expected.Replace(' serve ',' check-rejoin ').Replace(' --arm','')){throw 'check_not_exact_fixed_command'}
 $closure=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-lease-closed'))

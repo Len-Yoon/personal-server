@@ -51,6 +51,13 @@ namespace EnforcedServiceV1 {
     "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3}}}",
     Values["plan_sha256"],childPid,hostPid,startedMs);
   }
+  public bool IsRejoinProbe(){string mode=Values["mode"];return mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin";}
+  public string RejoinLaunchRecord(string probe,uint childPid,int hostPid,long startedMs){
+   if(!IsRejoinProbe()||!Regex.IsMatch(probe??"",@"\A[a-f0-9]{32}\z")||childPid==0||hostPid<=0||startedMs<=0)throw new InvalidOperationException();
+   return String.Format(System.Globalization.CultureInfo.InvariantCulture,
+    "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3},\"probe\":\"{4}\",\"mode\":\"{5}\"}}",
+    Values["plan_sha256"],childPid,hostPid,startedMs,probe,Values["mode"]);
+  }
   public static int ServiceExitCode(string mode,uint childCode){return (mode=="authenticate"||mode=="initialize"||mode=="advance"||mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin"||mode=="check-lease-closed")&&childCode==0?0:1;}
  }
 #if !PORTABLE_FIXTURE
@@ -110,15 +117,17 @@ namespace EnforcedServiceV1 {
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr source,IntPtr targetProcess,out IntPtr target,uint access,bool inherit,uint options);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
-  static void RecordClosureLaunch(Settings settings,ProcessInfo child){
+  static void RecordOneShotLaunch(Settings settings,ProcessInfo child,string probe){
    long created,exited,kernel,user;
    if(!GetProcessTimes(child.Process,out created,out exited,out kernel,out user))throw new InvalidOperationException();
    long startedMs=new DateTimeOffset(DateTime.FromFileTimeUtc(created)).ToUnixTimeMilliseconds();
    string journal=Path.Combine(Path.GetDirectoryName(settings.Values["plan_path"]),"journal");
-   string leaf=Path.Combine(journal,"lease-closure-launch-"+settings.Values["plan_sha256"]+".json");
+   string plan=settings.Values["plan_sha256"];
+   string name=probe==null?"lease-closure-launch-"+plan:"rejoin-launch-"+plan+"-"+probe;
+   string leaf=Path.Combine(journal,name+".json");
    using(var host=Process.GetCurrentProcess())
    using(var stream=new FileStream(leaf,FileMode.CreateNew,FileAccess.Write,FileShare.None,4096,FileOptions.WriteThrough)){
-    byte[] bytes=Encoding.ASCII.GetBytes(settings.ClosureLaunchRecord(child.Pid,host.Id,startedMs));
+    byte[] bytes=Encoding.ASCII.GetBytes(probe==null?settings.ClosureLaunchRecord(child.Pid,host.Id,startedMs):settings.RejoinLaunchRecord(probe,child.Pid,host.Id,startedMs));
     stream.Write(bytes,0,bytes.Length);stream.Flush(true);
    }
   }
@@ -131,14 +140,15 @@ namespace EnforcedServiceV1 {
     if(!SetInformationJobObject(job,9,ref limit,(uint)Marshal.SizeOf(typeof(Extended))))throw new InvalidOperationException();
     var si=new Startup();si.Size=Marshal.SizeOf(typeof(Startup));ProcessInfo pi;
     string system=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-    string block="PATH="+Path.Combine(system,"System32")+"\0SystemRoot="+system+"\0\0";IntPtr env=Marshal.StringToHGlobalUni(block);
+    string probe=settings.IsRejoinProbe()?Guid.NewGuid().ToString("N"):null;
+    string block=(probe==null?"":"N100HA_REJOIN_PROBE="+probe+"\0")+"PATH="+Path.Combine(system,"System32")+"\0SystemRoot="+system+"\0\0";IntPtr env=Marshal.StringToHGlobalUni(block);
     mark(StartupPhase.PythonCreate);
     try{if(!CreateProcess(settings.Values["python_path"],new StringBuilder(settings.CommandLine()),IntPtr.Zero,IntPtr.Zero,false,0x404,env,Path.GetDirectoryName(settings.Values["launcher_path"]),ref si,out pi))throw new InvalidOperationException();}finally{Marshal.FreeHGlobal(env);}
     process=pi.Process;
     try{
      mark(StartupPhase.JobAssign);
      if(!AssignProcessToJobObject(job,process)){TerminateProcess(process,1);throw new InvalidOperationException();}
-     if(settings.Values["mode"]=="check-lease-closed")RecordClosureLaunch(settings,pi);
+     if(probe!=null||settings.Values["mode"]=="check-lease-closed")RecordOneShotLaunch(settings,pi,probe);
      mark(StartupPhase.PythonResume);
      if(ResumeThread(pi.Thread)==0xffffffff){TerminateProcess(process,1);throw new InvalidOperationException();}
     }finally{CloseHandle(pi.Thread);}

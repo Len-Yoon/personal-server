@@ -1187,6 +1187,22 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(observed, cli.rejoin_stage_receipt(backend, state))
         self.assertFalse(observed["authority_opened"])
 
+    def test_rejoin_receipt_is_launch_bound_and_never_overwritten(self):
+        journal = self.root / "controller-state.json"
+        plan_pin, probe = "a" * 64, "c" * 32
+        proof = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
+                 "rejoin_stage_sha256": "b" * 64}
+        cli.write_rejoin_receipt(journal, plan_pin, "observe-rejoin-stage", proof, probe)
+        path = self.root / f"rejoin-result-{plan_pin}-{probe}.json"
+        raw = path.read_bytes()
+        record = json.loads(raw)
+        self.assertEqual(record, proof | {"schema_version": 1, "plan_sha256": plan_pin, "probe": probe,
+                                          "mode": "observe-rejoin-stage", "python_pid": os.getpid(),
+                                          "observed_at_ms": record["observed_at_ms"]})
+        with self.assertRaisesRegex(TransitionBlocked, "receipt_unconfirmed"):
+            cli.write_rejoin_receipt(journal, plan_pin, "check-rejoin", proof, probe)
+        self.assertEqual(path.read_bytes(), raw)
+
     def test_transition_rearm_holds_observer_and_reopens_only_a_ready_generation(self):
         journal = self.root / "journal"
         journal.mkdir()

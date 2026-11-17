@@ -112,6 +112,26 @@ def write_transition_closure_receipt(journal, proof):
         raise TransitionBlocked("transition_db_closure_receipt_unconfirmed") from None
 
 
+def write_rejoin_receipt(journal, plan_pin, mode, proof, probe):
+    """Publish one result for the native host's uniquely identified launch."""
+    error = "transition_rejoin_receipt_unconfirmed"
+    if (type(plan_pin) is not str or not re.fullmatch(r"[a-f0-9]{64}", plan_pin)
+            or type(probe) is not str or not re.fullmatch(r"[a-f0-9]{32}", probe)):
+        raise TransitionBlocked(error)
+    path = journal.parent / f"rejoin-result-{plan_pin}-{probe}.json"
+    raw = json.dumps(proof | {"schema_version": 1, "plan_sha256": plan_pin, "probe": probe,
+                              "mode": mode, "python_pid": os.getpid(), "observed_at_ms": time.time_ns() // 1_000_000},
+                     sort_keys=True, separators=(",", ":")).encode("ascii")
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+    except OSError:
+        raise TransitionBlocked(error) from None
+
+
 def run(args):
     if getattr(args, "arm", False) and args.command != "serve":
         raise TransitionBlocked("arm_only_for_serve")
@@ -175,21 +195,29 @@ def run(args):
                 write_transition_closure_receipt(journal, proof)
                 return {"status": "PASS", **proof}
         backend.bind(Journal(journal).read())
-        if args.command == "stage-rejoin":
+        if args.command in {"stage-rejoin", "observe-rejoin-stage", "check-rejoin"}:
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
-            state = control.advance(stop_at_rejoin=True)
-            return rejoin_stage_receipt(backend, state)
-        if args.command in {"observe-rejoin-stage", "check-rejoin"}:
-            if p.get("profile") != "enforced-vm-v1":
-                raise TransitionBlocked("enforced_transition_service_required")
-            with exclusive(journal.with_suffix(".lock")):
-                state = Journal(journal).read()
-                if args.command == "observe-rejoin-stage":
-                    backend.assert_rejoin_pending(state)
-                    return rejoin_stage_receipt(backend, state)
-                backend.assert_rejoin_synchronized(state)
-                return rejoin_stage_receipt(backend, state) | {"standby_rejoined": True}
+            probe = os.environ.get("N100HA_REJOIN_PROBE")
+            if os.name == "nt" and (probe is None or not re.fullmatch(r"[a-f0-9]{32}", probe)):
+                raise TransitionBlocked("transition_rejoin_receipt_unconfirmed")
+            if args.command == "stage-rejoin":
+                state = control.advance(stop_at_rejoin=True)
+                result = rejoin_stage_receipt(backend, state)
+                if probe is not None:
+                    write_rejoin_receipt(journal, backend.fence_adapter.plan_sha256, args.command, result, probe)
+            else:
+                with exclusive(journal.with_suffix(".lock")):
+                    state = Journal(journal).read()
+                    if args.command == "observe-rejoin-stage":
+                        backend.assert_rejoin_pending(state)
+                        result = rejoin_stage_receipt(backend, state)
+                    else:
+                        backend.assert_rejoin_synchronized(state)
+                        result = rejoin_stage_receipt(backend, state) | {"standby_rejoined": True}
+                    if probe is not None:
+                        write_rejoin_receipt(journal, backend.fence_adapter.plan_sha256, args.command, result, probe)
+            return result
         if args.command == "advance":
             state = control.advance()
             return {"status": "PASS", "phase": state["phase"], "lease_requires_serve": state["phase"] == "ready"}
