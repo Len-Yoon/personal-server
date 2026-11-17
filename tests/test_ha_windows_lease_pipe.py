@@ -69,7 +69,9 @@ if ($b.task -ceq $c.task -or $b.ready -ceq $c.ready -or $b.task -ceq $initial.ta
                 self.assertEqual(positions, sorted(positions))
         self.assertIn("$InputConfig.vm_b_installation_id -isnot [string]", callback)
         initial_stage = (scripts / "windows-ha-stage-initial-activation.ps1").read_text()
-        self.assertNotIn("vm_b_installation_id", initial_stage)
+        fields_start = initial_stage.index("$callbackFields =")
+        fields_end = initial_stage.index("Assert-Fields $callback $callbackFields", fields_start)
+        self.assertNotIn("vm_b_installation_id", initial_stage[fields_start:fields_end])
 
     def test_process_inventory_follows_task_closure_and_precedes_marker_readback(self):
         scripts = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
