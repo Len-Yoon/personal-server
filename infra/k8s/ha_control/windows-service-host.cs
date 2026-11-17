@@ -32,7 +32,7 @@ namespace EnforcedServiceV1 {
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string prefix=Keys[i]+"=";if(!lines[i].StartsWith(prefix,StringComparison.Ordinal))throw new InvalidOperationException();string v=lines[i].Substring(prefix.Length);if(v.Length==0)throw new InvalidOperationException();Values.Add(Keys[i],v);}
-   if(Values["format"]!="enforced-service-v1"||!Regex.IsMatch(Values["service_name"],"\\A[A-Za-z0-9_-]{1,80}\\z")||!Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")|| (Values["mode"]!="authenticate"&&Values["mode"]!="initialize"&&Values["mode"]!="advance"&&Values["mode"]!="serve"))throw new InvalidOperationException();
+   if(Values["format"]!="enforced-service-v1"||!Regex.IsMatch(Values["service_name"],"\\A[A-Za-z0-9_-]{1,80}\\z")||!Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")|| (Values["mode"]!="authenticate"&&Values["mode"]!="initialize"&&Values["mode"]!="advance"&&Values["mode"]!="serve"&&Values["mode"]!="transition-serve"))throw new InvalidOperationException();
    foreach(string k in new[]{"python_sha256","launcher_sha256","plan_sha256","approval_sha256","host_sha256"})if(!Regex.IsMatch(Values[k],"\\A[0-9a-f]{64}\\z"))throw new InvalidOperationException();
    foreach(string k in new[]{"python_path","launcher_path","plan_path","approval_path"})CheckPath(Values[k]);
   }

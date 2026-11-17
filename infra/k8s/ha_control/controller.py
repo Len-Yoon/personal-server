@@ -142,12 +142,13 @@ class Controller:
             self.journal.save(state)
             self.journal.read()
 
-    def advance(self):
+    def advance(self, *, on_ready=None):
+        """Optionally keep the same guards held for the ready generation's lease owner."""
         with exclusive(self.journal.path.with_suffix(".lock")), self.backend.guard():
             state = self.journal.read()
             if state["phase"] == "ready":
                 self.backend.assert_ready(state)
-                return state
+                return state if on_ready is None else on_ready(state)
             if state["attempts"] >= 3:
                 raise TransitionBlocked("transition_attempts_exhausted")
             state["attempts"] += 1
@@ -187,9 +188,9 @@ class Controller:
                     self.backend.assert_ready(state)
                     state["phase"] = "ready"
                     self.journal.save(state)
-                return state
             except TransitionBlocked:
                 raise
             except Exception:
                 # Do not serialize adapter errors, credentials or command data.
                 raise TransitionBlocked("transition_outcome_unknown") from None
+            return state if on_ready is None else on_ready(state)

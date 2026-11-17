@@ -41,6 +41,24 @@ def validate_bundle(plan):
         raise TransitionBlocked("approved_controller_bundle_required") from None
 
 
+def serve_ready(backend, state, *, arm=False):
+    backend.bind(state)
+    if state["phase"] != "ready":
+        raise TransitionBlocked("ready_transition_required")
+    try:
+        if arm:
+            backend.arm(state)
+        while True:
+            started = time.monotonic()
+            backend.renew(state)
+            time.sleep(max(0, 1 - (time.monotonic() - started)))
+    finally:
+        try:
+            backend.close(state)
+        except Exception:
+            pass  # An unavailable DB is covered by the short DB-clock lease.
+
+
 def run(args):
     if getattr(args, "arm", False) and args.command != "serve":
         raise TransitionBlocked("arm_only_for_serve")
@@ -78,33 +96,21 @@ def run(args):
         if args.command == "advance":
             state = control.advance()
             return {"status": "PASS", "phase": state["phase"], "lease_requires_serve": state["phase"] == "ready"}
+        if args.command == "transition-serve":
+            if p.get("profile") != "enforced-vm-v1":
+                raise TransitionBlocked("enforced_transition_service_required")
+            return control.advance(on_ready=lambda state: serve_ready(backend, state))
         # The single-controller lock AND native Windows exclusion guard remain
         # held throughout serving. A failed renewal exits; the short DB lease
         # expires without inventing a new primary or retrying host recovery.
         with exclusive(journal.with_suffix(".lock")):
             state = Journal(journal).read()
-            backend.bind(state)
-            if state["phase"] != "ready":
-                raise TransitionBlocked("ready_transition_required")
-            try:
-                if getattr(args, "arm", False):
-                    backend.arm(state)
-                while True:
-                    started = time.monotonic()
-                    backend.renew(state)
-                    time.sleep(max(0, 1 - (time.monotonic() - started)))
-            finally:
-                # Best-effort immediate close; guard loss or outage is covered
-                # by the nonrenewed 5s database-clock lease.
-                try:
-                    backend.close(state)
-                except Exception:
-                    pass
+            return serve_ready(backend, state, arm=getattr(args, "arm", False))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve"))
+    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "transition-serve"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")

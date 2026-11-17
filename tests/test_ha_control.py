@@ -204,6 +204,30 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.control.advance()["phase"], "ready")
         self.assertEqual(self.backend.actions, ["close", "fence", "promote", "rejoin", "validate", "open"])
 
+    def test_ready_lease_owner_inherits_both_guards_without_a_gap(self):
+        active = []
+
+        @contextmanager
+        def guard():
+            active.append(True)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        def serve(state):
+            self.assertEqual(state, Journal(self.path).read())
+            self.assertEqual(state["phase"], "ready")
+            self.assertEqual(active, [True])
+            with self.assertRaisesRegex(TransitionBlocked, "controller_lock_unavailable"):
+                with exclusive(self.path.with_suffix(".lock")):
+                    self.fail("second controller acquired lock during lease handoff")
+            return "served"
+
+        with patch.object(self.backend, "guard", guard):
+            self.assertEqual(self.control.advance(on_ready=serve), "served")
+        self.assertEqual(active, [])
+
     def test_unconfirmed_fence_never_promotes(self):
         self.backend.failure = "fence"
         with self.assertRaisesRegex(TransitionBlocked, "positive_fence_required"):
