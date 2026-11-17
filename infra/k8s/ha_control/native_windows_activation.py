@@ -586,18 +586,18 @@ class WindowsTransitionLease:
 
 
 def read_transition_closure_receipt(windows, live_sha256, root, plan_sha256, generation, *,
-                                    python_pid, started_ms, service_sid, deadline):
+                                    host_pid, started_ms, service_sid, deadline):
     """Read the protected receipt belonging to the just-executed query."""
     bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
                  and bridge._hash(plan_sha256)
                  and all(type(value) is int and 0 < value < 10**18 for value in
-                         (python_pid, started_ms, generation))
+                         (host_pid, started_ms, generation))
                  and type(service_sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}", service_sid),
                  "native_transition_db_closure_unconfirmed")
     source = fixed_script("windows-ha-cutover-live-authority.ps1", live_sha256, {
         "ReadClosureReceipt": True, "BindingPath": root + rf"\journal\lease-closure-{plan_sha256}.json",
         "ClosurePlanSha256": plan_sha256, "ClosureGeneration": str(generation),
-        "ClosurePid": str(python_pid), "ClosureStartedMs": str(started_ms), "ClosureServiceSid": service_sid,
+        "ClosureHostPid": str(host_pid), "ClosureStartedMs": str(started_ms), "ClosureServiceSid": service_sid,
     })
     bridge._remaining(deadline)
     return windows.powershell(source, deadline)

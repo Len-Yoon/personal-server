@@ -12,7 +12,7 @@ param(
     [switch]$ReadClosureReceipt,
     [string]$ClosurePlanSha256,
     [string]$ClosureGeneration,
-    [string]$ClosurePid,
+    [string]$ClosureHostPid,
     [string]$ClosureStartedMs,
     [string]$ClosureServiceSid
 )
@@ -191,11 +191,26 @@ function Read-ClosureReceipt {
         $ClosurePlanSha256 -cnotmatch $pattern -or
         -not $BindingPath.EndsWith(('-' + $ClosurePlanSha256 + '.json'),[StringComparison]::Ordinal) -or
         $ClosureServiceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
-        @(@($ClosureGeneration,$ClosurePid,$ClosureStartedMs) | Where-Object { $_ -cnotmatch '\A[1-9][0-9]{0,17}\z' }).Count) {
+        @(@($ClosureGeneration,$ClosureHostPid,$ClosureStartedMs) | Where-Object { $_ -cnotmatch '\A[1-9][0-9]{0,17}\z' }).Count) {
         throw 'transition_closure_receipt_invalid'
     }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $file = Read-Scope $BindingPath @('S-1-5-18','S-1-5-32-544',$sid,$ClosureServiceSid) -Immutable
+    $owners = @('S-1-5-18','S-1-5-32-544',$sid,$ClosureServiceSid)
+    $launchPath = Join-Path ([IO.Path]::GetDirectoryName($BindingPath)) ("lease-closure-launch-" + $ClosurePlanSha256 + ".json")
+    $launchFile = Read-Scope $launchPath $owners -Immutable
+    $launch = ConvertFrom-Json -InputObject $launchFile.raw
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ((@($launch.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+        'host_pid,plan_sha256,python_pid,schema_version,started_at_ms' -or
+        $launch.plan_sha256 -isnot [string] -or $launch.plan_sha256 -cne $ClosurePlanSha256 -or
+        $launch.schema_version -isnot [int] -or $launch.schema_version -ne 1 -or
+        $launch.host_pid -isnot [int] -or $launch.host_pid -ne [long]$ClosureHostPid -or
+        $launch.python_pid -isnot [int] -or $launch.python_pid -le 0 -or
+        $launch.started_at_ms -isnot [long] -or $launch.started_at_ms -lt [long]$ClosureStartedMs -or
+        $launch.started_at_ms -gt $now -or $now - $launch.started_at_ms -gt 25000) {
+        throw 'transition_closure_receipt_invalid'
+    }
+    $file = Read-Scope $BindingPath $owners -Immutable
     $record = ConvertFrom-Json -InputObject $file.raw
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     if ((@($record.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
@@ -206,9 +221,9 @@ function Read-ClosureReceipt {
         ($record.generation -isnot [int] -and $record.generation -isnot [long]) -or
         ($record.python_pid -isnot [int] -and $record.python_pid -isnot [long]) -or
         $record.node_proofs.A -isnot [string] -or $record.node_proofs.B -isnot [string] -or
-        $record.generation -ne [long]$ClosureGeneration -or $record.python_pid -ne [long]$ClosurePid -or
+        $record.generation -ne [long]$ClosureGeneration -or $record.python_pid -ne $launch.python_pid -or
         ($record.observed_at_ms -isnot [long] -and $record.observed_at_ms -isnot [int]) -or
-        $record.observed_at_ms -lt [long]$ClosureStartedMs -or $record.observed_at_ms -gt $now -or
+        $record.observed_at_ms -lt $launch.started_at_ms -or $record.observed_at_ms -gt $now -or
         $now - $record.observed_at_ms -gt 25000 -or $record.node_proofs.A -cnotmatch $pattern -or
         $record.node_proofs.B -cnotmatch $pattern -or $record.node_proofs.A -ceq $record.node_proofs.B) {
         throw 'transition_closure_receipt_invalid'

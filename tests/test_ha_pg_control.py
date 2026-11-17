@@ -64,15 +64,15 @@ class TransitionServiceStartTests(unittest.TestCase):
         pin = hashlib.sha256(script.read_bytes()).hexdigest()
         root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
         windows = MagicMock()
-        kwargs = dict(python_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+        kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
                       deadline=time.monotonic()+10)
         with self.assertRaisesRegex(BridgeRejected, "db_closure_unconfirmed"):
-            read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **(kwargs | {"python_pid": True}))
+            read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **(kwargs | {"host_pid": True}))
         windows.powershell.assert_not_called()
         read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **kwargs)
         command = windows.powershell.call_args.args[0]
         self.assertIn(" -ReadClosureReceipt ", command)
-        self.assertIn(" -ClosurePid '123' ", command)
+        self.assertIn(" -ClosureHostPid '123' ", command)
         self.assertIn(f" -BindingPath '{root}\\journal\\lease-closure-{'a'*64}.json'", command)
 
     def test_settlement_never_reads_db_until_exact_service_is_stopped(self):
