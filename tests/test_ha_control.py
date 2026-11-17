@@ -36,11 +36,17 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(plan, controller)
             self.assertEqual(serving, generation)
             self.assertEqual(attempt, execution.spec["attempt_id"])
-            steps.extend(["controller", "lease"])
+            steps.append("controller")
+            self.assertEqual(options["publish_handoff"](serving, "5"*64, 50), "6"*64)
+            steps.append("lease")
             yield MagicMock(), MagicMock()
 
-        def guest(*_):
+        def guest(request, deadline, *, assert_windows_current):
             steps.append("guest")
+            self.assertEqual(request.verb, transition_ingress.bridge.GUEST_ACTIVATE_GENERATION)
+            self.assertEqual(request.sequence, 5)
+            self.assertEqual(request.args, {"generation_handoff_sha256": "6"*64, "effects_plan_sha256": "3"*64})
+            self.assertTrue(callable(assert_windows_current))
             raise RuntimeError("guest failed")
 
         args = dict(
@@ -51,19 +57,26 @@ class TransitionIngressTests(unittest.TestCase):
             assert_legacy_closed=MagicMock(),
             controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
-            replacement_requests=lambda _: (replacement, None),
-            generation_handoff_request=MagicMock(),
+            replacement_requests=lambda _: (replacement, observe),
+            generation_handoff_request=lambda *_: handoff,
             stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
                                                                         "action": "ha-transition",
                                                                         "authority_kind": "installed-runtime"}),
                            "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
-            activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
+            guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True),
+                                   publish_generation_handoff=MagicMock(return_value="6"*64),
+                                   activate_generation=guest),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
         )
         stage = "7"*64
         replacement = transition_ingress.bridge.Request(
             None, "A", transition_ingress.bridge.GUEST_START_REPLACEMENT, 2, "3"*64, {"rejoin_stage_sha256": stage},
+        )
+        observe = replace(replacement, sequence=3, nonce="4"*64)
+        handoff = transition_ingress.bridge.Request(
+            args["target_request"].binding, "B", transition_ingress.bridge.GUEST_PUBLISH_GENERATION, 4, "5"*64,
+            {"generation_handoff_sha256": "6"*64, "effects_plan_sha256": "3"*64},
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
@@ -106,8 +119,9 @@ class TransitionIngressTests(unittest.TestCase):
             switch.assert_not_called()
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest"])
             steps.clear()
-            args["activate_guest"] = lambda *_: steps.append("guest")
-            transition_ingress.switch_with_observer(*routes, **args)
+            args["guests"].activate_generation = lambda *_a, **_kw: steps.append("guest") or transition_ingress.bridge.Receipt("PASS", "5"*64)
+            outcome = transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(outcome.activation_sha256, "5"*64)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 
     def test_roundtrip_uses_verified_b_service_routes_and_closure_for_return(self):

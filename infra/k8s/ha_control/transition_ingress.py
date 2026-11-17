@@ -234,12 +234,13 @@ class CompletedTransition:
     parameters: dict
     generation: ServingGeneration
     observer_binding: dict | None = None
+    activation_sha256: str | None = None
 
 
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
-                         observer_setup, controller_setup, assert_legacy_closed, activate_guest,
+                         observer_setup, controller_setup, assert_legacy_closed,
                          guests, target_request, verify_guest,
                          replacement_requests, generation_handoff_request, stage_service, resume_rejoin=None,
                          verify_public=_public_health):
@@ -332,21 +333,38 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             bridge._remaining(limit)
             return parameters
 
+        activation_request = None
+
         def publish_handoff(serving_generation, instance, limit):
+            nonlocal activation_request
             request = generation_handoff_request(serving_generation, instance, replay_floor)
-            caddy._need(type(request) is bridge.Request and request.binding == target_request.binding,
+            caddy._need(activation_request is None and type(request) is bridge.Request
+                        and request.binding == target_request.binding
+                        and type(request.sequence) is int and replacement_observe.sequence < request.sequence < bridge.MAX_REQUESTS,
                         "transition_ingress_controller_unbound")
-            return guests.publish_generation_handoff(request, serving_generation, instance, replay_floor, limit)
+            pin = guests.publish_generation_handoff(request, serving_generation, instance, replay_floor, limit)
+            caddy._need(bridge._hash(pin) and pin == request.args["generation_handoff_sha256"],
+                        "transition_ingress_controller_unbound")
+            activation_request = bridge.Request(
+                request.binding, request.node, bridge.GUEST_ACTIVATE_GENERATION, request.sequence + 1,
+                secrets.token_hex(32), {"generation_handoff_sha256": pin,
+                                       "effects_plan_sha256": request.args["effects_plan_sha256"]},
+            )
+            return pin
 
         with open_transition_controller(controller, generation, attempt=execution.spec["attempt_id"],
                                         **(controller_setup | {"prepare_service": same_service,
                                                                "publish_handoff": publish_handoff})) as (assert_guard, guest_boundary):
-            activate_guest(generation, target, guest_boundary)
+            caddy._need(activation_request is not None, "transition_ingress_activation_unbound")
+            activated = guests.activate_generation(activation_request, deadline, assert_windows_current=guest_boundary)
+            caddy._need(type(activated) is bridge.Receipt and activated.status == "PASS"
+                        and bridge._hash(activated.receipt_sha256), "transition_ingress_activation_unconfirmed")
             active, next_relay, receipt = switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
                                   expected_mtls_sha256=expected_mtls_sha256, assert_guard=assert_guard,
                                   verify_guest=verify_guest, verify_public=verify_public)
-            return CompletedTransition(active, next_relay, receipt, controller, parameters, generation, observer_binding)
+            return CompletedTransition(active, next_relay, receipt, controller, parameters, generation,
+                                       observer_binding, activated.receipt_sha256)
 
 
 def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
