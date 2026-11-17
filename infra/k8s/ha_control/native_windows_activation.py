@@ -392,6 +392,8 @@ class WindowsTransitionServiceStart:
             raise bridge.BridgeRejected(invalid) from None
         bridge._need(type(plan) is dict and type(plan.get("windows_enforced")) is dict
                      and type(plan.get("windows_transition_observer")) is dict
+                     and type(plan.get("transition_service_start")) is dict
+                     and bridge._hash(plan["transition_service_start"].get("service_image_path_sha256"))
                      and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
         source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
             "ObserveTransition" if observe else "StartTransition": True, "Go": True,
@@ -408,10 +410,13 @@ class WindowsTransitionServiceStart:
             return self.observe(controller, parameters, deadline)
         receipt = "transition_service_observed" if observe else "transition_service_started"
         bridge._need(type(result) is dict and set(result) == {
-            receipt, "service_pid", "controller_plan_sha256",
+            receipt, "service_pid", "controller_plan_sha256", "service_created_ticks", "service_image_path_sha256",
         } and result[receipt] is True and type(result["service_pid"]) is int
             and 0 < result["service_pid"] <= 2147483647
-            and result["controller_plan_sha256"] == controller["plan_sha256"],
+            and result["controller_plan_sha256"] == controller["plan_sha256"]
+            and type(result["service_created_ticks"]) is str
+            and re.fullmatch(r"[1-9][0-9]{1,19}", result["service_created_ticks"])
+            and result["service_image_path_sha256"] == plan["transition_service_start"]["service_image_path_sha256"],
             "native_transition_service_start_unconfirmed")
         return result
 

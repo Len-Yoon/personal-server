@@ -50,7 +50,9 @@ class TransitionServiceStartTests(unittest.TestCase):
     def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
         service = "N100HA_" + "1"*24 + "_controller"
-        raw = json.dumps({"windows_enforced": {"service_name": service}, "windows_transition_observer": {}}).encode()
+        image = "6"*64
+        raw = json.dumps({"windows_enforced": {"service_name": service}, "windows_transition_observer": {},
+                          "transition_service_start": {"service_image_path_sha256": image}}).encode()
         pin = hashlib.sha256(raw).hexdigest()
         plan = {"plan": raw, "plan_sha256": pin}
         parameters = {"ServiceName": service, "PlanSha256": pin, "ApprovalSha256": "2"*64,
@@ -58,7 +60,8 @@ class TransitionServiceStartTests(unittest.TestCase):
                       "PlanPath": r"C:\fixture\plan.json", "ApprovalPath": r"C:\fixture\approval.json",
                       "PreflightPath": r"C:\fixture\preflight.ps1", "ScmVerifierPath": r"C:\fixture\scm.cs"}
         windows = MagicMock()
-        observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin}
+        observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin,
+                    "service_created_ticks": "638674752000000000", "service_image_path_sha256": image}
         windows.powershell.side_effect = [TimeoutError("lost reply"), observed]
         start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
         deadline = time.monotonic() + 30
@@ -74,7 +77,9 @@ class TransitionServiceStartTests(unittest.TestCase):
         self.assertTrue(requests[1].endswith(" -ObserveTransition -Go"))
 
         for replies, calls in (([{"blocked": "initial_service_transition_scope"}], 1),
-                               ([TimeoutError("lost reply"), {"blocked": "not running"}], 2)):
+                               ([TimeoutError("lost reply"), {"blocked": "not running"}], 2),
+                               ([TimeoutError("lost reply"), observed | {"service_image_path_sha256": "7"*64}], 2),
+                               ([TimeoutError("lost reply"), observed | {"service_created_ticks": 123}], 2)):
             with self.subTest(replies=replies):
                 windows.powershell.reset_mock()
                 windows.powershell.side_effect = replies

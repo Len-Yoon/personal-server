@@ -154,7 +154,13 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $HostPath) {
             throw 'initial_service_transition_start_unconfirmed'
         }
-        $result = [ordered]@{service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256}
+        $created = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+        $confirmed = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+        if ($confirmed.State -cne 'Running' -or $confirmed.Name -cne $ServiceName -or
+            $confirmed.ProcessId -ne $running.ProcessId -or $confirmed.PathName -cne $running.PathName -or
+            $process.HasExited) { throw 'initial_service_transition_start_unconfirmed' }
+        $result = [ordered]@{service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256;
+            service_created_ticks=$created;service_image_path_sha256=$pins.service_image_path_sha256}
         $result[$(if ($ObserveTransition) {'transition_service_observed'} else {'transition_service_started'})] = $true
         $result | ConvertTo-Json -Compress
     } finally { $process.Dispose() }
