@@ -13,6 +13,9 @@ param(
     [string]$ExpectedActivationIntentSha256,
     [switch]$StartTransition,
     [switch]$ObserveTransition,
+    [switch]$StopTransition,
+    [string]$ExpectedServicePid,
+    [string]$ExpectedServiceCreatedTicks,
     [switch]$Go
 )
 $ErrorActionPreference = 'Stop'
@@ -118,7 +121,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
             [Security.Principal.SecurityIdentifier]::new($writer),'FullControl','Allow'))
     }
     $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
-    if ($ObserveTransition) {
+    if ($ObserveTransition -or $StopTransition) {
         $intentHash = [Security.Cryptography.SHA256]::Create()
         try { $intentSha = [BitConverter]::ToString($intentHash.ComputeHash($intentBytes)).Replace('-','').ToLowerInvariant() }
         finally { $intentHash.Dispose() }
@@ -148,7 +151,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
     if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
         $running.PathName -cne $Current.PathName -or
-        ($ObserveTransition -and $running.ProcessId -ne $Current.ProcessId)) { throw 'initial_service_transition_start_unconfirmed' }
+        (($ObserveTransition -or $StopTransition) -and $running.ProcessId -ne $Current.ProcessId)) { throw 'initial_service_transition_start_unconfirmed' }
     $process = Get-Process -Id $running.ProcessId -ErrorAction Stop
     try {
         if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $HostPath) {
@@ -159,6 +162,47 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         if ($confirmed.State -cne 'Running' -or $confirmed.Name -cne $ServiceName -or
             $confirmed.ProcessId -ne $running.ProcessId -or $confirmed.PathName -cne $running.PathName -or
             $process.HasExited) { throw 'initial_service_transition_start_unconfirmed' }
+        if ($StopTransition) {
+            if ([string]$confirmed.ProcessId -cne $ExpectedServicePid -or $created -cne $ExpectedServiceCreatedTicks) {
+                throw 'initial_service_transition_stop_unconfirmed'
+            }
+            if ($confirmed.StartMode -cne 'Manual') { throw 'initial_service_transition_stop_unconfirmed' }
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class HaTransitionProcessStop {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern SafeWaitHandle OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetProcessTimes(SafeWaitHandle process, out long born, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool TerminateProcess(SafeWaitHandle process, uint code);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern uint WaitForSingleObject(SafeWaitHandle process, uint milliseconds);
+    public static bool Stop(uint pid, long expectedTicks) {
+        // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE.
+        using (var process = OpenProcess(0x101001, false, pid)) {
+            long born, exited, kernel, user;
+            if (process.IsInvalid || !GetProcessTimes(process, out born, out exited, out kernel, out user)
+                || DateTime.FromFileTimeUtc(born).Ticks != expectedTicks) return false;
+            if (WaitForSingleObject(process, 0) != 258) return false;
+            return TerminateProcess(process, 1) && WaitForSingleObject(process, 8000) == 0;
+        }
+    }
+}
+'@ -ErrorAction Stop
+            if (-not [HaTransitionProcessStop]::Stop([uint32]$ExpectedServicePid,[long]$ExpectedServiceCreatedTicks)) {
+                throw 'initial_service_transition_stop_unconfirmed'
+            }
+            $stopped = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+            if ($stopped.Name -cne $ServiceName -or $stopped.State -cne 'Stopped' -or $stopped.ProcessId -ne 0 -or
+                $stopped.StartMode -cne 'Manual' -or $stopped.PathName -cne $Current.PathName) {
+                throw 'initial_service_transition_stop_unconfirmed'
+            }
+            [ordered]@{transition_service_stopped=$true;controller_plan_sha256=$PlanSha256} | ConvertTo-Json -Compress
+            return
+        }
         $statePath = Join-Path $intentRoot.FullName 'journal\controller-state.json'
         $command = '"{0}" -I -B "{1}" {2} --plan "{3}" --approval "{4}" --journal "{5}"' -f
             $scope.python_path,$scope.launcher_path,$pins.mode,$PlanPath,$ApprovalPath,$statePath
@@ -173,8 +217,12 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
 }
 
 try {
-    $transition = $StartTransition -or $ObserveTransition
-    if (-not $Go -or ($StartTransition -and $ObserveTransition) -or $PSVersionTable.PSEdition -cne 'Desktop' -or
+    $transition = $StartTransition -or $ObserveTransition -or $StopTransition
+    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition) | Where-Object { $_.IsPresent }).Count
+    if (-not $Go -or $modes -gt 1 -or
+        ($StopTransition -and ($ExpectedServicePid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
+            $ExpectedServiceCreatedTicks -cnotmatch '\A[1-9][0-9]{1,19}\z')) -or
+        (-not $StopTransition -and ($ExpectedServicePid -cne '' -or $ExpectedServiceCreatedTicks -cne '')) -or $PSVersionTable.PSEdition -cne 'Desktop' -or
         $ServiceName -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z' -or
         $ServiceHostSha256 -cnotmatch $hashPattern -or $PlanSha256 -cnotmatch $hashPattern -or
         $ApprovalSha256 -cnotmatch $hashPattern -or
@@ -184,8 +232,8 @@ try {
     }
     $current = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'")
     if ($null -eq $current -or $current.Name -cne $ServiceName -or
-        ($ObserveTransition -and ($current.State -cne 'Running' -or $current.ProcessId -lt 1)) -or
-        (-not $ObserveTransition -and ($current.State -cne 'Stopped' -or $current.ProcessId -ne 0)) -or
+        (($ObserveTransition -or $StopTransition) -and ($current.State -cne 'Running' -or $current.ProcessId -lt 1)) -or
+        (-not ($ObserveTransition -or $StopTransition) -and ($current.State -cne 'Stopped' -or $current.ProcessId -ne 0)) -or
         $current.StartMode -cne 'Manual' -or $current.ServiceType -cne 'Own Process' -or
         $current.DesktopInteract -or
         $current.StartName -cne ('NT SERVICE\' + $ServiceName) -or $current.PathName -cnotmatch '\A"[^"\r\n]+"\z') {

@@ -377,7 +377,16 @@ class WindowsTransitionServiceStart:
         """Check an existing start intent and running SCM instance without another start."""
         return self._invoke(controller, parameters, deadline, observe=True)
 
-    def _invoke(self, controller, parameters, deadline, *, observe):
+    def stop(self, controller, parameters, started, deadline):
+        """Settle only the instance proven by the start or read-only receipt."""
+        bridge._need(type(started) is dict and started.get("controller_plan_sha256") == controller["plan_sha256"]
+                     and type(started.get("service_pid")) is int and 0 < started["service_pid"] <= 2147483647
+                     and type(started.get("service_created_ticks")) is str
+                     and re.fullmatch(r"[1-9][0-9]{1,19}", started["service_created_ticks"]),
+                     "native_transition_stop_scope_invalid")
+        return self._invoke(controller, parameters, deadline, observe=False, stop=started)
+
+    def _invoke(self, controller, parameters, deadline, *, observe, stop=None):
         fields = START_PARAMETERS - {"BindingPath"}
         invalid = "native_transition_start_scope_invalid"
         bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
@@ -395,6 +404,17 @@ class WindowsTransitionServiceStart:
                      and type(plan.get("transition_service_start")) is dict
                      and bridge._hash(plan["transition_service_start"].get("service_image_path_sha256"))
                      and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
+        if stop is not None:
+            source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
+                "StopTransition": True, "ExpectedServicePid": str(stop["service_pid"]),
+                "ExpectedServiceCreatedTicks": stop["service_created_ticks"], "Go": True,
+            })
+            bridge._remaining(deadline)
+            result = self.windows.powershell(source, deadline)
+            bridge._need(bridge._matches(result, {
+                "transition_service_stopped": True, "controller_plan_sha256": controller["plan_sha256"],
+            }), "native_transition_service_stop_unconfirmed")
+            return result
         source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
             "ObserveTransition" if observe else "StartTransition": True, "Go": True,
         })
