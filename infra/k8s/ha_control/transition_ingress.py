@@ -225,6 +225,20 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
     return pin, int(wal, 16), current_stage, synchronized
 
 
+def _activate_or_observe_generation(guests, request, deadline, *, assert_guard, guest_boundary):
+    try:
+        result = guests.activate_generation(request, deadline, assert_windows_current=guest_boundary)
+    except (bridge.BridgeRejected, TimeoutExpired, OSError):
+        result = None
+    if type(result) is bridge.Receipt and result.status == "PASS":
+        return result
+    # Lost reply may follow a committed activation. Never dispatch a second start.
+    observe = replace(request, verb=bridge.GUEST_OBSERVE_GENERATION, sequence=request.sequence + 1,
+                      nonce=secrets.token_hex(32))
+    bridge._remaining(deadline)
+    return guests.observe_generation_activation(observe, deadline, assert_guard=assert_guard)
+
+
 @dataclass(frozen=True)
 class CompletedTransition:
     active: object
@@ -340,7 +354,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             request = generation_handoff_request(serving_generation, instance, replay_floor)
             caddy._need(activation_request is None and type(request) is bridge.Request
                         and request.binding == target_request.binding
-                        and type(request.sequence) is int and replacement_observe.sequence < request.sequence < bridge.MAX_REQUESTS,
+                        and type(request.sequence) is int and replacement_observe.sequence < request.sequence <= bridge.MAX_REQUESTS - 2,
                         "transition_ingress_controller_unbound")
             pin = guests.publish_generation_handoff(request, serving_generation, instance, replay_floor, limit)
             caddy._need(bridge._hash(pin) and pin == request.args["generation_handoff_sha256"],
@@ -356,7 +370,9 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                                         **(controller_setup | {"prepare_service": same_service,
                                                                "publish_handoff": publish_handoff})) as (assert_guard, guest_boundary):
             caddy._need(activation_request is not None, "transition_ingress_activation_unbound")
-            activated = guests.activate_generation(activation_request, deadline, assert_windows_current=guest_boundary)
+            activated = _activate_or_observe_generation(
+                guests, activation_request, deadline, assert_guard=assert_guard, guest_boundary=guest_boundary,
+            )
             caddy._need(type(activated) is bridge.Receipt and activated.status == "PASS"
                         and bridge._hash(activated.receipt_sha256), "transition_ingress_activation_unconfirmed")
             active, next_relay, receipt = switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,

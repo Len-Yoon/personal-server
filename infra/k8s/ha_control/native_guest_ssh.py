@@ -324,7 +324,8 @@ class GuestSshDispatcher:
     def __call__(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.verb not in
                      {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
-                      bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_TRANSITION_TARGET},
+                      bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
+                      bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -367,6 +368,14 @@ class GuestSshDispatcher:
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_ACTIVATE_GENERATION,
                      'guest_ssh_request_unbound')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
+
+    def observe_generation_activation(self, request, deadline, *, assert_guard):
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_GENERATION
+                     and callable(assert_guard), 'guest_ssh_request_unbound')
+        assert_guard()
+        receipt = self._dispatch(request, deadline)
+        assert_guard()
+        return receipt
 
     def start_replacement_standby(self, request, deadline, *, assert_rejoin_current):
         return self._replacement(request, deadline, bridge.GUEST_START_REPLACEMENT, assert_rejoin_current)

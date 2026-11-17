@@ -124,6 +124,31 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(outcome.activation_sha256, "5"*64)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 
+    def test_lost_activation_is_followed_only_by_fresh_readback(self):
+        bridge = transition_ingress.bridge
+        guests = MagicMock()
+        guests.activate_generation.side_effect = OSError("response lost")
+        recorded = bridge.Receipt("PASS", "c"*64)
+        guests.observe_generation_activation.return_value = recorded
+        binding = bridge.Binding(*(character*64 for character in "abcde"))
+        request = bridge.Request(binding, "B", bridge.GUEST_ACTIVATE_GENERATION, 7, "6"*64,
+                                 {"generation_handoff_sha256": "7"*64, "effects_plan_sha256": "8"*64})
+        live, guard = MagicMock(), MagicMock()
+        deadline = float("inf")
+        result = transition_ingress._activate_or_observe_generation(
+            guests, request, deadline, assert_guard=guard, guest_boundary=live,
+        )
+        self.assertIs(result, recorded)
+        guests.activate_generation.assert_called_once_with(request, deadline, assert_windows_current=live)
+        guests.observe_generation_activation.assert_called_once()
+        observed, limit = guests.observe_generation_activation.call_args.args
+        self.assertEqual(observed.verb, bridge.GUEST_OBSERVE_GENERATION)
+        self.assertEqual(observed.sequence, request.sequence + 1)
+        self.assertNotEqual(observed.nonce, request.nonce)
+        self.assertEqual(observed.args, request.args)
+        self.assertEqual(limit, deadline)
+        self.assertIs(guests.observe_generation_activation.call_args.kwargs["assert_guard"], guard)
+
     def test_roundtrip_uses_verified_b_service_routes_and_closure_for_return(self):
         switcher = transition_ingress
         gen_b, gen_a = ServingGeneration("B", 2, 2, 3), ServingGeneration("A", 3, 3, 4)
