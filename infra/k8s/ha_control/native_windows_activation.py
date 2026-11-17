@@ -243,6 +243,28 @@ def publish_transition_observer_config(windows, root, stage_sha256, binding, man
     return path
 
 
+def start_transition_observer(windows, root, stage_sha256, binding, manifest_sha256, launch_sha256, deadline):
+    """Launch one prepared Windows observer after verifying its published config."""
+    bridge._need(bridge._hash(launch_sha256), "native_transition_observer_launch_invalid")
+    path = publish_transition_observer_config(
+        windows, root, stage_sha256, binding, manifest_sha256, deadline, observe_only=True,
+    )
+    pin = binding["callback_config_sha256"]
+    source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
+        "InputPath": root + rf"\transition-observer-launch-{pin}.json", "InputSha256": launch_sha256,
+        "ExpectedSourceManifestSha256": manifest_sha256, "RuntimeSha256": binding["runtime_sha256"],
+        "StartTransitionObserver": True, "Go": True,
+    })
+    result = windows.powershell(source, deadline)
+    fields = {"key_sha256", "windows_boot_sha256", "wsl_boot_sha256", "collector_sha256"}
+    bridge._need(type(result) is dict and set(result) == fields | {"callback_config_sha256", "observer_pid", "pipe_name"}
+                 and result["callback_config_sha256"] == pin and all(bridge._hash(result[key]) for key in fields)
+                 and type(result["observer_pid"]) is int and 0 < result["observer_pid"] <= 2147483647
+                 and type(result["pipe_name"]) is str and re.fullmatch(r"n100ha-lease-proof-[a-f0-9]{32}", result["pipe_name"]),
+                 "native_transition_observer_start_unconfirmed")
+    return result | {"callback_config_path": path, "key_path": root + rf"\transition-observer-key-{pin}.key"}
+
+
 class WindowsTransitionLease:
     """Sample the running Windows controller and the remaining writer exclusions."""
 

@@ -19,7 +19,7 @@ from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
-    WindowsActivationLease, WindowsTransitionLease, publish_transition_observer_config,
+    WindowsActivationLease, WindowsTransitionLease, publish_transition_observer_config, start_transition_observer,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -66,6 +66,27 @@ class TransitionObserverPublicationTests(unittest.TestCase):
         self.assertIn("-ObserveTransitionObserverConfig", observed_only)
         self.assertNotIn("-IntentBase64", observed_only)
         self.assertEqual(windows.powershell.call_count, 3)
+
+
+    def test_transition_observer_rechecks_publication_and_starts_exact_launch_once(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        raw = b'{"fixture":true}\n'
+        pin = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": raw, "callback_config_sha256": pin, "runtime_sha256": "a"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        deadline = time.monotonic() + 30
+        response = {"observer_pid": 123, "pipe_name": "n100ha-lease-proof-" + "1"*32, "callback_config_sha256": pin,
+                    **{key: "2"*64 for key in ("key_sha256", "windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")}}
+        windows = MagicMock()
+        windows.powershell.side_effect = [{"observed_transition_observer_config_sha256": pin}, response]
+        result = start_transition_observer(windows, root, stage_pin, binding, "b"*64, "c"*64, deadline)
+        self.assertEqual(result["observer_pid"], 123)
+        self.assertTrue(result["key_path"].endswith(f"transition-observer-key-{pin}.key"))
+        observed, launched = [entry.args[0] for entry in windows.powershell.call_args_list]
+        self.assertIn("-ObserveTransitionObserverConfig", observed)
+        self.assertIn("-StartTransitionObserver", launched)
+        self.assertIn(f"transition-observer-launch-{pin}.json", launched)
 
 
 class InitialServiceRetirementTests(unittest.TestCase):
