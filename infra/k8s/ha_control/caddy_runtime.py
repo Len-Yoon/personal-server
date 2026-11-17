@@ -115,9 +115,10 @@ def _read(path):
 
 
 def _write(path, data, mode):
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode), 'wb') as stream:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as stream:
         stream.write(data)
         stream.flush()
+        os.fchmod(stream.fileno(), mode)
         os.fsync(stream.fileno())
 
 
