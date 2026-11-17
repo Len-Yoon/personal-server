@@ -32,7 +32,7 @@ class TransitionIngressTests(unittest.TestCase):
         controller = {"plan": candidate, "plan_sha256": caddy_runtime._sha(candidate)}
 
         @contextmanager
-        def open_controller(plan, serving, *, attempt):
+        def open_controller(plan, serving, *, attempt, **options):
             self.assertEqual(plan, controller)
             self.assertEqual(serving, generation)
             self.assertEqual(attempt, execution.spec["attempt_id"])
@@ -47,14 +47,22 @@ class TransitionIngressTests(unittest.TestCase):
             previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
             expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
             replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50},
-            assert_legacy_closed=MagicMock(), controller_setup={},
-            replacement_start=None, replacement_observe=None, check_rejoin_stage=None, check_rejoin_sync=None,
+            assert_legacy_closed=MagicMock(),
+            controller_setup={"deadline": 50, "prepare_service": MagicMock(), "starter": MagicMock(),
+                              "live_sha256": "3"*64, "root": "fixture"},
+            replacement_requests=lambda _: (replacement, None),
             activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
         )
+        stage = "7"*64
+        replacement = transition_ingress.bridge.Request(
+            None, "A", transition_ingress.bridge.GUEST_START_REPLACEMENT, 2, "3"*64, {"rejoin_stage_sha256": stage},
+        )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
-        with patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
+        with patch.object(transition_ingress, "_bind_rejoin_controller"), \
+                patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, MagicMock(), MagicMock())), \
+                patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
                 patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
@@ -68,11 +76,47 @@ class TransitionIngressTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "guest failed"):
                 transition_ingress.switch_with_observer(*routes, **args)
             switch.assert_not_called()
-            self.assertEqual(steps, ["rejoin", "runtime", "observer", "controller", "lease", "guest"])
+            self.assertEqual(steps, ["runtime", "observer", "rejoin", "controller", "lease", "guest"])
             steps.clear()
             args["activate_guest"] = lambda *_: steps.append("guest")
             transition_ingress.switch_with_observer(*routes, **args)
-            self.assertEqual(steps, ["rejoin", "runtime", "observer", "controller", "lease", "guest", "ingress"])
+            self.assertEqual(steps, ["runtime", "observer", "rejoin", "controller", "lease", "guest", "ingress"])
+
+    def test_rejoin_resume_matches_exact_recorded_controller_and_parameters(self):
+        controller = {"plan_sha256": "c"*64}
+        parameters = {"PlanSha256": "c"*64, "ApprovalSha256": "d"*64}
+        with tempfile.TemporaryDirectory() as directory:
+            execution = SimpleNamespace(directory=Path(directory).resolve(),
+                                        spec={"plan_sha256": "a"*64, "attempt_id": "b"*64})
+            bind = transition_ingress._bind_rejoin_controller
+            bind(execution, controller, parameters, resume=False)
+            bind(execution, controller, parameters, resume=True)
+            with self.assertRaisesRegex(TransitionBlocked, "controller_unbound"):
+                bind(execution, controller, parameters | {"ApprovalSha256": "f"*64}, resume=True)
+            with self.assertRaisesRegex(TransitionBlocked, "controller_unbound"):
+                bind(execution, {"plan_sha256": "e"*64}, parameters | {"PlanSha256": "e"*64}, resume=True)
+
+    def test_windows_rejoin_resume_never_dispatches_stage_rejoin(self):
+        starter = MagicMock()
+        stage = {"rejoin_stage_sha256": "f"*64}
+        starter.run_rejoin.return_value = stage
+        controller, parameters = {"plan": b"fixture"}, {"PlanSha256": "a"*64}
+        for resume, first_mode in ((False, "stage-rejoin"), (True, "observe-rejoin-stage")):
+            starter.reset_mock()
+            pin, current, synchronized = transition_ingress._windows_rejoin(
+                starter, controller, parameters, live_sha256="b"*64, root="fixture", deadline=90, resume=resume,
+            )
+            self.assertEqual(pin, stage["rejoin_stage_sha256"])
+            self.assertEqual(current(80), pin)
+            self.assertEqual(synchronized(70), stage)
+            self.assertEqual([call.args[2] for call in starter.run_rejoin.call_args_list],
+                             [first_mode, "observe-rejoin-stage", "check-rejoin"])
+            self.assertEqual(len({call.args[3] for call in starter.run_rejoin.call_args_list}), 3)
+            if resume:
+                self.assertEqual(starter.mock_calls[0][0], "restore_rejoin_args")
+                starter.restore_rejoin_args.assert_called_once()
+            else:
+                starter.restore_rejoin_args.assert_not_called()
 
     def test_replacement_unknown_start_reconciles_without_replay(self):
         bridge = transition_ingress.bridge

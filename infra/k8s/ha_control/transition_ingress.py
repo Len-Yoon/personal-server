@@ -3,6 +3,7 @@
 from dataclasses import replace
 from collections.abc import Mapping
 import os
+import secrets
 from pathlib import Path
 from subprocess import TimeoutExpired
 
@@ -169,13 +170,53 @@ def _rejoin_replacement(execution, guests, generation, target_request, start, ob
                 "transition_replacement_replication_unconfirmed")
 
 
+def _bind_rejoin_controller(execution, controller, parameters, *, resume):
+    directory = caddy._private_dir(execution.directory)
+    path = directory / "windows-rejoin-controller.json"
+    caddy._need(type(controller) is dict and bridge._hash(controller.get("plan_sha256"))
+                and type(parameters) is dict and parameters.get("PlanSha256") == controller["plan_sha256"],
+                "transition_ingress_controller_unbound")
+    proof = {"plan_sha256": execution.spec["plan_sha256"], "attempt_id": execution.spec["attempt_id"],
+             "controller_sha256": controller["plan_sha256"], "parameters_sha256": caddy._sha(encoded(parameters))}
+    if resume:
+        caddy._need(parse(caddy._read(path)) == proof, "transition_ingress_controller_unbound")
+    else:
+        caddy._write(path, encoded(proof), 0o400)
+        caddy._sync_dir(directory)
+
+
+def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadline, resume):
+    """Use one pinned plan through staging and every fresh read-only check."""
+    def run(mode, request_id, limit):
+        return starter.run_rejoin(controller, parameters, mode, request_id,
+                                  live_sha256=live_sha256, root=root, deadline=limit)
+
+    def observe(mode, limit):
+        return run(mode, secrets.token_hex(16), limit)
+
+    stage_id = secrets.token_hex(16)
+    if resume:
+        starter.restore_rejoin_args(controller, parameters, "stage-rejoin", stage_id, deadline)
+        staged = observe("observe-rejoin-stage", deadline)
+    else:
+        staged = run("stage-rejoin", stage_id, deadline)
+    pin = staged["rejoin_stage_sha256"]
+
+    def current_stage(limit):
+        return observe("observe-rejoin-stage", limit)["rejoin_stage_sha256"]
+
+    def synchronized(limit):
+        return observe("check-rejoin", limit)
+
+    return pin, current_stage, synchronized
+
+
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed, activate_guest,
                          guests, target_request, verify_guest,
-                         replacement_start, replacement_observe, check_rejoin_stage, check_rejoin_sync,
-                         verify_public=_public_health):
+                         replacement_requests, resume_rejoin=None, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
     After a lost guest response, supply fresh request sequences and nonces
@@ -192,20 +233,54 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
                 and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
                 "transition_ingress_guest_target_unconfirmed")
+    caddy._need(callable(replacement_requests)
+                and (resume_rejoin is None or type(resume_rejoin) is dict
+                     and set(resume_rejoin) == {"controller", "parameters"}),
+                "transition_replacement_scope_invalid")
     with execution.guard(main, car):
+        deadline = min(observer_setup["deadline"], controller_setup["deadline"])
+        if resume_rejoin is None:
+            binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
+                                                         legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,
+                                                         assert_legacy_closed=assert_legacy_closed)
+            callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
+                                                generation.primary, replacement_vm, observer_release)
+            controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
+            parameters = controller_setup["prepare_service"](controller, generation, deadline)
+        else:
+            controller, parameters = resume_rejoin["controller"], resume_rejoin["parameters"]
+            caddy._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
+                        and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 1048576
+                        and caddy._sha(controller["plan"]) == controller["plan_sha256"],
+                        "transition_ingress_controller_unbound")
+            plan = parse(controller["plan"])
+            observer = plan.get("windows_transition_observer") if type(plan) is dict else None
+            caddy._need(type(observer) is dict and observer.get("legacy_plan_sha256") == legacy_plan
+                        and observer.get("legacy_attempt_id") == legacy_attempt
+                        and encoded({key: value for key, value in plan.items() if key != "windows_transition_observer"})
+                        == encoded(template),
+                        "transition_ingress_controller_unbound")
+            assert_legacy_closed()
+        _bind_rejoin_controller(execution, controller, parameters, resume=resume_rejoin is not None)
+        stage, check_stage, check_sync = _windows_rejoin(
+            controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],
+            root=controller_setup["root"], deadline=deadline, resume=resume_rejoin is not None,
+        )
+        replacement_start, replacement_observe = replacement_requests(stage)
+        caddy._need(type(replacement_start) is bridge.Request and isinstance(replacement_start.args, Mapping)
+                    and replacement_start.args.get("rejoin_stage_sha256") == stage,
+                    "transition_replacement_scope_invalid")
         _rejoin_replacement(execution, guests, generation, target_request, replacement_start, replacement_observe,
-                            check_rejoin_stage, check_rejoin_sync, observer_setup["deadline"])
-        binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
-                                                     legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,
-                                                     assert_legacy_closed=assert_legacy_closed)
-        callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
-                                            generation.primary, replacement_vm, observer_release)
-        controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
-        plan = parse(controller["plan"])
-        caddy._need(plan["generation"] == generation.epoch and plan["node"] == generation.partner,
-                    "transition_ingress_controller_unbound")
+                            check_stage, check_sync, deadline)
+
+        def same_service(plan, serving_generation, limit):
+            caddy._need(plan == controller and serving_generation == generation,
+                        "transition_ingress_controller_unbound")
+            bridge._remaining(limit)
+            return parameters
+
         with open_transition_controller(controller, generation, attempt=execution.spec["attempt_id"],
-                                        **controller_setup) as (assert_guard, guest_boundary):
+                                        **(controller_setup | {"prepare_service": same_service})) as (assert_guard, guest_boundary):
             activate_guest(generation, target, guest_boundary)
             return switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
