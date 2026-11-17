@@ -389,6 +389,9 @@ class WindowsTransitionServiceStart:
     def check_lease_closed(self, controller, parameters, deadline):
         return self._invoke(controller, parameters, deadline, observe=False, closure="CheckLeaseClosed")
 
+    def observe_closure_check(self, controller, parameters, deadline):
+        return self._invoke(controller, parameters, deadline, observe=False, closure="ObserveClosureCheck")
+
     def restore_closure_args(self, controller, parameters, deadline):
         """Reconcile an uncertain invocation without replaying SCM start."""
         return self._invoke(controller, parameters, deadline, observe=False, closure="RestoreClosureArgs")
@@ -633,6 +636,19 @@ def read_transition_closure_receipt(windows, live_sha256, root, plan_sha256, gen
     return windows.powershell(source, deadline)
 
 
+def observe_transition_db_closed(starter, controller, parameters, generation, *, live_sha256, root, deadline):
+    """Recover a completed SCM check after a lost reply, then verify the separate DB receipt."""
+    try:
+        started = starter.check_lease_closed(controller, parameters, min(deadline, time.monotonic() + 22))
+    except (bridge.BridgeRejected, TimeoutExpired, OSError):
+        started = starter.observe_closure_check(controller, parameters, deadline)
+    return read_transition_closure_receipt(
+        starter.windows, live_sha256, root, controller["plan_sha256"], generation.epoch,
+        host_pid=started["host_pid"], started_ms=started["started_at_ms"], service_sid=started["service_sid"],
+        deadline=deadline,
+    )
+
+
 def settle_transition_controller(starter, controller, parameters, started, generation, observe_closed, deadline):
     """Stop the identified controller and require authenticated closure on both databases."""
     if started is None:
@@ -652,13 +668,23 @@ def settle_transition_controller(starter, controller, parameters, started, gener
 
 @contextmanager
 def open_transition_controller(controller, generation, *, starter, prepare_service, stage_sha256, live_sha256,
-                               root, attempt, old_vm_id, publish_handoff, assert_non_vm_exclusions, observe_closed, deadline):
+                               root, attempt, old_vm_id, publish_handoff, assert_non_vm_exclusions, deadline, observe_closed=None):
     """Start the approved controller, bind its live lease, then expose fresh checks."""
     generation.validate()
     bridge._need(generation.epoch > 1 and all(bridge._hash(value) for value in (attempt, stage_sha256, live_sha256))
-                 and callable(assert_non_vm_exclusions) and callable(publish_handoff) and callable(observe_closed),
+                 and callable(assert_non_vm_exclusions) and callable(publish_handoff)
+                 and (observe_closed is None or callable(observe_closed)),
                  "native_transition_service_scope_invalid")
     _transition_authority_scope(controller, generation, root, attempt, old_vm_id)
+    if observe_closed is None:
+        plan = json.loads(controller["plan"])
+        scope = plan["transition_service_start"]
+        source_timeline = plan.get("timeline")
+        target_timeline = scope.get("target_timeline")
+        bridge._need(scope.get("lease_closure_check") is True
+                     and type(source_timeline) is int and type(target_timeline) is int
+                     and source_timeline < target_timeline == generation.timeline,
+                     "native_transition_db_closure_unconfirmed")
     parameters = prepare_service(controller, generation, deadline)
     started = None
     ready = False
@@ -689,6 +715,12 @@ def open_transition_controller(controller, generation, *, starter, prepare_servi
             yield assert_guard, check
     finally:
         if not ready and starter.attempted:
+            def default_observer(plan, current_generation, limit):
+                return observe_transition_db_closed(
+                    starter, plan, parameters, current_generation,
+                    live_sha256=live_sha256, root=root, deadline=limit,
+                )
+
             settle_transition_controller(
-                starter, controller, parameters, started, generation, observe_closed, time.monotonic() + 25,
+                starter, controller, parameters, started, generation, observe_closed or default_observer, time.monotonic() + 35,
             )

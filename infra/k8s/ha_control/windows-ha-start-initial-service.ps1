@@ -14,6 +14,7 @@ param(
     [switch]$StartTransition,
     [switch]$CheckLeaseClosed,
     [switch]$RestoreClosureArgs,
+    [switch]$ObserveClosureCheck,
     [switch]$ObserveTransition,
     [switch]$StopTransition,
     [string]$ExpectedServicePid,
@@ -113,7 +114,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     $scope = $Plan.windows_enforced
     $pins = $Plan.transition_service_start
     $mode = $pins.mode
-    if ($CheckLeaseClosed -or $RestoreClosureArgs) {
+    if ($CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck) {
         if ($pins.lease_closure_check -isnot [bool] -or -not $pins.lease_closure_check) {
             throw 'initial_service_transition_scope'
         }
@@ -170,7 +171,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     for ($parent = $intentRoot.Parent; $null -ne $parent; $parent = $parent.Parent) {
         Assert-PreflightEntry $parent $authors $authors $false $true
     }
-    $intentPrefix = if ($CheckLeaseClosed -or $RestoreClosureArgs) {'transition-closure-start-'} else {'transition-service-start-'}
+    $intentPrefix = if ($CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck) {'transition-closure-start-'} else {'transition-service-start-'}
     $intentPath = Join-Path $intentRoot.FullName ($intentPrefix + $PlanSha256 + '.json')
     $intent = [ordered]@{service_name=$ServiceName;controller_plan_sha256=$PlanSha256;approval_sha256=$ApprovalSha256;
         args_sha256=$argsSha;service_image_path_sha256=$pins.service_image_path_sha256;mode=$mode}
@@ -191,7 +192,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         [IO.FileOptions]::DeleteOnClose,$intentAcl)
     try {
         if (-not $RestoreClosureArgs) { Assert-TransitionPreflight $servingSha }
-        if ($ObserveTransition -or $StopTransition -or $RestoreClosureArgs) {
+        if ($ObserveTransition -or $StopTransition -or $RestoreClosureArgs -or $ObserveClosureCheck) {
             $intentHash = [Security.Cryptography.SHA256]::Create()
             try { $intentSha = [BitConverter]::ToString($intentHash.ComputeHash($intentBytes)).Replace('-','').ToLowerInvariant() }
             finally { $intentHash.Dispose() }
@@ -200,6 +201,30 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
             Assert-PreflightEntry $entry $authors $authors $true $false
             if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
                 $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+            if ($ObserveClosureCheck) {
+                if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+                Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+                Assert-TransitionStopped $Plan $HostPath $Current.PathName
+                $receiptPath = $intentPath + '.completed'
+                $entry = Get-Item -LiteralPath $receiptPath -Force
+                if ($entry -isnot [IO.FileInfo] -or $entry.Length -lt 1 -or $entry.Length -gt 1024) {
+                    throw 'initial_service_closure_check_unconfirmed'
+                }
+                Assert-PreflightEntry $entry $authors $authors $true $false
+                if ((Get-Acl -LiteralPath $receiptPath).GetSecurityDescriptorSddlForm($sections) -cne
+                    $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_closure_check_unconfirmed' }
+                $record = ConvertFrom-Json -InputObject $encoder.GetString([IO.File]::ReadAllBytes($receiptPath))
+                if ((@($record.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+                    'closure_check_completed,controller_plan_sha256,host_pid,service_sid,started_at_ms' -or
+                    $record.closure_check_completed -isnot [bool] -or -not $record.closure_check_completed -or
+                    $record.controller_plan_sha256 -cne $PlanSha256 -or $record.service_sid -cne $sid -or
+                    $record.host_pid -isnot [int] -or $record.host_pid -lt 1 -or
+                    $record.started_at_ms -isnot [long] -or $record.started_at_ms -lt 1) {
+                    throw 'initial_service_closure_check_unconfirmed'
+                }
+                $record | ConvertTo-Json -Compress
+                return
+            }
             if ($RestoreClosureArgs) {
                 if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
                 Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
@@ -265,7 +290,9 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
                         if (Test-Path -LiteralPath $leaf) { Remove-Item -LiteralPath $leaf -ErrorAction Stop }
                     }
                 }
-                $receipt | ConvertTo-Json -Compress
+                $receiptJson = ConvertTo-Json -InputObject $receipt -Compress
+                Write-TransitionArgsStage ($intentPath + '.completed') ($encoder.GetBytes($receiptJson)) $intentAcl
+                $receiptJson
                 return
             }
             Start-Service -Name $ServiceName -ErrorAction Stop
@@ -340,8 +367,8 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
 }
 
 try {
-    $transition = $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs
-    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs) | Where-Object { $_.IsPresent }).Count
+    $transition = $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
+    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
     if (-not $Go -or $modes -gt 1 -or
         ($StopTransition -and ($ExpectedServicePid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
             $ExpectedServiceCreatedTicks -cnotmatch '\A[1-9][0-9]{1,19}\z')) -or

@@ -22,7 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
-    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller, read_transition_closure_receipt,
+    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller, read_transition_closure_receipt, observe_transition_db_closed,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -74,6 +74,27 @@ class TransitionServiceStartTests(unittest.TestCase):
         self.assertIn(" -ReadClosureReceipt ", command)
         self.assertIn(" -ClosureHostPid '123' ", command)
         self.assertIn(f" -BindingPath '{root}\\journal\\lease-closure-{'a'*64}.json'", command)
+
+    def test_lost_closure_response_recovers_scm_result_without_replay(self):
+        starter = MagicMock()
+        starter.check_lease_closed.side_effect = OSError("lost response")
+        started = {"host_pid": 123, "started_at_ms": 1731712345000, "service_sid": "S-1-5-80-1-2-3-4-5"}
+        starter.observe_closure_check.return_value = started
+        controller = {"plan_sha256": "a"*64}
+        generation = ServingGeneration("B", 2, 3, 2)
+        deadline = time.monotonic() + 35
+        with patch("ha_control.native_windows_activation.read_transition_closure_receipt") as reader:
+            outcome = observe_transition_db_closed(
+                starter, controller, {}, generation, live_sha256="b"*64, root="fixture", deadline=deadline,
+            )
+            self.assertIs(outcome, reader.return_value)
+            reader.assert_called_once_with(
+                starter.windows, "b"*64, "fixture", "a"*64, 2,
+                host_pid=123, started_ms=1731712345000, service_sid=started["service_sid"], deadline=deadline,
+            )
+        starter.check_lease_closed.assert_called_once()
+        starter.observe_closure_check.assert_called_once_with(controller, {}, deadline)
+        starter.restore_closure_args.assert_not_called()
 
     def test_settlement_never_reads_db_until_exact_service_is_stopped(self):
         starter = MagicMock()
@@ -167,7 +188,8 @@ class TransitionServiceStartTests(unittest.TestCase):
             "} finally {",
             "Assert-TransitionStopped $Plan $HostPath $Current.PathName",
             "Restore-TransitionServingArgs $argsPath $restore $servingSha $argsSha",
-            "$receipt | ConvertTo-Json -Compress",
+            "Write-TransitionArgsStage ($intentPath + '.completed')",
+            "$receiptJson\n                return",
             "} finally { $commandLock.Dispose() }",
         )
         cursor = 0
