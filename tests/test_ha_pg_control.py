@@ -2507,12 +2507,16 @@ class NativeActivationHandoffTests(unittest.TestCase):
              patch.object(ssh, '_ssh_config', return_value=Path('/private/tmp/ssh-config')), \
              patch.object(ssh, '_same_files', return_value=True):
             workspace.return_value.__enter__.return_value = '/private/tmp/mock-ssh'
-            with client._connection(12) as (short, stamps):
-                self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
-                self.assertEqual(stamps, {Path('/unused'): None})
-            with client._connection(12, cutover=True) as (long, _):
-                self.assertEqual(long, short[:3] + ('-o', 'ServerAliveInterval=5',
-                                                   '-o', 'ServerAliveCountMax=12') + short[3:])
+            for platform, root in (('darwin', '/private/tmp'), ('linux', '/tmp')):
+                with self.subTest(platform=platform), patch.object(windows.sys, 'platform', platform):
+                    with client._connection(12) as (short, stamps):
+                        self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
+                        self.assertEqual(stamps, {Path('/unused'): None})
+                    workspace.assert_called_with(prefix='ha-native-win-', dir=root)
+                    with client._connection(12, cutover=True) as (long, _):
+                        self.assertEqual(long, short[:3] + ('-o', 'ServerAliveInterval=5',
+                                                           '-o', 'ServerAliveCountMax=12') + short[3:])
+                    workspace.assert_called_with(prefix='ha-native-win-', dir=root)
 
     def test_wsl_import_executes_only_verified_source_bytes(self):
         from ha_control import native_wsl_launcher as launcher, native_stdio_bridge as bridge

@@ -33,7 +33,8 @@ class WindowsSsh:
         stamps = ssh._identity(endpoint, deadline)
         known, stamps[self.known_hosts] = ssh._checked_file(self.known_hosts, private=False, maximum=1048576)
         host = ssh._host_record(known, endpoint, guest=False)
-        with tempfile.TemporaryDirectory(prefix='ha-native-win-', dir='/private/tmp') as directory:
+        temporary_root = '/private/tmp' if sys.platform == 'darwin' else '/tmp'
+        with tempfile.TemporaryDirectory(prefix='ha-native-win-', dir=temporary_root) as directory:
             config = ssh._ssh_config(Path(directory), endpoint, None, {endpoint.alias: host})
             bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
             options = _CUTOVER_KEEPALIVE if cutover else ()
