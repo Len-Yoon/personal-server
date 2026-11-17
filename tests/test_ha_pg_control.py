@@ -37,7 +37,8 @@ class TransitionServiceStartTests(unittest.TestCase):
         observer = {"legacy_plan_sha256": "8"*64}
         plan = {"profile": "enforced-vm-v1", "generation": 2, "node": "A",
                 "windows_enforced": {"service_name": "N100HA_" + "1"*24 + "_controller",
-                                     "vm_id": vm_id, "python_path": python},
+                                     "vm_id": vm_id, "python_path": python,
+                                     "disks": [{"path": r"C:\VM\Z.vhdx"}, {"path": r"C:\VM\a.vhdx"}]},
                 "windows_transition_observer": observer,
                 "transition_service_start": {"service_image_path_sha256": image}}
         raw = json.dumps(plan).encode()
@@ -48,13 +49,14 @@ class TransitionServiceStartTests(unittest.TestCase):
                    "python_command_sha256": "e"*64}
         root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
         generation = ServingGeneration("B", 2, 3, 2)
-        args = dict(root=root, attempt="a"*64, handoff_sha256="b"*64, old_vm_id=vm_id,
-                    old_disk_paths_sha256="c"*64)
+        args = dict(root=root, attempt="a"*64, handoff_sha256="b"*64, old_vm_id=vm_id)
         records = transition_authority_records(controller, started, generation, **args)
         body = json.loads(records["binding"])
         self.assertEqual((body["old_vm_id"], body["target"], body["generation"], body["timeline"]), (vm_id, "B", 2, 3))
         self.assertEqual(body["python_path_sha256"], hashlib.sha256(python.encode()).hexdigest())
         self.assertEqual(body["python_command_sha256"], started["python_command_sha256"])
+        expected_disks = (r"c:\vm\a.vhdx" + "\n" + r"c:\vm\z.vhdx").encode()
+        self.assertEqual(body["old_disk_paths_sha256"], hashlib.sha256(expected_disks).hexdigest())
         self.assertEqual(body["state_path"], root + r"\journal\controller-state.json")
         self.assertEqual(json.loads(records["grant"]), {
             "attempt_id": args["attempt"], "handoff_sha256": args["handoff_sha256"],

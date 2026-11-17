@@ -74,8 +74,15 @@ function Assert-TransitionOldVm($Plan) {
     if ($vm.Count -ne 1 -or [string]$vm[0].State -cne 'Off' -or [string]$vm[0].AutomaticStartAction -cne 'Nothing') {
         throw 'transition_old_vm_not_fenced'
     }
-    $paths = @(Get-VMHardDiskDrive -VM $vm[0] -ErrorAction Stop | ForEach-Object { $_.Path.ToLowerInvariant() } | Sort-Object)
-    if ($paths.Count -eq 0 -or (Get-Digest ($paths -join "`n")) -cne $Plan.old_disk_paths_sha256) {
+    [string[]]$paths = @(Get-VMHardDiskDrive -VM $vm[0] -ErrorAction Stop | ForEach-Object {
+        $path = [string]$_.Path
+        if ($path -cnotmatch '\A[A-Za-z]:\\[\x20-\x7e]+\z') { throw 'transition_old_vm_disk_drift' }
+        $path.ToLowerInvariant()
+    })
+    [Array]::Sort($paths,[StringComparer]::Ordinal)
+    if ($paths.Count -lt 1 -or $paths.Count -gt 8 -or
+        @($paths | Select-Object -Unique).Count -ne $paths.Count -or
+        (Get-Digest ($paths -join [char]10)) -cne $Plan.old_disk_paths_sha256) {
         throw 'transition_old_vm_disk_drift'
     }
 }

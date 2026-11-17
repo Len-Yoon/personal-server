@@ -424,13 +424,13 @@ class WindowsTransitionServiceStart:
 
 
 def transition_authority_records(controller, started, generation, *, root, attempt, handoff_sha256,
-                                 old_vm_id, old_disk_paths_sha256):
+                                 old_vm_id):
     """Render the two protected inputs consumed by the live Windows lease verifier."""
     error = "native_transition_authority_record_invalid"
     generation.validate()
     bridge._need(generation.epoch > 1 and type(root) is str and re.fullmatch(
         r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
-        and all(bridge._hash(pin) for pin in (attempt, handoff_sha256, old_disk_paths_sha256))
+        and all(bridge._hash(pin) for pin in (attempt, handoff_sha256))
         and type(old_vm_id) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", old_vm_id)
         and old_vm_id != "00000000-0000-0000-0000-000000000000"
         and type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
@@ -460,6 +460,15 @@ def transition_authority_records(controller, started, generation, *, root, attem
                  and type(python_path) is str and python_path.isascii()
                  and bridge._hash(observer.get("legacy_plan_sha256"))
                  and scope.get("vm_id") == old_vm_id, error)
+    disks = scope.get("disks")
+    bridge._need(type(disks) is list and 1 <= len(disks) <= 8, error)
+    paths = []
+    for disk in disks:
+        path = disk.get("path") if type(disk) is dict else None
+        bridge._need(type(path) is str and re.fullmatch(r"[A-Za-z]:\\[\x20-\x7e]+", path), error)
+        paths.append(path.lower())
+    bridge._need(len(paths) == len(set(paths)), error)
+    old_disk_paths_sha256 = bridge._digest("\n".join(sorted(paths)).encode("ascii"))
     binding = bridge._bytes({
         "attempt_id": attempt, "controller_plan_sha256": controller["plan_sha256"],
         "generation": generation.epoch, "legacy_plan_sha256": observer["legacy_plan_sha256"],
