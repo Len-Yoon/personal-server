@@ -12,6 +12,44 @@ from infra.k8s.ha_control import enforced_windows, initial_lease_service, window
 
 
 class WindowsLeaseResponseBudgetTests(unittest.TestCase):
+    def test_transition_observer_instances_have_distinct_pinned_names(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        self.assertTrue(Path(runtime).is_file(), "PowerShell required for observer instance verification")
+        launcher = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control/windows-ha-start-lease-observer.ps1"
+        source = r'''
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($env:HA_OBSERVER_LAUNCHER,[ref]$tokens,[ref]$errors)
+if ($errors.Count -ne 0) { throw 'launcher_parse' }
+$definition = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-ObserverInstanceNames'
+}, $false)
+. ([scriptblock]::Create($definition.Extent.Text))
+$attempt = 'a'*64
+$config = [pscustomobject]@{arguments=[pscustomobject]@{AttemptId=$attempt;CallbackConfigSha256=('b'*64)}}
+$initial = Get-ObserverInstanceNames $config
+if ($initial.task -cne ('N100HA_lease_observer_' + $attempt) -or
+    $initial.ready -cne ('lease-observer-ready-' + $attempt + '.json')) { throw 'legacy_names_changed' }
+$config | Add-Member NoteProperty instance_sha256 ('b'*64)
+$b = Get-ObserverInstanceNames $config
+$config.instance_sha256 = 'c'*64
+try { $null = Get-ObserverInstanceNames $config; throw 'mismatch_accepted' } catch {
+    if ($_.Exception.Message -cne 'observer_task_instance_pin') { throw }
+}
+$config.arguments.CallbackConfigSha256 = 'c'*64
+$c = Get-ObserverInstanceNames $config
+if ($b.task -ceq $c.task -or $b.ready -ceq $c.ready -or $b.task -ceq $initial.task -or
+    $b.ready -ceq $initial.ready -or $config.arguments.AttemptId -cne $attempt) { throw 'instance_collision' }
+'''
+        result = subprocess.run(
+            (runtime, "-NoProfile", "-NonInteractive", "-Command", source),
+            env=os.environ | {"HA_OBSERVER_LAUNCHER": str(launcher)},
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_replacement_vm_installation_pin_reaches_warmup_and_lease_sampling(self):
         scripts = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
         server = (scripts / "windows-ha-lease-proof-server.ps1").read_text()

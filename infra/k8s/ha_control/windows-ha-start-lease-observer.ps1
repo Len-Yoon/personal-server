@@ -14,6 +14,19 @@ function Assert-LocalPath([string]$Path) {
         $Path -match '\\\.\.?(\\|$)' -or $Path.EndsWith('.')) { throw 'observer_task_input_path' }
 }
 
+function Get-ObserverInstanceNames($Config) {
+    $argsMap = $Config.arguments
+    if ('instance_sha256' -cin $Config.PSObject.Properties.Name) {
+        $instance = $Config.instance_sha256
+        if ($instance -isnot [string] -or $instance -cnotmatch '\A[a-f0-9]{64}\z' -or
+            $instance -cne $argsMap.CallbackConfigSha256) { throw 'observer_task_instance_pin' }
+        return @{task=('N100HA_lease_observer_transition_' + $instance);
+                 ready=('lease-observer-transition-ready-' + $instance + '.json')}
+    }
+    return @{task=('N100HA_lease_observer_' + $argsMap.AttemptId);
+             ready=('lease-observer-ready-' + $argsMap.AttemptId + '.json')}
+}
+
 try {
     if (-not $Go -or $PSVersionTable.PSEdition -cne 'Desktop' -or -not [Environment]::Is64BitProcess -or
         $InputSha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'observer_task_scope' }
@@ -47,6 +60,7 @@ try {
     if ($raw.Length -gt 8192 -or (Digest $raw) -cne $InputSha256) { throw 'observer_task_input_pin' }
     $config = ConvertFrom-Json -InputObject ([Text.UTF8Encoding]::new($false,$true).GetString($raw))
     $expected = @('server_path','server_sha256','arguments')
+    if ('instance_sha256' -cin $config.PSObject.Properties.Name) { $expected += 'instance_sha256' }
     if (@($config.PSObject.Properties).Count -ne $expected.Count -or
         @($config.PSObject.Properties.Name | Where-Object {$_ -cnotin $expected}).Count -ne 0) { throw 'observer_task_input' }
     if ($config.server_path -isnot [string] -or $config.server_sha256 -isnot [string]) { throw 'observer_task_server_scope' }
@@ -73,14 +87,15 @@ try {
         Assert-LocalPath $argsMap.$name
         if ([IO.Path]::GetDirectoryName($argsMap.$name) -cne $root.FullName) { throw 'observer_task_arguments' }
     }
-    if ([IO.Path]::GetFileName($argsMap.ReadyPath) -cne ('lease-observer-ready-' + $argsMap.AttemptId + '.json') -or
+    $names = Get-ObserverInstanceNames $config
+    if ([IO.Path]::GetFileName($argsMap.ReadyPath) -cne $names.ready -or
         (Test-Path -LiteralPath $argsMap.ReadyPath)) { throw 'observer_task_ready_exists' }
     $server = Get-Item -LiteralPath $config.server_path -Force
     if ($server -isnot [IO.FileInfo] -or ($server.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
         $server.Length -gt 65536 -or (Digest ([IO.File]::ReadAllBytes($server.FullName))) -cne $config.server_sha256) {
         throw 'observer_task_server_pin'
     }
-    $taskName = 'N100HA_lease_observer_' + $argsMap.AttemptId
+    $taskName = $names.task
     if (Get-ScheduledTask -TaskPath '\' -TaskName $taskName -ErrorAction SilentlyContinue) { throw 'observer_task_exists' }
     $engine = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
     # The delayed task loads exactly the bytes pinned by the protected input.
