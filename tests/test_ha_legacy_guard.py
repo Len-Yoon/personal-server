@@ -3,6 +3,7 @@ import base64
 import ast
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -756,6 +757,9 @@ class CaddyRuntimeTests(unittest.TestCase):
         self.work = self.enterContext(tempfile.TemporaryDirectory(dir=self.root))
         self.calls = []
         self.applied = False
+        self.container_generation = 1
+        self.installed_candidate = None
+        self.relay = None
         self.lose_apply_result = False
         self.drift = False
         self.live_service_hash = 'a' * 64
@@ -785,7 +789,7 @@ class CaddyRuntimeTests(unittest.TestCase):
 
     def container(self):
         caddy = self.caddy
-        identifier = ('2' if self.applied else '1') * 64
+        identifier = str(max(self.container_generation, 2) if self.applied else 1) * 64
         files = [str(self.root / '-')] if self.applied else [str(self.root / file) for file in caddy.COMPOSE]
         config = dict(Hostname=identifier[:12], Image=self.image if self.applied else 'fixture-caddy',
                       Env=[f'{key}={value}' for key, value in self.upstreams.items()],
@@ -802,7 +806,7 @@ class CaddyRuntimeTests(unittest.TestCase):
         host_mounts = []
         if self.applied:
             mounts.append({'Destination': caddy.CONFIG, 'Type': 'bind',
-                           'RW': False, 'Source': str(Path(self.work) / 'Caddyfile')})
+                           'RW': False, 'Source': str(self.installed_candidate or Path(self.work) / 'Caddyfile')})
             host_mounts = [{'Target': caddy.MOUNT, 'VolumeOptions': {'NoCopy': True}}, {'Target': caddy.CONFIG}]
             if self.drift:
                 mounts[-1]['RW'] = True
@@ -832,9 +836,12 @@ class CaddyRuntimeTests(unittest.TestCase):
         self.calls.append(args)
         result = None
         if args[0] == 'ps':
-            return self.container()['Id'].encode()
+            ids = [self.container()['Id']]
+            if self.relay:
+                ids.append(self.relay['Id'])
+            return '\n'.join(ids).encode()
         if args[0] == 'inspect':
-            result = [self.container()]
+            result = [self.relay if self.relay and args[1] == self.relay['Id'] else self.container()]
         if args[:2] == ('image', 'inspect'):
             result = [{'Id': self.image}]
         if args[:2] == ('volume', 'inspect'):
@@ -849,7 +856,7 @@ class CaddyRuntimeTests(unittest.TestCase):
             return '\n'.join(ids).encode()
         if args[0] == 'exec':
             if args[2] == '/bin/cat':
-                return (Path(self.work) / 'Caddyfile').read_bytes() if self.applied else self.source
+                return (self.installed_candidate or Path(self.work) / 'Caddyfile').read_bytes() if self.applied else self.source
             if args[2] == '/bin/busybox':
                 return self.tls_files
             result = {'apps': {'http': {'routes': 'candidate' if self.applied else 'source'}}}
@@ -885,6 +892,10 @@ class CaddyRuntimeTests(unittest.TestCase):
                 self.assertEqual(args[-8:], ('up', '-d', '--no-deps', '--no-build', '--pull', 'never',
                                              '--force-recreate', 'caddy'))
                 self.applied = True
+                self.container_generation += 1
+                mounted, = (Path(row['source']) for row in result['services']['caddy']['volumes']
+                            if row['target'] == self.caddy.CONFIG)
+                self.installed_candidate = mounted
                 if self.lose_apply_result:
                     raise subprocess.TimeoutExpired(args, 1)
                 return b''
@@ -904,6 +915,49 @@ class CaddyRuntimeTests(unittest.TestCase):
         self.assertEqual(result['candidate_sha256'], prepared.candidate_sha256)
         self.assertTrue((Path(self.work) / 'caddy-apply-intent.json').exists())
         self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 1)
+
+    def test_live_ha_routes_require_current_receipt_and_switch_in_both_directions(self):
+        caddy = self.caddy
+        previous = self.prepare()
+        receipt = self.runtime.apply(previous, Mock())
+        baseline = previous.baseline
+        a, b = '172.20.0.10', '172.20.0.11'
+        for old, new in ((a, b), (b, a)):
+            installed = caddy.ActiveCaddy(previous, receipt, self.source, old, 'f' * 64)
+            executor = caddy.CaddyRuntime(self.root, 'fixture', run=self.run_docker)
+            with tempfile.TemporaryDirectory(dir=self.root) as candidate:
+                bad = dict(receipt, live_sha256='0' * 64)
+                with self.assertRaisesRegex(TransitionBlocked, 'caddy_active_config_changed'):
+                    executor.prepare(baseline, new, candidate, expected_mtls_sha256=self.expected_tls,
+                                     active=replace(installed, receipt=bad))
+            candidate = self.enterContext(tempfile.TemporaryDirectory(dir=self.root))
+            prepared = executor.prepare(baseline, new, candidate, expected_mtls_sha256=self.expected_tls,
+                                        active=installed)
+            self.assertIn(f'https://{new}:10443'.encode(), prepared.candidate.read_bytes())
+            old_receipt = receipt
+            receipt = executor.apply(prepared, Mock())
+            intent = json.loads((Path(candidate) / 'caddy-apply-intent.json').read_bytes())
+            self.assertEqual(intent['original_container_sha256'], old_receipt['container_sha256'])
+            self.assertNotEqual(receipt['container_sha256'], old_receipt['container_sha256'])
+            previous = prepared
+        self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 3)
+
+    def test_car_relay_in_compose_scope_blocks_recreation_after_read_only_preparation(self):
+        caddy = self.caddy
+        previous = self.prepare()
+        receipt = self.runtime.apply(previous, Mock())
+        self.relay = {'Id': '8' * 64, 'Name': '/n100-ha-car-callback-origin'}
+        active = caddy.ActiveCaddy(previous, receipt, self.source, '172.20.0.10',
+                                  caddy._sha(self.relay['Id'].encode()))
+        executor = caddy.CaddyRuntime(self.root, 'fixture', run=self.run_docker)
+        candidate = self.enterContext(tempfile.TemporaryDirectory(dir=self.root))
+        prepared = executor.prepare(previous.baseline, '172.20.0.11', candidate,
+                                    expected_mtls_sha256=self.expected_tls, active=active)
+        before = self.calls.copy()
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_identity_unconfirmed'):
+            executor.apply(prepared, Mock())
+        self.assertFalse((Path(candidate) / 'caddy-apply-intent.json').exists())
+        self.assertFalse(any('up' in command for command in self.calls[len(before):]))
 
     def test_uncertain_apply_accepts_verified_replacement_without_resending(self):
         prepared = self.prepare()
