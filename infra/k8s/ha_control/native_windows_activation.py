@@ -204,3 +204,53 @@ class WindowsActivationLease:
                      and result['initial_service_retired'] is True and bridge._hash(result['retirement_sha256']),
                      'initial_service_retirement_unconfirmed')
         return result['retirement_sha256']
+
+
+class WindowsTransitionLease:
+    """Sample the running Windows controller and the remaining writer exclusions."""
+
+    def __init__(self, windows, binding_path, *, service_instance_sha256, live_sha256, transition_attempt,
+                 legacy_plan_sha256, generation_handoff_sha256, generation, assert_non_vm_exclusions):
+        bridge._need(all(bridge._hash(value) for value in (
+            service_instance_sha256, live_sha256, transition_attempt, legacy_plan_sha256, generation_handoff_sha256,
+        )) and type(binding_path) is str and re.fullmatch(
+            r'C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\transition-service-[a-f0-9]{64}\.json', binding_path,
+        ) and binding_path.endswith(f'-{transition_attempt}.json')
+            and callable(assert_non_vm_exclusions), 'native_transition_service_scope_invalid')
+        generation.validate()
+        bridge._need(generation.epoch > 1, 'native_transition_service_scope_invalid')
+        self.windows = windows
+        self.live_sha256 = live_sha256
+        self.generation = generation
+        self.assert_non_vm_exclusions = assert_non_vm_exclusions
+        self.parameters = {'BindingPath': binding_path, 'LegacyPlanSha256': legacy_plan_sha256,
+                           'AttemptId': transition_attempt, 'ExpectedServiceInstanceSha256': service_instance_sha256,
+                           'TransitionHandoffSha256': generation_handoff_sha256}
+
+    @contextmanager
+    def guest_authority(self, deadline):
+        with self.windows.live_authority_session(min(deadline, time.monotonic() + 12)) as powershell:
+            def check(challenge, boundary, boundary_deadline):
+                bridge._need(bridge._hash(challenge) and type(boundary) is str and 0 < len(boundary) <= 128,
+                             'native_transition_boundary_invalid')
+                limit = min(deadline, boundary_deadline)
+                excluded = self.assert_non_vm_exclusions(limit)
+                bridge._need(type(excluded) is dict and set(excluded) == {'legacy_sha256', 'standby_sha256'}
+                             and all(bridge._hash(value) for value in excluded.values()),
+                             'native_transition_exclusions_unconfirmed')
+                boundary_sha256 = bridge._digest(boundary.encode())
+                source = fixed_script('windows-ha-cutover-live-authority.ps1', self.live_sha256, self.parameters | {
+                    'PriorSha256': challenge, 'TransitionBoundarySha256': boundary_sha256,
+                })
+                result = powershell(source, limit)
+                generation = self.generation
+                bridge._need(type(result) is dict and bridge._hash(result.get('transition_proof_sha256')) and
+                             bridge._matches(result, {'generation': generation.epoch, 'timeline': generation.timeline,
+                                                      'revision': generation.revision,
+                                                      'transition_proof_sha256': result['transition_proof_sha256']}),
+                             'native_transition_service_proof_unconfirmed')
+                bridge._remaining(limit)
+                return bridge._digest(bridge._bytes(result | excluded | {
+                    'challenge': challenge, 'boundary_sha256': boundary_sha256,
+                }))
+            yield check

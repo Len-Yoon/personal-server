@@ -4,6 +4,8 @@ param(
     [string]$AttemptId,
     [string]$PriorSha256,
     [string]$ExpectedServiceInstanceSha256,
+    [string]$TransitionHandoffSha256,
+    [string]$TransitionBoundarySha256,
     [switch]$Retire,
     [switch]$ObserveRetired,
     [switch]$ResumeRetire
@@ -67,10 +69,98 @@ function Assert-Retired($Service) {
     }
 }
 
+function Assert-TransitionOldVm($Plan) {
+    $vm = @(Get-VM -Id ([Guid]::Parse($Plan.old_vm_id)) -ErrorAction Stop)
+    if ($vm.Count -ne 1 -or [string]$vm[0].State -cne 'Off' -or [string]$vm[0].AutomaticStartAction -cne 'Nothing') {
+        throw 'transition_old_vm_not_fenced'
+    }
+    $paths = @(Get-VMHardDiskDrive -VM $vm[0] -ErrorAction Stop | ForEach-Object { $_.Path.ToLowerInvariant() } | Sort-Object)
+    if ($paths.Count -eq 0 -or (Get-Digest ($paths -join "`n")) -cne $Plan.old_disk_paths_sha256) {
+        throw 'transition_old_vm_disk_drift'
+    }
+}
+
+function Read-TransitionAuthority([string[]]$Admins) {
+    if ($BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\transition-service-[a-f0-9]{64}\.json\z' -or
+        -not $BindingPath.EndsWith(('-' + $AttemptId + '.json'),[StringComparison]::Ordinal) -or
+        (@($AttemptId,$LegacyPlanSha256,$PriorSha256,$ExpectedServiceInstanceSha256,$TransitionHandoffSha256,$TransitionBoundarySha256) |
+            Where-Object { $_ -cnotmatch $pattern })) { throw 'transition_authority_scope' }
+    $inputFile = Read-Scope $BindingPath $Admins
+    if ((Get-Digest $inputFile.raw) -cne $ExpectedServiceInstanceSha256) { throw 'transition_authority_instance' }
+    $grantPath = Join-Path ([IO.Path]::GetDirectoryName($BindingPath)) ("transition-grant-" + $AttemptId + ".json")
+    $grantFile = Read-Scope $grantPath $Admins
+    $grant = ConvertFrom-Json -InputObject $grantFile.raw
+    if ((@($grant.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne 'attempt_id,handoff_sha256,service_instance_sha256' -or
+        $grant.attempt_id -cne $AttemptId -or $grant.handoff_sha256 -cne $TransitionHandoffSha256 -or
+        $grant.service_instance_sha256 -cne $ExpectedServiceInstanceSha256) { throw 'transition_authority_scope' }
+    $plan = ConvertFrom-Json -InputObject $inputFile.raw
+    $fields = @($plan.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    if (($fields -join ',') -cne 'attempt_id,controller_plan_sha256,generation,legacy_plan_sha256,old_disk_paths_sha256,old_vm_id,python_command_sha256,python_path_sha256,service_created_ticks,service_image_path_sha256,service_name,service_pid,state_path,target,timeline' -or
+        $plan.attempt_id -cne $AttemptId -or $plan.legacy_plan_sha256 -cne $LegacyPlanSha256 -or
+        (@($plan.controller_plan_sha256,$plan.old_disk_paths_sha256,$plan.python_command_sha256,$plan.python_path_sha256,$plan.service_image_path_sha256) |
+            Where-Object { $_ -cnotmatch $pattern }) -or
+        ($plan.generation -isnot [int] -and $plan.generation -isnot [long]) -or $plan.generation -le 1 -or
+        ($plan.timeline -isnot [int] -and $plan.timeline -isnot [long]) -or $plan.timeline -le 1 -or
+        $plan.target -cnotin @('A','B') -or $plan.old_vm_id -cnotmatch '\A[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\z' -or
+        $plan.service_name -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z' -or
+        $plan.service_created_ticks -cnotmatch '\A[1-9][0-9]{1,19}\z' -or
+        ($plan.service_pid -isnot [int] -and $plan.service_pid -isnot [long]) -or $plan.service_pid -lt 1 -or
+        -not $plan.state_path.EndsWith('\journal\controller-state.json',[StringComparison]::Ordinal)) { throw 'transition_authority_scope' }
+    $service = Find-BoundService $plan
+    if ($service.State -cne 'Running' -or $service.ProcessId -ne $plan.service_pid) { throw 'transition_authority_instance' }
+    $process = Get-Process -Id $plan.service_pid -ErrorAction Stop
+    $childProcess = $null
+    try {
+        if ($process.HasExited -or $process.SessionId -ne 0 -or
+            ('"' + $process.MainModule.FileName + '"') -ine $service.PathName -or
+            $process.StartTime.ToUniversalTime().Ticks.ToString() -cne $plan.service_created_ticks) { throw 'transition_authority_instance' }
+        $identity = [Security.Principal.NTAccount]::new('NT SERVICE',$plan.service_name).Translate([Security.Principal.SecurityIdentifier]).Value
+        Assert-TransitionOldVm $plan
+        $saved = Read-Scope $plan.state_path ($Admins + $identity)
+        $record = ConvertFrom-Json -InputObject $saved.raw
+        $stamp = $record.lease_heartbeat
+        $numbers = @($stamp.sampled_at_ms,$stamp.valid_until_ms,$stamp.python_pid,$stamp.sequence,$stamp.revision)
+        if ($record.phase -cne 'ready' -or $record.target -cne $plan.target -or $record.old -cnotin @('A','B') -or
+            $record.old -ceq $record.target -or $record.generation -ne $plan.generation -or
+            $stamp.plan_sha256 -cne $plan.controller_plan_sha256 -or $stamp.epoch -ne $plan.generation -or
+            $stamp.timeline -ne $plan.timeline -or
+            ($numbers | Where-Object { ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -le 0 }) -or
+            $stamp.revision -lt $plan.generation -or $stamp.broker_instance_sha256 -cnotmatch $pattern -or
+            $stamp.postcommit_nonce_sha256 -cnotmatch $pattern -or $stamp.valid_until_ms -le $stamp.sampled_at_ms -or
+            ($stamp.valid_until_ms - $stamp.sampled_at_ms) -gt 5000) { throw 'transition_authority_lease' }
+        $child = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $stamp.python_pid) -ErrorAction Stop
+        if ($null -eq $child -or $child.ParentProcessId -ne $plan.service_pid -or $child.SessionId -ne 0 -or
+            (Get-Digest $child.CommandLine) -cne $plan.python_command_sha256 -or
+            (Get-Digest $child.ExecutablePath) -cne $plan.python_path_sha256 -or
+            $child.CreationDate.ToUniversalTime() -lt $process.StartTime.ToUniversalTime() -or
+            ([DateTimeOffset]$child.CreationDate).ToUnixTimeMilliseconds() -gt $stamp.sampled_at_ms) { throw 'transition_authority_instance' }
+        $childProcess = Get-Process -Id $stamp.python_pid -ErrorAction Stop
+        if ($childProcess.SessionId -ne 0 -or (Get-Digest $childProcess.MainModule.FileName) -cne $plan.python_path_sha256 -or
+            [Math]::Abs(($childProcess.StartTime.ToUniversalTime() - $child.CreationDate.ToUniversalTime()).TotalMilliseconds) -ge 1) {
+            throw 'transition_authority_instance'
+        }
+        Assert-TransitionOldVm $plan
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        if ($process.HasExited -or $childProcess.HasExited -or $now -lt $stamp.sampled_at_ms -or ($now - $stamp.sampled_at_ms) -ge 2000 -or
+            $now -ge $stamp.valid_until_ms) { throw 'transition_authority_lease' }
+        [ordered]@{generation=$stamp.epoch;timeline=$stamp.timeline;revision=$stamp.revision;
+            transition_proof_sha256=(Get-Digest ($inputFile.raw + ':' + $grantFile.raw + ':' + $saved.raw + ':' + $PriorSha256 + ':' + $TransitionBoundarySha256))}|ConvertTo-Json -Compress
+    } finally {
+        if ($null -ne $childProcess) { $childProcess.Dispose() }
+        $process.Dispose()
+    }
+}
+
 try {
     $retireModes = @(@($Retire,$ObserveRetired,$ResumeRetire) | Where-Object { $_.IsPresent }).Count
     if ($retireModes -gt 1 -or ($retireModes -eq 1 -and $ExpectedServiceInstanceSha256 -cnotmatch $pattern)) {
         throw 'initial_service_retirement_scope'
+    }
+    if ($TransitionHandoffSha256 -or $TransitionBoundarySha256) {
+        if ($retireModes -ne 0) { throw 'transition_authority_scope' }
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        Read-TransitionAuthority @('S-1-5-18','S-1-5-32-544',$sid)
+        return
     }
     if ($LegacyPlanSha256 -cnotmatch $pattern -or $AttemptId -cnotmatch $pattern -or $PriorSha256 -cnotmatch $pattern -or
         $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or

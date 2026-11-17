@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
-from ha_control.native_windows_activation import WindowsActivationLease
+from ha_control.native_guest_activation import ServingGeneration
+from ha_control.native_windows_activation import WindowsActivationLease, WindowsTransitionLease
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
 from ha_control import cli, scm_pg_auth_probe
@@ -55,6 +56,35 @@ class InitialServiceRetirementTests(unittest.TestCase):
         windows.powershell.return_value = {"initial_service_retired": True, "retirement_sha256": "f" * 64}
         self.assertEqual(lease.resume_retirement(deadline, assert_guard=guard, assert_settled=lambda: None), "f" * 64)
         self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ResumeRetire"))
+
+    def test_generation_windows_challenge_requires_live_process_and_other_exclusions(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        attempt, service = "a"*64, "b"*64
+        path = rf"C:\ProgramData\N100HA-InitialCutover\{'c'*40}\transition-service-{attempt}.json"
+        reply = MagicMock(return_value={"generation": 2, "timeline": 3, "revision": 4,
+                                       "transition_proof_sha256": "d"*64})
+        windows = MagicMock()
+        windows.live_authority_session.return_value = nullcontext(reply)
+        exclusions = MagicMock(return_value={"legacy_sha256": "e"*64, "standby_sha256": "f"*64})
+        lease = WindowsTransitionLease(
+            windows, path, service_instance_sha256=service, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+            transition_attempt=attempt, legacy_plan_sha256="1"*64, generation_handoff_sha256="2"*64,
+            generation=ServingGeneration("B", 2, 3, 4), assert_non_vm_exclusions=exclusions,
+        )
+        deadline = time.monotonic() + 30
+        with lease.guest_authority(deadline) as verify:
+            result = verify("3"*64, "start:portal-web", deadline)
+            self.assertRegex(result, r"^[a-f0-9]{64}$")
+            source = reply.call_args.args[0]
+            self.assertIn("-PriorSha256 '" + "3"*64 + "'", source)
+            self.assertIn("-TransitionBoundarySha256 '" + hashlib.sha256(b"start:portal-web").hexdigest() + "'", source)
+            reply.return_value["timeline"] = 7
+            with self.assertRaisesRegex(BridgeRejected, "native_transition_service_proof_unconfirmed"):
+                verify("4"*64, "guest_started", deadline)
+            exclusions.return_value = {"legacy_sha256": "e"*64}
+            with self.assertRaisesRegex(BridgeRejected, "native_transition_exclusions_unconfirmed"):
+                verify("5"*64, "guest_started", deadline)
+        self.assertEqual(reply.call_count, 2)
 
 
 class Fence:
