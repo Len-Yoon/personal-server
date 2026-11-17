@@ -804,6 +804,37 @@ class PGControlTests(unittest.TestCase):
             journal.assert_not_called()
         self.assertEqual(list((self.root / "journal").iterdir()), [])
 
+    def test_production_transition_cannot_start_writes_without_observer_or_by_alternate_mode(self):
+        (self.root / "journal").mkdir()
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1",
+                            windows_enforced={"config_profile": {"acceptance_scope": "production"}})
+        backend.fence_adapter.plan_sha256 = "a"*64
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="transition-serve")
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
+                patch.object(cli, "Controller") as controller, patch.object(cli, "Journal"):
+            for command in ("advance", "serve", "transition-serve"):
+                args.command = command
+                with self.subTest(command=command), self.assertRaisesRegex(TransitionBlocked, "observer_required"):
+                    cli.run(args)
+            controller.assert_not_called()
+            backend.plan["windows_transition_observer"] = {}
+            args.command = "serve"
+            with self.assertRaisesRegex(TransitionBlocked, "observer_required"):
+                cli.run(args)
+            controller.assert_not_called()
+            del backend.plan["windows_transition_observer"]
+            backend.plan["windows_enforced"] = {}
+            args.command = "transition-serve"
+            with self.assertRaisesRegex(TransitionBlocked, "acceptance_scope_required"):
+                cli.run(args)
+            controller.assert_not_called()
+            args.command = "stage-rejoin"
+            controller.return_value.advance.return_value = {"phase": "rejoining"}
+            self.assertFalse(cli.run(args)["authority_opened"])
+            controller.return_value.advance.assert_called_once_with(stop_at_rejoin=True)
+
     def test_enforced_cli_persists_only_in_precreated_mutable_journal_root(self):
         backend = MagicMock()
         backend.plan = dict(self.plan, profile="enforced-vm-v1")

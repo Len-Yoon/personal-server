@@ -117,6 +117,13 @@ def run(args):
             from .initial_lease_service import native_initial_observer, serve_initial
             with native_initial_observer(backend) as observer:
                 return serve_initial(backend, journal, observer)
+        write_command = args.command in {"advance", "serve", "transition-serve"}
+        if p.get("profile") == "enforced-vm-v1" and p["generation"] >= 2 and write_command:
+            scope = p.get("windows_enforced", {}).get("config_profile", {}).get("acceptance_scope")
+            if scope not in {"production", "isolated-predeployment"}:
+                raise TransitionBlocked("transition_acceptance_scope_required")
+            if scope == "production" and (args.command != "transition-serve" or "windows_transition_observer" not in p):
+                raise TransitionBlocked("production_transition_observer_required")
         if args.command == "authenticate":
             backend.authenticate_isolated_nodes()
             return {"status": "PASS", "authenticated_nodes": ["A", "B"], "authority_opened": False}
