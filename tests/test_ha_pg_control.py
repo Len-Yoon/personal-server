@@ -2257,6 +2257,37 @@ class InitialLeaseServiceTests(unittest.TestCase):
         for client in clients:
             client.__exit__.assert_called_once()
 
+    def test_recovery_proof_accepts_windows_json_decimal_without_accepting_coercible_values(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        command = r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$conditions=@($ast.FindAll({param($node)
+    $node -is [Management.Automation.Language.ParenExpressionAst] -and
+    $node.Extent.Text -match '\$(lease|record)\.proof_elapsed_ms -isnot \[int\]'
+},$true) | Sort-Object {$_.Extent.Text.Length})
+if(-not $conditions.Count){throw 'missing_numeric_guard'}
+$guard=[scriptblock]::Create($conditions[0].Extent.Text)
+# Windows PowerShell 5.1 JSON emits Decimal; modern PowerShell emits Double.
+foreach($value in @([decimal]1933.525,[double]1933.525,[int]1933,[long]1933)){
+    $lease=$record=[pscustomobject]@{proof_elapsed_ms=$value}
+    if((& $guard) -ne $false){throw 'valid_numeric_rejected'}
+}
+foreach($value in @('1933.525',$true,$null,[datetime]::UtcNow,@(1933))){
+    $lease=$record=[pscustomobject]@{proof_elapsed_ms=$value}
+    if((& $guard) -ne $true){throw 'coercible_value_accepted'}
+}
+exit 0
+"""
+        for name in ("windows-ha-start-initial-service.ps1", "windows-ha-cutover-live-authority.ps1"):
+            with self.subTest(script=name):
+                result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", command),
+                    env=os.environ | {"N100_TEST_SCRIPT": str(ROOT / "infra/k8s/ha_control" / name)},
+                    capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_recovery_start_rechecks_the_exact_predecessor_scm(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"

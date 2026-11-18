@@ -734,7 +734,7 @@ public static class HaInitialLeaseFileTime {
                     if($lease.revision -ne 4 -or $lease.lease_proof_sha256 -isnot [string] -or
                         $lease.lease_proof_sha256 -cnotmatch $hashPattern -or
                         ($lease.proof_elapsed_ms -isnot [int] -and $lease.proof_elapsed_ms -isnot [long] -and
-                         $lease.proof_elapsed_ms -isnot [double]) -or [double]::IsNaN([double]$lease.proof_elapsed_ms) -or
+                         $lease.proof_elapsed_ms -isnot [double] -and $lease.proof_elapsed_ms -isnot [decimal]) -or [double]::IsNaN([double]$lease.proof_elapsed_ms) -or
                         ($recoveryFields -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
                         $lease.recovery.attempt_id -cne $RecoveryAttemptId -or
                         $lease.recovery.predecessor_service_sha256 -cne $plan.initial_cutover_recovery.predecessor_service_sha256 -or

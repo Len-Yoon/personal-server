@@ -479,7 +479,7 @@ try {
             }
             if (($names -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
                 $record.revision -ne 4 -or ($record.proof_elapsed_ms -isnot [int] -and
-                    $record.proof_elapsed_ms -isnot [long] -and $record.proof_elapsed_ms -isnot [double]) -or
+                    $record.proof_elapsed_ms -isnot [long] -and $record.proof_elapsed_ms -isnot [double] -and $record.proof_elapsed_ms -isnot [decimal]) -or
                 [double]::IsNaN([double]$record.proof_elapsed_ms) -or
                 $record.recovery.attempt_id -cne $RecoveryAttemptId -or
                 $record.recovery.predecessor_service_sha256 -cne $RecoveryPredecessorServiceSha256 -or
