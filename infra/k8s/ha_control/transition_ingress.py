@@ -302,15 +302,17 @@ class CompletedTransition:
     activation_sha256: str | None = None
 
 
-def _transition_wal_key(template, verify_crash_source, scope, deadline):
+def _transition_wal_key(template, verify_crash_source, scope, deadline, *, assert_source_off=None):
     error = "transition_crash_source_unconfirmed"
     if template.get("source_lease_close_required") is True:
         caddy._need("crash_source_sha256" not in template and verify_crash_source is None, error)
         return "source_fence_wal"
     expected = template.get("crash_source_sha256")
     caddy._need(template.get("source_lease_close_required") is False
-                and bridge._hash(expected) and callable(verify_crash_source), error)
+                and bridge._hash(expected) and callable(verify_crash_source)
+                and callable(assert_source_off), error)
     bridge._remaining(deadline)
+    caddy._need(assert_source_off(scope["source_vm_id"], deadline) is True, error)
     caddy._need(verify_crash_source(scope, deadline) == expected, error)
     bridge._remaining(deadline)
     return "replica_fence_wal"
@@ -393,7 +395,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                        "legacy_attempt": legacy_attempt, "previous_runtime_sha256": previous_runtime_sha256,
                        "source_vm_id": controller_setup["old_vm_id"], "source_node": generation.partner,
                        "next_generation": generation.epoch, "next_timeline": generation.timeline}
-        wal_key = _transition_wal_key(template, verify_crash_source, crash_scope, deadline)
+        assert_source_off = getattr(attach_replacement_network, "assert_crash_source_off", None)
+        wal_key = _transition_wal_key(template, verify_crash_source, crash_scope, deadline, assert_source_off=assert_source_off)
         start_intent = execution.directory / "replacement-start-intent.json"
         network_intent = execution.directory / "replacement-network-intent.json"
         attachment_pending = resume_rejoin is not None and os.path.lexists(network_intent)
@@ -446,7 +449,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             assert_legacy_closed()
         _bind_rejoin_controller(execution, controller, parameters, resume=resume_rejoin is not None)
         if wal_key == "replica_fence_wal":
-            _transition_wal_key(template, verify_crash_source, crash_scope, deadline)
+            _transition_wal_key(template, verify_crash_source, crash_scope, deadline, assert_source_off=assert_source_off)
         stage, replay_floor, check_stage, check_sync = _windows_rejoin(
             controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],
             root=controller_setup["root"], deadline=deadline, resume=resume_rejoin is not None,

@@ -9,6 +9,7 @@ param(
     [string]$ReplacementMac,
     [string]$StageSha256,
     [switch]$ObserveOnly,
+    [switch]$ReadCrashSource,
     [switch]$Go
 )
 $ErrorActionPreference = 'Stop'
@@ -90,6 +91,28 @@ function Read-ReplacementTopology {
 }
 
 $guid = '\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+try {
+    if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'replacement_network_admin_required'
+    }
+} finally { $identity.Dispose() }
+
+if ($ReadCrashSource) {
+    if ((($PSBoundParameters.Keys | Sort-Object -CaseSensitive) -join ',') -cne 'OldDiskPathsSha256,OldVmId,ReadCrashSource' -or
+        $OldVmId -cnotmatch $guid -or [Guid]$OldVmId -eq [Guid]::Empty -or
+        $OldDiskPathsSha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'replacement_crash_source_unconfirmed' }
+    $old = Get-VM -Id ([Guid]$OldVmId)
+    if ($old.State -ne 'Off' -or $old.AutomaticStartAction -ne 'Nothing') { throw 'replacement_crash_source_unconfirmed' }
+    Assert-DiskPaths $old $OldDiskPathsSha256
+    $confirmed = Get-VM -Id ([Guid]$OldVmId)
+    if ($confirmed.Id -ne $old.Id -or $confirmed.State -ne 'Off' -or $confirmed.AutomaticStartAction -ne 'Nothing') {
+        throw 'replacement_crash_source_unconfirmed'
+    }
+    [ordered]@{vm_id=$OldVmId;disk_paths_sha256=$OldDiskPathsSha256;state='Off';automatic_start='Nothing'} |
+        ConvertTo-Json -Compress
+    return
+}
 $ids = @($OldVmId,$PrimaryVmId,$ReplacementVmId,$IsolatedSwitchId,$ServingSwitchId)
 $hashes = @($OldDiskPathsSha256,$ReplacementDiskPathsSha256)
 if ($Go) { $hashes += $StageSha256 }
@@ -99,13 +122,6 @@ if (($Go.IsPresent -eq $ObserveOnly.IsPresent) -or @($ids | Where-Object {$_ -cn
     @($hashes | Where-Object {$_ -cnotmatch '\A[a-f0-9]{64}\z'}).Count -ne 0) {
     throw 'replacement_network_scope_invalid'
 }
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-try {
-    if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'replacement_network_admin_required'
-    }
-} finally { $identity.Dispose() }
-
 $mutex = [Threading.Mutex]::new($false,('Global\N100HA-ReplacementNetwork-' + $ServingSwitchId))
 $held = $false
 try {

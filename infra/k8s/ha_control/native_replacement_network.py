@@ -26,6 +26,21 @@ class WindowsReplacementNetwork:
             "ReplacementDiskPathsSha256": replacement["disk_paths_sha256"],
         }
 
+    def assert_crash_source_off(self, old_vm_id, deadline):
+        """Read the exact old VM and pinned disks without dispatching a stop."""
+        error = "transition_crash_source_unconfirmed"
+        bridge._need(type(old_vm_id) is str and old_vm_id != self.pins["PrimaryVmId"]
+                     and bridge._hash(self.pins["OldDiskPathsSha256"]), error)
+        parameters = {"ReadCrashSource": True, "OldVmId": old_vm_id,
+                      "OldDiskPathsSha256": self.pins["OldDiskPathsSha256"]}
+        source = fixed_script("windows-ha-replacement-network.ps1", self.script_sha256, parameters)
+        result = self.windows.powershell(source, deadline)
+        bridge._need(bridge._matches(result, {"vm_id": old_vm_id,
+                     "disk_paths_sha256": self.pins["OldDiskPathsSha256"],
+                     "state": "Off", "automatic_start": "Nothing"}), error)
+        bridge._remaining(deadline)
+        return True
+
     def preflight(self, replacement, old_vm_id, request, deadline):
         parameters = self._parameters(replacement, old_vm_id, request)
         source = fixed_script("windows-ha-replacement-network.ps1", self.script_sha256,

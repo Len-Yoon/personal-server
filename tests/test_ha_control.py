@@ -67,6 +67,28 @@ class WindowsReplacementNetworkTests(unittest.TestCase):
             implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
 
 
+    def test_crash_source_read_requires_exact_off_vm_and_disabled_restart(self):
+        bridge = transition_ingress.bridge
+        path = ROOT / "infra/k8s/ha_control/windows-ha-replacement-network.ps1"
+        pin = sha256(path.read_bytes()).hexdigest()
+        windows = MagicMock()
+        implementation = WindowsReplacementNetwork(
+            windows, pin, primary_vm_id="active", old_disk_paths_sha256="c"*64,
+            isolated_switch_id="isolation", serving_switch_id="serving", replacement_mac="021122334455",
+        )
+        receipt = {"vm_id": "old", "disk_paths_sha256": "c"*64, "state": "Off", "automatic_start": "Nothing"}
+        windows.powershell.return_value = receipt
+        self.assertTrue(implementation.assert_crash_source_off("old", float("inf")))
+        command = windows.powershell.call_args.args[0]
+        self.assertIn(" -ReadCrashSource ", command)
+        self.assertNotIn(" -Go", command)
+        for override in ({"state":"Running"}, {"automatic_start":"Start"}, {"vm_id":"foreign"},
+                         {"disk_paths_sha256":"d"*64}):
+            windows.powershell.return_value = receipt | override
+            with self.assertRaisesRegex(bridge.BridgeRejected, "crash_source_unconfirmed"):
+                implementation.assert_crash_source_off("old", float("inf"))
+
+
 class ServingEndpointTests(unittest.TestCase):
     def test_both_pinned_ssh_hosts_must_match_postgres_plan(self):
         dispatcher = GuestSshDispatcher.__new__(GuestSshDispatcher)
@@ -510,7 +532,11 @@ class TransitionIngressTests(unittest.TestCase):
         scope = {"source_vm_id": "exact-vm", "source_node": "A"}
         deadline = float("inf")
         verify = MagicMock(return_value="a"*64)
-        self.assertEqual(choose(plan, verify, scope, deadline), "replica_fence_wal")
+        off = MagicMock(return_value=True)
+        self.assertEqual(choose(plan, verify, scope, deadline, assert_source_off=off), "replica_fence_wal")
+        off.assert_called_once_with("exact-vm", deadline)
+        with self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+            choose(plan, verify, scope, deadline, assert_source_off=lambda *_: False)
         verify.assert_called_once_with(scope, deadline)
         self.assertEqual(choose({"source_lease_close_required": True}, None, scope, deadline), "source_fence_wal")
         for template, verifier in (
@@ -519,7 +545,7 @@ class TransitionIngressTests(unittest.TestCase):
             ({"source_lease_close_required": True, "crash_source_sha256": "a"*64}, None),
         ):
             with self.subTest(template=template), self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
-                choose(template, verifier, scope, deadline)
+                choose(template, verifier, scope, deadline, assert_source_off=off)
 
     def test_replica_wal_type_survives_windows_readback_and_guest_preparation(self):
         from ha_control.native_guest_activation import ActivationPins
