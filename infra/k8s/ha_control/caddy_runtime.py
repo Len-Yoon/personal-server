@@ -280,6 +280,12 @@ def _runtime_contract(container, added=()):
     return _pin(_runtime_fields(container, added))
 
 
+def _original_container_pin(baseline):
+    if 'id' in baseline:
+        return _sha(baseline['id'].encode())
+    return baseline['original_container_sha256']
+
+
 @dataclass(frozen=True)
 class PreparedCaddy:
     baseline: dict
@@ -519,7 +525,7 @@ class CaddyRuntime:
         _need(set(receipt) == {'container_sha256', 'live_sha256', 'candidate_sha256'}
               and all(type(pin) is str and ID.fullmatch(pin) for pin in receipt.values())
               and receipt['candidate_sha256'] == previous.candidate_sha256
-              and receipt['container_sha256'] != _sha(previous.baseline['id'].encode())
+              and receipt['container_sha256'] != _original_container_pin(previous.baseline)
               and type(active.relay_container_sha256) is str and ID.fullmatch(active.relay_container_sha256),
               'caddy_previous_receipt_unconfirmed')
         # Compose can recreate every container sharing its project/service
@@ -630,6 +636,57 @@ class CaddyRuntime:
                                  *(MOUNT + '/' + name for name in TLS_FILES))
         _need(_pin(_tls_files(tls_files)) == prepared.mtls_files_sha256, 'caddy_mtls_files_changed')
 
+    def observe_initial_ingress(self, directory, *, intent_sha256, source, primary_ip, relay_container_sha256,
+                                compose_file_count, expected_mtls_sha256, expected_runtime_sha256):
+        """Rebuild the initial HA route from its pinned apply intent and the running Caddy."""
+        error = 'caddy_initial_ingress_unconfirmed'
+        _need(type(compose_file_count) is int and compose_file_count in (2, len(COMPOSE))
+              and type(relay_container_sha256) is str and ID.fullmatch(relay_container_sha256)
+              and type(expected_runtime_sha256) is str and ID.fullmatch(expected_runtime_sha256)
+              and type(expected_mtls_sha256) is dict and set(expected_mtls_sha256) == set(TLS_FILES)
+              and all(type(pin) is str and ID.fullmatch(pin) for pin in expected_mtls_sha256.values())
+              and type(source) is bytes and 0 < len(source) <= 1048576, error)
+        try:
+            directory = _private_dir(Path(directory))
+            raw_intent = _read(directory / 'caddy-apply-intent.json')
+            _need(_sha(raw_intent) == intent_sha256, error)
+            intent = seven_capture.parse(raw_intent)
+            _need(type(intent) is dict and set(intent) == {
+                'original_container_sha256', 'candidate_sha256', 'overlay_sha256', 'isolated_sha256',
+            } and all(type(pin) is str and ID.fullmatch(pin) for pin in intent.values()), error)
+            source_sha = _sha(source)
+            expected_candidate = render(source, source_sha, primary_ip)
+            _need(_sha(expected_candidate) == intent['candidate_sha256'], error)
+            item = self._container(isolated=True, relay_sha256=relay_container_sha256)
+            upstreams = self._upstreams(item)
+            raw, live = self._live_config(item['Id'])
+            container_pin = _sha(item['Id'].encode())
+            _need(container_pin != intent['original_container_sha256'] and raw == expected_candidate, error)
+            files = [str(self.root / name) for name in COMPOSE[:compose_file_count]]
+            base = self._config(files, upstreams)
+            volumes, mounts = self._mounts(item, (CONFIG, MOUNT))
+            fields = _runtime_fields(item, (CONFIG, MOUNT))
+            _need(_pin(fields) == expected_runtime_sha256, error)
+            self._image(item['Image'])
+            previous = PreparedCaddy(
+                {'original_container_sha256': intent['original_container_sha256'], 'image': item['Image'],
+                 'compose_files': files, 'compose_sha256': _pin(base), 'network_sha256': self._network(base, item),
+                 'runtime_sha256': expected_runtime_sha256,
+                 'runtime_field_sha256': {key: _pin(value) for key, value in fields.items()},
+                 'source_sha256': source_sha, 'volumes': volumes,
+                 'volume_names': {path: mounts[path]['Name'] for path in volumes}},
+                directory / 'caddy-ha-compose.json', directory / 'Caddyfile', intent['overlay_sha256'],
+                intent['candidate_sha256'], self._mtls_volume()[0], _pin(expected_mtls_sha256),
+            )
+            effective = self._prepared(previous, upstreams)
+            _need(_sha(self._isolated(effective, previous)) == intent['isolated_sha256'], error)
+            self._replacement_credentials(previous, item, mounts)
+            receipt = {'container_sha256': container_pin, 'live_sha256': live,
+                       'candidate_sha256': intent['candidate_sha256']}
+            return ActiveCaddy(previous, receipt, source, primary_ip, relay_container_sha256)
+        except (OSError, KeyError, ValueError, TypeError, AttributeError):
+            raise TransitionBlocked(error) from None
+
     def prepare(self, baseline, active_ip, private_dir, *, expected_mtls_sha256, active=None):
         try:
             _need(type(expected_mtls_sha256) is dict and set(expected_mtls_sha256) == set(TLS_FILES)
@@ -724,7 +781,8 @@ class CaddyRuntime:
             fields = _runtime_fields(item, (CONFIG, MOUNT))
             changed = sorted(key for key, value in fields.items()
                              if _pin(value) != prepared.baseline['runtime_field_sha256'][key])
-            _need(item['Id'] not in (previous_id, prepared.baseline['id']) and item['Image'] == prepared.baseline['image']
+            _need(item['Id'] != previous_id and _sha(item['Id'].encode()) != _original_container_pin(prepared.baseline)
+                  and item['Image'] == prepared.baseline['image']
                   and _pin(fields) == prepared.baseline['runtime_sha256'],
                   'caddy_replacement_contract_changed')
             phase = 'volumes_and_network'

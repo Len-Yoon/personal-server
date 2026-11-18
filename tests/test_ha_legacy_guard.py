@@ -942,6 +942,39 @@ class CaddyRuntimeTests(unittest.TestCase):
             previous = prepared
         self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 3)
 
+    def test_observe_initial_ingress_recreates_active_state_from_pinned_intent(self):
+        caddy = self.caddy
+        prepared = self.prepare()
+        receipt = self.runtime.apply(prepared, Mock())
+        directory = prepared.candidate.parent
+        path = directory / 'caddy-apply-intent.json'
+        options = dict(intent_sha256=caddy._sha(path.read_bytes()), source=self.source,
+                       primary_ip='172.20.0.10', relay_container_sha256='f' * 64,
+                       compose_file_count=len(prepared.baseline['compose_files']),
+                       expected_mtls_sha256=self.expected_tls,
+                       expected_runtime_sha256=prepared.baseline['runtime_sha256'])
+        observer = caddy.CaddyRuntime(self.root, 'fixture', run=self.run_docker)
+        before = len(self.calls)
+        active = observer.observe_initial_ingress(directory, **options)
+        self.assertEqual(active.receipt, receipt)
+        self.assertEqual(active.previous.baseline['runtime_sha256'], prepared.baseline['runtime_sha256'])
+        self.assertNotIn('id', active.previous.baseline)
+        self.assertFalse(observer.attempted)
+        self.assertFalse(any('up' in cmd or 'run' in cmd for cmd in self.calls[before:]))
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_initial_ingress_unconfirmed'):
+            observer.observe_initial_ingress(directory, **(options | {'primary_ip': '172.20.0.11'}))
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_initial_ingress_unconfirmed'):
+            observer.observe_initial_ingress(directory, **(options | {'intent_sha256': '2' * 64}))
+        privileged = self.container()
+        privileged['HostConfig']['Privileged'] = True
+        with patch.object(observer, '_container', return_value=privileged):
+            with self.assertRaisesRegex(TransitionBlocked, 'caddy_initial_ingress_unconfirmed'):
+                observer.observe_initial_ingress(directory, **options)
+        candidate = self.enterContext(tempfile.TemporaryDirectory(dir=self.root))
+        successor = observer.prepare(active.previous.baseline, '172.20.0.11', candidate,
+                                     expected_mtls_sha256=self.expected_tls, active=active)
+        self.assertNotEqual(observer.apply(successor, Mock())['container_sha256'], receipt['container_sha256'])
+
     def test_car_relay_in_compose_scope_blocks_recreation_after_read_only_preparation(self):
         caddy = self.caddy
         previous = self.prepare()
