@@ -35,6 +35,146 @@ def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
+class InitialRecoveryRestartTests(unittest.TestCase):
+    def exercise_restart(self, *, failed_boundary=None, uncertain_start=None, stale_hold=False, already_started=False,
+                         delayed_inventory=False, delayed_local=False, cleanup_failure=False):
+        from contextlib import ExitStack
+        worker, wire = native_guest_worker, native_stdio_bridge
+        binding = wire.Binding('1'*64, '2'*64, '3'*64, '4'*64, '5'*64)
+        args = {key: '6'*64 for key in wire.INITIAL_RECOVERY_ARGS}
+        args.update(recovery_attempt_id='7'*64, hold_sha256=wire._digest(b'hold'))
+        request = wire.Request(binding, 'A', wire.GUEST_START_INITIAL_RECOVERY, 1, '8'*64, args)
+        containers = {role: {'container_id': f'{index:064x}', 'image_id': 'sha256:'+'9'*64}
+                      for index, role in enumerate(wire.RECOVERY_START_ORDER, 1)}
+        authority_path = Path('/test-authority')
+        hold = {'containers': containers, 'container_contracts': {role: {'started_at': 'old'} for role in containers}}
+        prepared = {'manifest_sha256': 'a'*64}
+        active = {'authority_files': {str(authority_path): wire._digest(b'authority')}}
+        pins = SimpleNamespace(installation_id=args['installation_id'], node='A', attempt_id=binding.attempt_id,
+                               spec_sha256=wire._digest(b'{"guest_ip":"127.0.0.1","pg_a":"127.0.0.1","node":"A"}'))
+        runtime_state = {row['container_id']: {'State': {'Running': False}} for row in containers.values()}
+        commands, proofs, records = [], [], {}
+
+        clock = [0.0]
+        def inventory(*_args, **_options):
+            if delayed_inventory and self.proofs:
+                clock[0] += 8
+            return ({role: {"started_at": "new"} for role in containers}, "pinned")
+
+        def local_proof(*_args, **_options):
+            if delayed_local:
+                clock[0] += 0.6
+            return "d"*64
+
+        def docker(*command, **options):
+            commands.append(command)
+            if command[0] == 'start':
+                runtime_state[command[1]]['State']['Running'] = True
+                if command[1] == uncertain_start:
+                    raise OSError('uncertain docker response')
+            elif command[0] == 'stop':
+                if cleanup_failure:
+                    raise OSError('cleanup response uncertain')
+                for identifier in command[3:]:
+                    runtime_state[identifier]['State']['Running'] = False
+
+        def windows(challenge, boundary):
+            proofs.append((challenge, boundary))
+            return None if boundary == failed_boundary else 'c'*64
+
+        def read(path, *_args, **_options):
+            if path == authority_path:
+                return b'authority'
+            if path.name == 'guest-spec.json':
+                return b'{"guest_ip":"127.0.0.1","pg_a":"127.0.0.1","node":"A"}'
+            return records[path]
+
+        def write(path, value, *_args):
+            records[path] = value
+
+        self.records, self.commands, self.proofs = records, commands, proofs
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+            base = Path(folder)
+            stack.enter_context(patch.object(worker, 'ROOT', base))
+            stack.enter_context(patch.object(worker.time, 'monotonic', side_effect=lambda: clock[0]))
+            stack.enter_context(patch.object(worker, '_guest_mutation_descriptor', return_value=ExitStack()))
+            stack.enter_context(patch.object(worker, '_read_initial_recovery_hold', return_value=(b'changed' if stale_hold else b'hold', hold, prepared, active)))
+            stack.enter_context(patch.object(worker, '_initial_recovery_inventory', side_effect=inventory))
+            stack.enter_context(patch.object(worker, '_assert_car_route_blocked'))
+            stack.enter_context(patch.object(worker, 'GuestWorker', return_value=SimpleNamespace(_prepared_pins=lambda *_: (object(), pins, {}))))
+            stack.enter_context(patch.object(worker.live, '_authority_paths', return_value={'test': authority_path}))
+            stack.enter_context(patch.object(worker.live, 'observe_recovered_a_lease', side_effect=local_proof))
+            stack.enter_context(patch.object(worker.runtime, '_inventory', side_effect=lambda: copy.deepcopy(runtime_state)))
+            stack.enter_context(patch.object(worker.runtime, '_read', side_effect=read))
+            stack.enter_context(patch.object(worker.runtime, '_write', side_effect=write))
+            stack.enter_context(patch.object(worker.runtime, '_docker', side_effect=docker))
+            stack.enter_context(patch.object(worker.activation, '_tls', return_value=(object(), 'leaf')))
+            readiness = stack.enter_context(patch.object(worker.activation, '_wait_for_app'))
+            if already_started:
+                stage = base / binding.attempt_id
+                stage.mkdir()
+                (stage / ('recovery-'+args['recovery_attempt_id']+'-start-intent.json')).touch()
+            result = worker.start_initial_recovery(request, windows)
+            self.readiness_count = readiness.call_count
+            return result
+
+    def test_restart_preserves_hold_and_starts_exact_containers_broker_first(self):
+        result = self.exercise_restart()
+        self.assertEqual(result.status, 'PASS')
+        self.assertEqual(self.commands, [('start', f'{index:064x}') for index in range(1,9)])
+        self.assertEqual([boundary for _, boundary in self.proofs], list(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
+        self.assertEqual(len({proof for proof, _ in self.proofs}), len(self.proofs))
+        self.assertEqual(self.readiness_count, 7)
+        self.assertEqual(len(self.records), 10)
+        self.assertTrue(all(path.name.startswith('recovery-') for path in self.records))
+
+    def test_restart_stops_started_containers_when_fresh_windows_proof_fails(self):
+        with self.assertRaises(TransitionBlocked):
+            self.exercise_restart(failed_boundary='recovery_after:book-memo')
+        self.assertEqual(self.commands[-1], ('stop','--signal=SIGTERM','--timeout=-1',f'{2:064x}',f'{1:064x}'))
+        self.assertFalse(any(path.name.endswith('-done.json') for path in self.records))
+
+    def test_uncertain_docker_start_is_included_in_cleanup(self):
+        with self.assertRaisesRegex(OSError, 'uncertain docker'):
+            self.exercise_restart(uncertain_start=f'{2:064x}')
+        self.assertEqual(self.commands[-1][-2:], (f'{2:064x}',f'{1:064x}'))
+
+    def test_restart_refuses_stale_hold_and_previous_attempt_intent(self):
+        for options in ({'stale_hold': True}, {'already_started': True}):
+            with self.subTest(options=options), self.assertRaises(TransitionBlocked):
+                self.exercise_restart(**options)
+            self.assertFalse(self.commands)
+
+    def test_delayed_inventory_or_final_sample_cannot_start_containers(self):
+        for options in ({"delayed_inventory": True}, {"delayed_local": True}):
+            with self.subTest(options=options), self.assertRaises(TransitionBlocked):
+                self.exercise_restart(**options)
+            self.assertFalse(self.commands)
+
+    def test_cleanup_uncertainty_preserves_intent_and_never_reports_complete(self):
+        with self.assertRaisesRegex(OSError, "cleanup response uncertain"):
+            self.exercise_restart(failed_boundary="recovery_after:book-memo", cleanup_failure=True)
+        self.assertTrue(any(path.name.endswith("-intent.json") for path in self.records))
+        self.assertFalse(any(path.name.endswith("-done.json") for path in self.records))
+
+    def test_restart_dispatch_requires_a_only_duplex_and_valid_pins(self):
+        wire = native_stdio_bridge
+        binding = wire.Binding('1'*64, '2'*64, '3'*64, '4'*64, '5'*64)
+        args = {key: '6'*64 for key in (*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256')}
+        request = wire.Request(binding, 'A', wire.GUEST_START_INITIAL_RECOVERY, 1, '8'*64, args)
+        wire._args(request.verb, request.node, request.args)
+        self.assertIn(request.verb, wire.DUPLEX_GUEST_VERBS)
+        with self.assertRaises(wire.BridgeRejected):
+            wire._args(request.verb, 'B', args)
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        with patch.object(dispatcher, '_dispatch', return_value=wire.Receipt('PASS','9'*64)) as dispatch:
+            with self.assertRaises(wire.BridgeRejected):
+                dispatcher.start_initial_recovery(request, 40, assert_windows_current=None)
+            proof = MagicMock()
+            dispatcher.start_initial_recovery(request, 40, assert_windows_current=proof)
+            dispatch.assert_called_once_with(request, 40, assert_windows_current=proof)
+
+
 class InitialRecoveryMutationLockTests(unittest.TestCase):
     def test_recovery_read_only_proofs_roll_sessions_without_reusing_recent_challenges(self):
         wire = native_stdio_bridge
@@ -980,6 +1120,11 @@ class NativeGuestLiveTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
                 live._lease(pins, postgres)
+            for margin in (float("nan"), float("inf"), -1, True, 6):
+                with self.subTest(margin=margin), self.assertRaisesRegex(TransitionBlocked, "guest_live_recovery_lease_unconfirmed"):
+                    live.observe_recovered_a_lease(pins, postgres, **options, minimum_remaining_seconds=margin)
+            self.assertRegex(live.observe_recovered_a_lease(pins, postgres, **options, minimum_remaining_seconds=1),
+                             r"^[a-f0-9]{64}$")
             observed["authority"][2] = 2
             with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
                 live.observe_recovered_a_lease(pins, postgres, **options)

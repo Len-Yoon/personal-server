@@ -59,8 +59,11 @@ GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS = "retire_initial_standby_containers"
 GUEST_QUIESCE_INITIAL_RECOVERY = "quiesce_initial_recovery"
 GUEST_OBSERVE_INITIAL_RECOVERY_HOLD = "observe_initial_recovery_hold"
 GUEST_OBSERVE_CAR_ISOLATION = "observe_car_isolation"
+GUEST_START_INITIAL_RECOVERY = "start_initial_recovery"
+RECOVERY_START_ORDER = ("ha-broker", "book-memo", "car-care-worker", "crawler-worker", "homeops-executor", "portal-web", "system-agent", "youtube-memo")
+RECOVERY_START_BOUNDARIES = ("recovery_start_intent", *(boundary + role for role in RECOVERY_START_ORDER for boundary in ("recovery_before:", "recovery_after:", "recovery_ready:")), "recovery_started")
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
-DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION, GUEST_QUIESCE_INITIAL_RECOVERY}
+DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION, GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_START_INITIAL_RECOVERY}
 QUIESCENCE_BOUNDARIES = ("recovery_hold", "recovery_stop_broker", "recovery_stop_apps", "recovery_stopped")
 PREPARATION_OBSERVATION_BOUNDARIES = ("observe_preparation:before", "observe_preparation:after")
 PREPARATION_BOUNDARIES = tuple(f"prepare_generation:{index}" for index in range(1, 5))
@@ -103,6 +106,7 @@ VERBS = {
     GUEST_QUIESCE_INITIAL_RECOVERY: ("A", 95, True, INITIAL_RECOVERY_ARGS),
     GUEST_OBSERVE_INITIAL_RECOVERY_HOLD: ("A", 20, False, INITIAL_RECOVERY_ARGS),
     GUEST_OBSERVE_CAR_ISOLATION: ("A", 20, False, (*INITIAL_RECOVERY_ARGS, "hold_sha256")),
+    GUEST_START_INITIAL_RECOVERY: ("A", 300, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256")),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
     "observe_restore": ("A", 60, False, ("manifest_sha256", "restore_intent_sha256")),
@@ -328,7 +332,7 @@ class _Chain:
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
                           GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET,
                           GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
-                          GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION},
+                          GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, GUEST_START_INITIAL_RECOVERY},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":

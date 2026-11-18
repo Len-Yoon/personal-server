@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import partial
 import http.client
+import math
 import os
 from pathlib import Path
 import re
@@ -108,11 +109,14 @@ def _lease(pins, postgres, generation=None, *, recovery_deadline=None):
     return observed, sampled, expires, replay
 
 
-def observe_recovered_a_lease(pins, postgres, *, recovery_attempt_id, challenge_sha256, deadline):
+def observe_recovered_a_lease(pins, postgres, *, recovery_attempt_id, challenge_sha256, deadline,
+                              minimum_remaining_seconds=0):
     """Read the recovered lease through the same guest-local PostgreSQL connection."""
     error = "guest_live_recovery_lease_unconfirmed"
     pins.validate()
     postgres.validate()
+    _need(type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 0, error)
     _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A"
           and type(pins.generation) is int and pins.generation == 1
           and pins.postgres_id == postgres.postgres_id
@@ -124,7 +128,8 @@ def observe_recovered_a_lease(pins, postgres, *, recovery_attempt_id, challenge_
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
     observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline)
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256
-          and replay > 0 and datetime.now(timezone.utc) < expires and time.monotonic() < deadline, error)
+          and replay > 0 and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
     return runtime._digest(runtime._json_bytes({
         **runtime._runtime_identity(pins), "recovery_attempt_id": recovery_attempt_id,
         "challenge_sha256": challenge_sha256, "postgres": observed,

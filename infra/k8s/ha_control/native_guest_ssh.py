@@ -330,7 +330,7 @@ class GuestSshDispatcher:
                       bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_OBSERVE_PREPARATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
                       bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET,
                       bridge.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS, bridge.GUEST_QUIESCE_INITIAL_RECOVERY,
-                      bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, bridge.GUEST_OBSERVE_CAR_ISOLATION},
+                      bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, bridge.GUEST_OBSERVE_CAR_ISOLATION, bridge.GUEST_START_INITIAL_RECOVERY},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -473,6 +473,12 @@ class GuestSshDispatcher:
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY
                      and request.node == "A" and callable(assert_windows_closed), error)
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_closed)
+
+    def start_initial_recovery(self, request, deadline, *, assert_windows_current):
+        error = "guest_ssh_initial_recovery_unbound"
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_START_INITIAL_RECOVERY
+                     and request.node == "A" and callable(assert_windows_current), error)
+        return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
     def observe_initial_recovery_hold(self, request, deadline):
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
@@ -671,6 +677,8 @@ class GuestSshDispatcher:
                     boundaries = bridge.PREPARATION_BOUNDARIES
                 elif request.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY:
                     boundaries = bridge.QUIESCENCE_BOUNDARIES
+                elif request.verb == bridge.GUEST_START_INITIAL_RECOVERY:
+                    boundaries = bridge.RECOVERY_START_BOUNDARIES
                 output = _activation_exchange(
                     command, payload, limit, request.nonce, assert_windows_current,
                     bind_boundary=request.verb != "activate",

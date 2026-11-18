@@ -26,11 +26,11 @@ from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     rejoin_wal_evidence,
-    ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
+    ACTIVATION_GUEST_CHECK_SECONDS, ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_OBSERVE_REPLACEMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
     GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, QUIESCENCE_BOUNDARIES,
-    GUEST_TRANSITION_TARGET,
+    GUEST_TRANSITION_TARGET, GUEST_START_INITIAL_RECOVERY, RECOVERY_START_ORDER,
     GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, INITIAL_RECOVERY_HOLD, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -47,6 +47,7 @@ VERBS = {
     GUEST_QUIESCE_INITIAL_RECOVERY,
     GUEST_OBSERVE_INITIAL_RECOVERY_HOLD,
     GUEST_OBSERVE_CAR_ISOLATION,
+    GUEST_START_INITIAL_RECOVERY,
     GUEST_PREFLIGHT_REPLACEMENT,
     GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
@@ -365,6 +366,110 @@ def _assert_car_route_blocked(request, raw, prepared, active):
     except FileNotFoundError:
         return
     raise TransitionBlocked(error)
+
+
+def start_initial_recovery(request, assert_windows_current):
+    """Restart the installed containers while retaining the recovery hold."""
+    error = "guest_initial_recovery_start_unverified"
+    _need(callable(assert_windows_current), error)
+    with _guest_mutation_descriptor():
+        raw, hold, prepared, active = _read_initial_recovery_hold(request)
+        args = request.args
+        _need(_digest(raw) == args["hold_sha256"], error)
+        stage = ROOT / request.binding.attempt_id
+        prefix = "recovery-" + args["recovery_attempt_id"] + "-start-"
+        intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
+                                                 for name in ("intent", "progress", "done"))
+        _need(not any(os.path.lexists(path) for path in (intent_path, progress_path, done_path)), error)
+        containers = hold["containers"]
+        _need(set(containers) == set(RECOVERY_START_ORDER), error)
+        baseline = (hold["container_contracts"], args["protected_inventory_sha256"])
+        _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
+                                    set(containers), baseline)
+        worker = GuestWorker(request)
+        postgres, pins, _ = worker._prepared_pins(prepared["manifest_sha256"])
+        _need(pins.installation_id == args["installation_id"] and pins.node == "A"
+              and pins.attempt_id == request.binding.attempt_id, error)
+        authorities = {runtime.ROOT / name: pin for name, pin in active["authority_files"].items()}
+        _need(set(authorities) == set(live._authority_paths().values()), error)
+        started = set()
+
+        def unchanged():
+            _need(_read_initial_recovery_hold(request)[:2] == (raw, hold), error)
+            _assert_car_route_blocked(request, raw, prepared, active)
+            _need(all(_digest(runtime._read(path, 0, {0o444})) == pin
+                      for path, pin in authorities.items()), error)
+            contract, _ = _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
+                                                      None, baseline)
+            _need(all(contract[role]["started_at"] != hold["container_contracts"][role]["started_at"]
+                      for role in started), error)
+            current = runtime._inventory()
+            _need(all(current[value["container_id"]]["State"]["Running"] is (role in started)
+                      for role, value in containers.items()), error)
+
+        def check(boundary):
+            deadline = time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS
+            unchanged()
+            challenge = _digest(_bytes({"request": _scope(request), "hold_sha256": args["hold_sha256"],
+                                       "boundary": boundary}))
+            proof = assert_windows_current(challenge, boundary)
+            _need(_hash(proof) and time.monotonic() < deadline, error)
+            unchanged()
+            # All Docker and file observations precede the final DB-clock sample.
+            # The sample promises >1s remaining; dispatch has strictly <0.5s
+            # measured before that read, accounting for time spent sampling.
+            dispatch_deadline = min(deadline, time.monotonic() + 0.5)
+            local = live.observe_recovered_a_lease(
+                pins, postgres, recovery_attempt_id=args["recovery_attempt_id"], challenge_sha256=challenge,
+                deadline=dispatch_deadline, minimum_remaining_seconds=1)
+            _need(_hash(local) and time.monotonic() < dispatch_deadline, error)
+            return {"windows_proof_sha256": proof, "guest_proof_sha256": local}, dispatch_deadline
+
+        def fresh(deadline):
+            _need(time.monotonic() < deadline, error)
+
+        proof, deadline = check("recovery_start_intent")
+        intent = _bytes({"schema_version": 1, "status": "INTENT", **_scope(request), "args": args,
+                         "containers": containers, "authority_files": active["authority_files"],
+                         "proof": proof, "automatic_retry_permitted": False})
+        fresh(deadline)
+        runtime._write(intent_path, intent)
+        context, leaf = activation._tls(prepared)
+        raw_spec = runtime._read(stage / "guest-spec.json", 0, {0o400, 0o600})
+        _need(_digest(raw_spec) == pins.spec_sha256, error)
+        spec = json.loads(raw_spec)
+        address = spec["guest_ip"]
+        _need(address == spec["pg_a"] and spec["node"] == "A", error)
+        try:
+            for role in RECOVERY_START_ORDER:
+                _, deadline = check("recovery_before:" + role)
+                _need(runtime._read(intent_path, 0, {0o600}) == intent, error)
+                fresh(deadline)
+                # Record the candidate before dispatch so an uncertain start is also stopped.
+                started.add(role)
+                runtime._docker("start", containers[role]["container_id"], timeout=30)
+                proof, deadline = check("recovery_after:" + role)
+                fresh(deadline)
+                runtime._write(stage / (prefix + "progress-" + role + ".json"), _bytes({"intent_sha256": _digest(intent),
+                    "started": sorted(started), "proof": proof}))
+                if role in SERVICES:
+                    activation._wait_for_app(context, leaf, address, role, expected_node="A")
+                check("recovery_ready:" + role)
+            proof, deadline = check("recovery_started")
+            _need(runtime._read(intent_path, 0, {0o600}) == intent, error)
+            result = _bytes({"schema_version": 1, "status": "STARTED", "intent_sha256": _digest(intent),
+                             "hold_sha256": args["hold_sha256"], "started": list(RECOVERY_START_ORDER),
+                             "proof": proof, "automatic_retry_permitted": False})
+            fresh(deadline)
+            runtime._write(done_path, result)
+            return Receipt("PASS", _digest(result))
+        except Exception:
+            # Intent and hold survive; only this attempt's pinned workloads are stopped.
+            if started:
+                runtime._docker("stop", "--signal=SIGTERM", "--timeout=-1",
+                                *[containers[role]["container_id"] for role in reversed(RECOVERY_START_ORDER)
+                                  if role in started], timeout=30)
+            raise
 
 
 def observe_initial_recovery_hold(request):
@@ -1231,6 +1336,8 @@ def handle(request, assert_windows_current=None):
             return observe_initial_recovery_hold(request)
         if request.verb == GUEST_OBSERVE_CAR_ISOLATION:
             return observe_car_isolation(request)
+        if request.verb == GUEST_START_INITIAL_RECOVERY:
+            return start_initial_recovery(request, assert_windows_current)
         if request.verb == GUEST_QUIESCE_INITIAL_RECOVERY:
             _need(callable(assert_windows_current), "guest_worker_live_windows_required")
 
