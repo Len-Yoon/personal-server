@@ -378,6 +378,27 @@ class TransitionIngressTests(unittest.TestCase):
         self.assertEqual(limit, deadline)
         self.assertIs(guests.observe_generation_activation.call_args.kwargs["assert_guard"], guard)
 
+    def test_initial_roundtrip_supplies_both_verified_routes_before_dispatch(self):
+        main, car = MagicMock(), MagicMock()
+        caddy_inputs, relay_inputs = {"intent_sha256": "a"*64}, {"route_sha256": "b"*64}
+        options = dict(caddy_directory="/private/caddy", caddy_inputs=caddy_inputs,
+                       relay_path="/private/relay/Caddyfile", relay_inputs=relay_inputs,
+                       failover={}, prepare_return=MagicMock())
+        with patch.object(transition_ingress, "switch_roundtrip") as switch:
+            car.observe_initial.side_effect = TransitionBlocked("car_relay_initial_unconfirmed")
+            with self.assertRaisesRegex(TransitionBlocked, "car_relay_initial_unconfirmed"):
+                transition_ingress.switch_initial_roundtrip(main, car, **options)
+            switch.assert_not_called()
+            car.observe_initial.side_effect = None
+            outcome = transition_ingress.switch_initial_roundtrip(main, car, **options)
+            main.observe_initial_ingress.assert_called_with(options["caddy_directory"], **caddy_inputs)
+            car.observe_initial.assert_called_with(main.observe_initial_ingress.return_value, options["relay_path"],
+                                                 **relay_inputs)
+            switch.assert_called_once_with(main, car, main.observe_initial_ingress.return_value,
+                                           car.observe_initial.return_value,
+                                           failover=options["failover"], prepare_return=options["prepare_return"])
+            self.assertIs(outcome, switch.return_value)
+
     def test_roundtrip_uses_verified_b_service_routes_and_closure_for_return(self):
         switcher = transition_ingress
         gen_b, gen_a = ServingGeneration("B", 2, 2, 3), ServingGeneration("A", 3, 3, 4)
@@ -829,7 +850,8 @@ class CarCallbackOriginTests(unittest.TestCase):
             def inspect():
                 return {
                     'Id': current['id'], 'Name': '/' + relay.NAME, 'Image': image,
-                    'State': {'Running': current['running'], 'Status': 'running' if current['running'] else 'exited'},
+                    'State': {'Running': current['running'], 'Status': 'running' if current['running'] else 'exited',
+                              'StartedAt': 'fixture-start'},
                     'Config': {'User': '10001:10001', 'Entrypoint': ['/usr/bin/caddy'], 'Labels': current['labels'],
                                'Cmd': ['run', '--config', caddy.CONFIG, '--adapter', 'caddyfile']},
                     'HostConfig': {'ReadonlyRootfs': True, 'Privileged': False, 'LogConfig': {'Type': 'none'},
@@ -876,6 +898,20 @@ class CarCallbackOriginTests(unittest.TestCase):
                 return b''
 
             instance = relay.CallbackRuntime(docker)
+            active = caddy.ActiveCaddy(SimpleNamespace(baseline={'image': image},
+                                                       mtls_volume_sha256=caddy._pin(volume),
+                                                       mtls_files_sha256=caddy._pin(fingerprints)),
+                                       {}, b'', a, previous.container_sha256)
+            pins = dict(route_pin=old_pin, route_sha256=caddy._sha(old_path.read_bytes()),
+                        started_sha256=caddy._sha(b'fixture-start'), network=network, address=address)
+            self.assertEqual(instance.observe_initial(active, old_path, **pins), previous)
+            for rule in ('route_sha256', 'started_sha256'):
+                with self.assertRaisesRegex(TransitionBlocked, 'car_relay_initial_unconfirmed'):
+                    instance.observe_initial(active, old_path, **(pins | {rule: '0'*64}))
+            for moved in ({'network': '9'*64}, {'address': '172.20.0.5'}):
+                with self.assertRaisesRegex(TransitionBlocked, 'car_relay_network_unconfirmed'):
+                    instance.observe_initial(active, old_path, **(pins | moved))
+            self.assertTrue(all(args[0] in {'ps', 'inspect', 'network', 'volume', 'exec'} for args in calls))
             proof = MagicMock(side_effect=['5' * 64, '6' * 64, '7' * 64])
             with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
                 instance.replace(previous, b, new_pin, root, assert_guard=MagicMock(), verify_origin=proof)

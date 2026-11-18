@@ -531,6 +531,14 @@ def _assert_roundtrip_leg(result, planned):
                 and result.generation.revision >= planned.revision, error)
 
 
+def switch_initial_roundtrip(main, car, *, caddy_directory, caddy_inputs, relay_path, relay_inputs,
+                             failover, prepare_return):
+    """Verify both original ingress routes before entering the A→B→A workflow."""
+    previous = main.observe_initial_ingress(caddy_directory, **caddy_inputs)
+    relay = car.observe_initial(previous, relay_path, **relay_inputs)
+    return switch_roundtrip(main, car, previous, relay, failover=failover, prepare_return=prepare_return)
+
+
 def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
     """Run A→B, then derive B→A from the verified serving generation."""
     error = "transition_roundtrip_unbound"
