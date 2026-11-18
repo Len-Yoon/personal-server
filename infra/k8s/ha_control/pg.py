@@ -226,6 +226,21 @@ class PgBackend:
             _deny("source_fence_wal_record_required")
         return max(checkpoint, self._promotion_replay_floor())
 
+    def _uses_replica_fence_wal(self):
+        return (self.plan.get("profile") == "enforced-vm-v1"
+                and not self.plan.get("source_lease_close_required", False))
+
+    def _recorded_promotion_floor(self, state):
+        if self.plan.get("source_lease_close_required", False):
+            return self._planned_promotion_floor(state)
+        floor = self._promotion_replay_floor()
+        if self._uses_replica_fence_wal():
+            received = state.get("replica_fence_wal")
+            if type(received) is not int or not 0 < received < 2**64:
+                _deny("replica_fence_wal_record_required")
+            return max(received, floor)
+        return floor
+
     def _promotion_replay_floor(self):
         if self.plan.get("profile") != "enforced-vm-v1" and "required_replay_lsn" not in self.plan:
             return None
@@ -324,6 +339,8 @@ class PgBackend:
                     or type(status[1]) is not int or status[1] != state["timeline"]
                     or self._lsn(value["replay"]) > self._lsn(status[2])):
                 _deny("promotion_replay_identity_unconfirmed")
+            if self._uses_replica_fence_wal():
+                value["received_wal"] = value["flush"]
             value = {**value, "actual_timeline": status[1], "flush": status[2]}
         if type(value.get("actual_timeline")) is not int or value["actual_timeline"] < state["timeline"]:
             _deny("pg_identity_mismatch")
@@ -471,6 +488,7 @@ class PgBackend:
         self._recorded_primary(value, state)
 
     def _prove_promotion_fork(self, value, state):
+        floor = self._recorded_promotion_floor(state)
         timeline = value["actual_timeline"]
         if type(timeline) is not int or not 1 < timeline < 2**32:
             _deny("promotion_fork_unconfirmed")
@@ -484,8 +502,6 @@ class PgBackend:
         if (not history or len(history) != 2 or history[0] != f"{timeline:08X}.history"
                 or not isinstance(history[1], str) or not 0 < len(history[1]) <= 1048576):
             _deny("promotion_fork_unconfirmed")
-        floor = (self._planned_promotion_floor(state) if self.plan.get("source_lease_close_required", False)
-                 else self._promotion_replay_floor())
         entries = [line.split() for line in history[1].splitlines() if line.strip() and not line.lstrip().startswith("#")]
         if (not entries or len(entries[-1]) < 2 or entries[-1][0] != str(state["timeline"])
                 or not re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", entries[-1][1])
@@ -610,7 +626,7 @@ class PgBackend:
         self._local_metadata(state["target"], state, promoted=True)
         return True
 
-    def promote(self, state):
+    def promote(self, state, *, record_replica_wal=None):
         self.bind(state)
         self._promotion_intent(state)
         if not self.fenced(state):
@@ -623,6 +639,18 @@ class PgBackend:
                          else self._promotion_replay_floor())
                 if floor is not None and self._lsn(value["replay"]) < floor:
                     _deny("promotion_replay_floor_not_reached")
+                if self._uses_replica_fence_wal():
+                    received = self._lsn(value["received_wal"])
+                    flush = self._lsn(value["flush"])
+                    if (value["fsync"] is not True or value["full_page_writes"] is not True
+                            or not 0 < received < 2**64 or not 0 < flush < 2**64):
+                        _deny("replica_fence_wal_unconfirmed")
+                    floor = max(floor, received, flush, state.get("replica_fence_wal", 0))
+                    if self._lsn(value["replay"]) < floor:
+                        _deny("replica_fence_wal_not_replayed")
+                    if record_replica_wal is None:
+                        _deny("replica_fence_wal_record_required")
+                    record_replica_wal(floor)
                 started = time.monotonic()
                 if not self.fenced(state):
                     _deny("positive_fence_required")
@@ -713,8 +741,7 @@ class PgBackend:
         self._pair(primary, peer, state)
         self._require_closed_lease(primary)
         self._require_closed_lease(peer)
-        floor = (self._planned_promotion_floor(state) if self.plan.get("source_lease_close_required", False)
-                 else self._promotion_replay_floor())
+        floor = self._recorded_promotion_floor(state)
         if self._lsn(peer["replay"]) < max(floor or 0, self._lsn(primary["flush"])):
             _deny("replacement_standby_replay_not_current")
         if not self.fenced(state):
@@ -732,6 +759,8 @@ class PgBackend:
             primary = self._read(state["target"], state)
             peer = self._read(state["old"], state)
             self._pair(primary, peer, state)
+            if self._uses_replica_fence_wal() and self._lsn(peer["replay"]) < self._recorded_promotion_floor(state):
+                _deny("replacement_standby_replay_not_current")
             return True
         except TransitionBlocked:
             return False

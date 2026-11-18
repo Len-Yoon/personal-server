@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
@@ -913,11 +913,11 @@ class PGControlTests(unittest.TestCase):
 
     def test_enforced_unplanned_promotion_checks_authenticated_fork_at_approved_floor(self):
         self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/30")
-        state = dict(self.state, phase="promoting")
+        state = dict(self.state, phase="promoting", replica_fence_wal=0x31)
         promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
         connection = MagicMock()
         with patch.object(self.backend, "_connection", return_value=nullcontext(connection)) as connect:
-            for history in ("1\t0/2F\tbelow floor\n", "3\t0/30\twrong parent\n"):
+            for history in ("1\t0/30\tbelow recorded floor\n", "3\t0/31\twrong parent\n"):
                 with self.subTest(history=history):
                     connection.execute.return_value.fetchone.side_effect = [
                         ("123", 2, "0/80", "ha"), ("00000002.history", history),
@@ -925,10 +925,28 @@ class PGControlTests(unittest.TestCase):
                     with self.assertRaisesRegex(TransitionBlocked, "promotion_fork_unconfirmed"):
                         self.backend._promoted_history(promoted, state)
             connection.execute.return_value.fetchone.side_effect = [
-                ("123", 2, "0/80", "ha"), ("00000002.history", "1\t0/30\tvalid parent\n"),
+                ("123", 2, "0/80", "ha"), ("00000002.history", "1\t0/31\tvalid parent\n"),
             ]
             self.backend._promoted_history(promoted, state)
             connect.assert_called_with("B", replication=True)
+
+    def test_unplanned_promote_records_replayed_replica_wal_before_dispatch(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        self.primary, self.peer = MagicMock(), MagicMock()
+        state = dict(self.state, phase="promoting")
+        replica = dict(self.candidate(), received_wal="0/31", flush="0/30", replay="0/30")
+        order = MagicMock()
+        with (patch.object(self.backend, "_connection", side_effect=self.fake_connection),
+              patch.object(self.backend, "_observe", side_effect=lambda *_: replica),
+              patch.object(self.backend, "promoted", return_value=True)):
+            with self.assertRaisesRegex(TransitionBlocked, "replica_fence_wal_not_replayed"):
+                self.backend.promote(state, record_replica_wal=order.record)
+            self.primary.execute.assert_not_called()
+            order.record.assert_not_called()
+            replica.update(flush="0/31", replay="0/31")
+            self.primary.execute = order.execute
+            self.backend.promote(state, record_replica_wal=order.record)
+            self.assertEqual(order.mock_calls, [call.record(0x31), call.execute("SELECT pg_promote(true,1)")])
 
     def test_disconnected_standby_uses_replay_timeline_without_substituting_flush(self):
         self.backend.plan["required_replay_lsn"] = "0/21"
@@ -998,6 +1016,21 @@ class PGControlTests(unittest.TestCase):
         with patch.object(self.backend, "_read", side_effect=[primary, peer]) as read:
             self.assertEqual(self.backend.assert_rejoin_synchronized(state), primary["revision"])
             self.assertEqual([call.args[0] for call in read.call_args_list], ["B", "A"])
+
+    def test_unplanned_rejoin_cannot_drop_the_recorded_replica_floor(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        state = dict(self.state, phase="rejoining", replica_fence_wal=0x31)
+        primary = dict(self.observation(), remaining=-1)
+        peer = dict(primary, node="ha_A", recovery=True, replay="0/30")
+
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]):
+            self.assertFalse(self.backend.rejoined(state))
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]):
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_standby_replay_not_current"):
+                self.backend.assert_rejoin_synchronized(state)
+        peer["replay"] = "0/31"
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]):
+            self.assertTrue(self.backend.rejoined(state))
 
     def test_pair_rejects_async_wrong_timeline_role_revision_and_wrong_node(self):
         good, peer = self.observation(), self.observation("A", recovery=True)

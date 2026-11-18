@@ -64,9 +64,12 @@ class Journal:
                     or (sys.platform != "win32" and (info.st_uid != os.geteuid() or info.st_mode & 0o077))):
                 raise ValueError()
             value = json.loads(self.path.read_text())
-            if (set(value) - {"source_fence_wal", "lease_heartbeat"}
+            if (set(value) - {"source_fence_wal", "replica_fence_wal", "lease_heartbeat"}
                     != {"cluster", "generation", "old", "target", "phase", "attempts", "timeline"}
                     or ("source_fence_wal" in value and not self._valid_wal(value["source_fence_wal"]))
+                    or ("replica_fence_wal" in value and (
+                        "source_fence_wal" in value or value["phase"] == "fencing"
+                        or not self._valid_wal(value["replica_fence_wal"])))
                     or value["old"] not in {"A", "B"} or value["target"] not in {"A", "B"}
                     or value["old"] == value["target"] or not isinstance(value["cluster"], str)
                     or not value["cluster"] or type(value["generation"]) is not int or value["generation"] < 1
@@ -99,6 +102,14 @@ class Journal:
         if state["phase"] != "fencing" or not self._valid_wal(wal) or self.read() != state:
             raise TransitionBlocked("source_fence_wal_record_invalid")
         updated = state | {"source_fence_wal": max(state.get("source_fence_wal", 0), wal)}
+        self.save(updated)
+        state.update(updated)
+
+    def record_replica_fence_wal(self, state, wal):
+        if (state["phase"] != "promoting" or "source_fence_wal" in state
+                or not self._valid_wal(wal) or self.read() != state):
+            raise TransitionBlocked("replica_fence_wal_record_invalid")
+        updated = state | {"replica_fence_wal": max(state.get("replica_fence_wal", 0), wal)}
         self.save(updated)
         state.update(updated)
 
@@ -201,7 +212,9 @@ class Controller:
                     if not self.backend.fenced(state):
                         raise TransitionBlocked("fence_lost_before_promotion")
                     if not self.backend.promoted(state):
-                        self.backend.promote(state)
+                        self.backend.promote(
+                            state, record_replica_wal=lambda wal: self.journal.record_replica_fence_wal(state, wal),
+                        )
                     if not self.backend.promoted(state):
                         raise TransitionBlocked("promotion_unconfirmed")
                     state["phase"] = "rejoining"

@@ -987,7 +987,7 @@ class Backend:
         if self.failure != "fence": self.stopped = True
         if self.failure == "fence_unknown": raise OSError("unknown")
     def promoted(self, state): return self.primary
-    def promote(self, state):
+    def promote(self, state, *, record_replica_wal=None):
         self.actions.append("promote")
         self.primary = True
         if self.failure == "promote_unknown": raise OSError("unknown")
@@ -1096,6 +1096,26 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(TransitionBlocked): self.control.advance()
         self.backend.failure = None
         Controller(self.path, self.backend).advance()
+        self.assertEqual(self.backend.actions.count("promote"), 1)
+
+    def test_replica_wal_is_saved_before_promotion_and_survives_a_lost_response(self):
+        promote = self.backend.promote
+        self.backend.failure = "promote_unknown"
+
+        def promote_with_record(state, *, record_replica_wal):
+            record_replica_wal(0x31)
+            record_replica_wal(0x30)
+            durable = Journal(self.path).read()
+            self.assertEqual(durable["replica_fence_wal"], 0x31)
+            self.assertNotIn("source_fence_wal", durable)
+            promote(state)
+
+        with patch.object(self.backend, "promote", side_effect=promote_with_record):
+            with self.assertRaises(TransitionBlocked):
+                self.control.advance()
+        self.backend.failure = None
+        state = Controller(self.path, self.backend).advance()
+        self.assertEqual(state["replica_fence_wal"], 0x31)
         self.assertEqual(self.backend.actions.count("promote"), 1)
 
     def test_rejoin_or_proof_failure_keeps_writes_closed(self):

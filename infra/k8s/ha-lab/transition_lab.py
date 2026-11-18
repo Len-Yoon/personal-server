@@ -150,7 +150,7 @@ class LocalBackend:
     def promoted(self, state):
         return self.f.psql_at(self.target, "SELECT NOT pg_is_in_recovery()") == "t"
 
-    def promote(self, state):
+    def promote(self, state, *, record_replica_wal=None):
         if not self.fenced(state):
             raise TransitionBlocked("positive_fence_required")
         if self.f.psql_at(self.target, "SELECT pg_promote(true,5)") != "t":
