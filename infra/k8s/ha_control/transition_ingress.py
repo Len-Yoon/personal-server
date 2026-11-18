@@ -302,6 +302,20 @@ class CompletedTransition:
     activation_sha256: str | None = None
 
 
+def _transition_wal_key(template, verify_crash_source, scope, deadline):
+    error = "transition_crash_source_unconfirmed"
+    if template.get("source_lease_close_required") is True:
+        caddy._need("crash_source_sha256" not in template and verify_crash_source is None, error)
+        return "source_fence_wal"
+    expected = template.get("crash_source_sha256")
+    caddy._need(template.get("source_lease_close_required") is False
+                and bridge._hash(expected) and callable(verify_crash_source), error)
+    bridge._remaining(deadline)
+    caddy._need(verify_crash_source(scope, deadline) == expected, error)
+    bridge._remaining(deadline)
+    return "replica_fence_wal"
+
+
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
@@ -309,7 +323,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          guests, target_request,
                          replacement_manifest_sha256, generation_handoff_pins, stage_service,
                          isolated_replacement, attach_replacement_network, resume_rejoin=None,
-                         prepare_guest_runtime=False, verify_public=_public_health):
+                         prepare_guest_runtime=False, verify_crash_source=None, verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
     After a lost guest response, supply fresh request sequences and nonces
@@ -326,7 +340,10 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 "transition_ingress_controller_unbound")
     template = parse(raw)
     caddy._need(type(template) is dict and template.get("generation") == generation.epoch
-                and template.get("node") == generation.partner and template.get("source_lease_close_required") is True, "transition_ingress_controller_unbound")
+                and template.get("node") == generation.partner
+                and type(template.get("source_lease_close_required")) is bool, "transition_ingress_controller_unbound")
+    if template["source_lease_close_required"] is False:
+        caddy._need(prepare_guest_runtime is True, "transition_crash_source_unconfirmed")
     caddy._need(bridge._hash(replacement_manifest_sha256) and callable(generation_handoff_pins)
                 and type(isolated_replacement) is dict
                 and {"endpoint", "known_hosts"} <= set(isolated_replacement)
@@ -372,6 +389,11 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     with execution.guard(main, car):
         observer_binding = None
         deadline = min(observer_setup["deadline"], controller_setup["deadline"])
+        crash_scope = {"attempt_id": execution.spec["attempt_id"], "legacy_plan": legacy_plan,
+                       "legacy_attempt": legacy_attempt, "previous_runtime_sha256": previous_runtime_sha256,
+                       "source_vm_id": controller_setup["old_vm_id"], "source_node": generation.partner,
+                       "next_generation": generation.epoch, "next_timeline": generation.timeline}
+        wal_key = _transition_wal_key(template, verify_crash_source, crash_scope, deadline)
         start_intent = execution.directory / "replacement-start-intent.json"
         network_intent = execution.directory / "replacement-network-intent.json"
         attachment_pending = resume_rejoin is not None and os.path.lexists(network_intent)
@@ -423,10 +445,12 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                         "transition_ingress_controller_unbound")
             assert_legacy_closed()
         _bind_rejoin_controller(execution, controller, parameters, resume=resume_rejoin is not None)
+        if wal_key == "replica_fence_wal":
+            _transition_wal_key(template, verify_crash_source, crash_scope, deadline)
         stage, replay_floor, check_stage, check_sync = _windows_rejoin(
             controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],
             root=controller_setup["root"], deadline=deadline, resume=resume_rejoin is not None,
-            stage_required=attachment_pending,
+            stage_required=attachment_pending, wal_key=wal_key,
         )
         network_error = "transition_replacement_network_unconfirmed"
         caddy._need(check_stage(deadline) == stage, network_error)
@@ -465,7 +489,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             caddy._need(publish_sequence <= bridge.MAX_REQUESTS - 10, "transition_ingress_controller_unbound")
             pins = _prepare_target_generation(
                 guests, target_request.binding, publish_sequence, generation, pins, stage, replay_floor, deadline,
-                check_sync=check_sync, assert_legacy_closed=assert_legacy_closed,
+                check_sync=check_sync, assert_legacy_closed=assert_legacy_closed, wal_key=wal_key,
             )
             publish_sequence += 2  # Reserve a sequence for an uncertain preparation readback.
 

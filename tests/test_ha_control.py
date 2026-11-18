@@ -504,6 +504,23 @@ class TransitionIngressTests(unittest.TestCase):
             else:
                 starter.restore_rejoin_args.assert_not_called()
 
+    def test_crash_mode_requires_plan_bound_readiness_verification(self):
+        choose = transition_ingress._transition_wal_key
+        plan = {"source_lease_close_required": False, "crash_source_sha256": "a"*64}
+        scope = {"source_vm_id": "exact-vm", "source_node": "A"}
+        deadline = float("inf")
+        verify = MagicMock(return_value="a"*64)
+        self.assertEqual(choose(plan, verify, scope, deadline), "replica_fence_wal")
+        verify.assert_called_once_with(scope, deadline)
+        self.assertEqual(choose({"source_lease_close_required": True}, None, scope, deadline), "source_fence_wal")
+        for template, verifier in (
+            (plan, None), (plan, lambda *_: "b"*64),
+            ({"source_lease_close_required": False}, verify),
+            ({"source_lease_close_required": True, "crash_source_sha256": "a"*64}, None),
+        ):
+            with self.subTest(template=template), self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+                choose(template, verifier, scope, deadline)
+
     def test_replica_wal_type_survives_windows_readback_and_guest_preparation(self):
         from ha_control.native_guest_activation import ActivationPins
 
