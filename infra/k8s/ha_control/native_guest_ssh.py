@@ -513,7 +513,7 @@ class GuestSshDispatcher:
             bridge._need(bridge._wal_pin(result['source_fence_wal']), 'guest_ssh_replacement_replication_unconfirmed')
             expected['source_fence_wal'] = result['source_fence_wal']
         bridge._need(bridge._matches(result, expected), 'guest_ssh_replacement_replication_unconfirmed')
-        return receipt
+        return receipt, revision
 
     def _replacement(self, request, deadline, verb, assert_rejoin_current):
         bridge._need(type(request) is bridge.Request and request.verb == verb

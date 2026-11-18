@@ -110,7 +110,7 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
                                                           check_synchronized=lambda _: result)
             self.assertEqual(dispatcher.confirm_replacement_rejoin(
                 request, 100, assert_rejoin_current=guard, check_synchronized=lambda _: proof,
-            ), receipt)
+            ), (receipt, proof["revision"]))
             observe.assert_called_with(request, 100, assert_rejoin_current=guard)
 
     def test_worker_runs_only_boot_and_stage_bound_standby_package(self):

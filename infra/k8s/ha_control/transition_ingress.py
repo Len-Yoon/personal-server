@@ -171,11 +171,13 @@ def _rejoin_replacement(execution, guests, generation, target_request, start, ob
         except (bridge.BridgeRejected, TimeoutExpired, OSError):
             # The guest may have started. Only observation may settle that outcome.
             pass
-    receipt = guests.confirm_replacement_rejoin(
+    receipt, revision = guests.confirm_replacement_rejoin(
         observe, deadline, assert_rejoin_current=check_stage, check_synchronized=check_sync,
     )
-    caddy._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256),
+    caddy._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256)
+                and type(revision) is int and generation.revision <= revision < 2**63,
                 "transition_replacement_replication_unconfirmed")
+    return revision
 
 
 def _bind_rejoin_controller(execution, controller, parameters, *, resume):
@@ -247,7 +249,8 @@ def _prepare_target_generation(guests, binding, sequence, generation, pins, stag
         observed = check_sync(limit)
         caddy._need(type(observed) is dict and observed.get("rejoin_stage_sha256") == stage
                     and observed.get("source_fence_wal") == source_wal and observed.get("standby_rejoined") is True
-                    and observed.get("authority_opened") is False,
+                    and observed.get("authority_opened") is False
+                    and type(observed.get("revision")) is int and observed["revision"] == generation.revision,
                     "transition_replacement_replication_unconfirmed")
         bridge._remaining(limit)
         return bridge._digest(bridge._bytes({
@@ -304,10 +307,12 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
     After a lost guest response, supply fresh request sequences and nonces
     against the same binding. The recorded start intent suppresses replay.
     Preflight uses isolated transport with the same guest boot and host key.
+    The input revision is a lower bound until closed PostgreSQL rejoin is verified.
     The network adapter must verify or adopt an already completed attachment
     on resume, without connecting the fenced VM.
     """
     _route_scope(previous, relay, generation, target, route_pin, execution.spec["plan_sha256"], execution.spec["attempt_id"])
+    caddy._need(generation.revision < 2**63, "transition_ingress_scope_invalid")
     raw = observer_setup["plan_raw"]
     caddy._need(type(raw) is bytes and 0 < len(raw) <= 1048576 and caddy._sha(raw) == observer_setup["plan_sha256"],
                 "transition_ingress_controller_unbound")
@@ -441,8 +446,11 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                                     nonce=secrets.token_hex(32), args=args)
         replacement_observe = replace(replacement_start, verb=bridge.GUEST_OBSERVE_REPLACEMENT,
                                       sequence=replacement_start.sequence + 1, nonce=secrets.token_hex(32))
-        _rejoin_replacement(execution, guests, generation, target_request, replacement_start, replacement_observe,
-                            replacement_vm["installation_id"], check_stage, check_sync, deadline)
+        revision = _rejoin_replacement(
+            execution, guests, generation, target_request, replacement_start, replacement_observe,
+            replacement_vm["installation_id"], check_stage, check_sync, deadline,
+        )
+        generation = replace(generation, revision=revision)
 
         publish_sequence = replacement_observe.sequence + 1
         if prepare_guest_runtime:
@@ -514,6 +522,15 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                                        observer_binding, activated.receipt_sha256)
 
 
+def _assert_roundtrip_leg(result, planned):
+    error = "transition_roundtrip_unbound"
+    caddy._need(type(result) is CompletedTransition and type(result.generation) is ServingGeneration
+                and type(result.observer_binding) is dict, error)
+    result.generation.validate()
+    caddy._need(replace(result.generation, revision=planned.revision) == planned
+                and result.generation.revision >= planned.revision, error)
+
+
 def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
     """Run A→B, then derive B→A from the verified serving generation."""
     error = "transition_roundtrip_unbound"
@@ -525,8 +542,7 @@ def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
     caddy._need(type(main) is caddy.CaddyRuntime and main.execution is None and not main.attempted, error)
     return_main = caddy.CaddyRuntime(main.root, main.project, run=main.run)
     first = switch_with_observer(main=main, car=car, previous=previous, relay=relay, **failover)
-    caddy._need(type(first) is CompletedTransition and first.generation == failover["generation"]
-                and type(first.observer_binding) is dict, error)
+    _assert_roundtrip_leg(first, failover["generation"])
     returned = prepare_return(first)
     prior = failover["controller_setup"]
     old_starter = prior["starter"]
@@ -560,8 +576,13 @@ def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
             previous_old_vm_id=prior["old_vm_id"], live_sha256=prior["live_sha256"], deadline=deadline,
         )
 
-    returned = returned | {"stage_service": returned["stage_service"] | {"close_previous_service": close_previous}}
+    revision_floor = max(generation.revision, first.generation.revision + 1)
+    caddy._need(revision_floor < 2**63, error)
+    generation = replace(generation, revision=revision_floor)
+    returned = returned | {
+        "generation": generation,
+        "stage_service": returned["stage_service"] | {"close_previous_service": close_previous},
+    }
     second = switch_with_observer(main=return_main, car=car, previous=first.active, relay=first.relay, **returned)
-    caddy._need(type(second) is CompletedTransition and second.generation == generation
-                and type(second.observer_binding) is dict, error)
+    _assert_roundtrip_leg(second, generation)
     return first, second

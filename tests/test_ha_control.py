@@ -122,6 +122,7 @@ class TransitionIngressTests(unittest.TestCase):
         from ha_runtime.seven_capture import encoded
 
         generation = ServingGeneration("B", 2, 2, 2)
+        observed_generation = replace(generation, revision=6)
         pg_nodes = {"A": {"host": "192.168.40.11"}, "B": {"host": "192.168.40.12"}}
         candidate = encoded({"generation": 2, "node": "A", "source_lease_close_required": True,
                              "pg_nodes": pg_nodes})
@@ -134,7 +135,7 @@ class TransitionIngressTests(unittest.TestCase):
         @contextmanager
         def open_controller(plan, serving, *, attempt, **options):
             self.assertEqual(plan, controller)
-            self.assertEqual(serving, generation)
+            self.assertEqual(serving, observed_generation)
             self.assertEqual(attempt, execution.spec["attempt_id"])
             steps.append("controller")
             self.assertEqual(options["publish_handoff"](serving, "5"*64, 50), "6"*64)
@@ -188,7 +189,7 @@ class TransitionIngressTests(unittest.TestCase):
         check_stage = MagicMock(side_effect=lambda _: steps.append("fence-proof") or stage)
         prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
         def switch_routes(*_args, **kwargs):
-            self.assertEqual(kwargs["verify_guest"](generation, "target"), "9"*64)
+            self.assertEqual(kwargs["verify_guest"](observed_generation, "target"), "9"*64)
             steps.append("ingress")
             return None, None, {}
 
@@ -204,7 +205,8 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress.caddy, "_sync_dir"), \
                 patch.object(transition_ingress, "_bind_rejoin_controller"), \
                 patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, 8, check_stage, MagicMock())), \
-                patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
+                patch.object(transition_ingress, "_rejoin_replacement",
+                             side_effect=lambda *_: steps.append("rejoin") or observed_generation.revision), \
                 patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
@@ -283,6 +285,7 @@ class TransitionIngressTests(unittest.TestCase):
             args["guests"].activate_generation = lambda *_a, **_kw: steps.append("guest") or transition_ingress.bridge.Receipt("PASS", "5"*64)
             outcome = transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(outcome.activation_sha256, "5"*64)
+            self.assertEqual(outcome.generation, observed_generation)
             verified = args["guests"].verify_live_generation.call_args.args[0]
             self.assertEqual(verified.verb, transition_ingress.bridge.GUEST_VERIFY_GENERATION)
             self.assertEqual(verified.sequence, 9)
@@ -300,7 +303,7 @@ class TransitionIngressTests(unittest.TestCase):
         activation = ActivationPins(*(item*64 for item in "123456"))
         pins = {"pins": generation, "postgres": generation, "activation": activation}
         settled = {"rejoin_stage_sha256": stage, "source_fence_wal": "0000000000000008",
-                   "standby_rejoined": True, "authority_opened": False}
+                   "standby_rejoined": True, "authority_opened": False, "revision": generation.revision}
         sync = MagicMock(return_value=settled)
         legacy = MagicMock()
         guests = MagicMock()
@@ -322,12 +325,13 @@ class TransitionIngressTests(unittest.TestCase):
         self.assertEqual(len(set(proof_digests)), 4)
         self.assertEqual(sync.call_count, 4)
         self.assertEqual(legacy.call_count, 4)
-        sync.return_value = settled | {"authority_opened": True}
-        with self.assertRaisesRegex(TransitionBlocked, "replacement_replication_unconfirmed"):
-            switcher._prepare_target_generation(
-                guests, binding, 4, generation, pins, stage, 8, float("inf"),
-                check_sync=sync, assert_legacy_closed=legacy,
-            )
+        for changed in ({"authority_opened": True}, {"revision": generation.revision + 1}):
+            sync.return_value = settled | changed
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_replication_unconfirmed"):
+                switcher._prepare_target_generation(
+                    guests, binding, 4, generation, pins, stage, 8, float("inf"),
+                    check_sync=sync, assert_legacy_closed=legacy,
+                )
 
         guests.reset_mock()
         guests.prepare_generation_runtime.side_effect = OSError("response lost")
@@ -384,9 +388,11 @@ class TransitionIngressTests(unittest.TestCase):
         observer_binding = {"runtime_sha256": "f"*64, "callback_config": b"callback",
                             "callback_config_sha256": "1"*64}
         first = switcher.CompletedTransition(
-            "B-route", "B-relay", {}, {"plan": b"B"}, {"PlanSha256": "d"*64}, gen_b, observer_binding,
+            "B-route", "B-relay", {}, {"plan": b"B"}, {"PlanSha256": "d"*64}, replace(gen_b, revision=5), observer_binding,
         )
-        second = switcher.CompletedTransition("A-route", "A-relay", {}, {}, {}, gen_a, observer_binding)
+        second = switcher.CompletedTransition(
+            "A-route", "A-relay", {}, {}, {}, replace(gen_a, revision=7), observer_binding,
+        )
         failover = {"execution": SimpleNamespace(spec={"attempt_id": "a"*64}), "controller_setup": prior,
                     "generation": gen_b, "target": "B", "previous_runtime_sha256": "0"*64,
                     "legacy_plan": "2"*64, "legacy_attempt": "3"*64}
@@ -406,7 +412,9 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertIs(return_main.run, main.run)
             self.assertFalse(return_main.attempted)
             self.assertEqual((options["previous"], options["relay"]), (first.active, first.relay))
-            options["stage_service"]["close_previous_service"](second.controller, gen_a, 90)
+            planned_return = replace(gen_a, revision=first.generation.revision + 1)
+            self.assertEqual(options["generation"], planned_return)
+            options["stage_service"]["close_previous_service"](second.controller, planned_return, 90)
             return second
 
         with patch.object(switcher, "switch_with_observer", side_effect=[first, second]) as run, \
@@ -422,11 +430,13 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(switcher.switch_roundtrip(main, None, "A-route", "A-relay",
                                                       failover=failover, prepare_return=prepare), (first, second))
         prepare.assert_called_once_with(first)
-        close.assert_called_once_with(starter, first.controller, first.parameters, gen_b, second.controller, gen_a,
+        close.assert_called_once_with(starter, first.controller, first.parameters, first.generation, second.controller,
+                                      replace(gen_a, revision=first.generation.revision + 1),
                                       previous_root="prior-root", previous_attempt="a"*64, previous_old_vm_id="prior-old-vm",
                                       live_sha256="c"*64, deadline=90)
 
-        for unverified in (first, replace(second, observer_binding=None), None):
+        for unverified in (first, replace(second, observer_binding=None),
+                           replace(second, generation=replace(gen_a, revision=first.generation.revision)), None):
             with self.subTest(unverified=unverified), \
                     patch.object(switcher, "switch_with_observer", side_effect=[first, unverified]):
                 with self.assertRaisesRegex(TransitionBlocked, "transition_roundtrip_unbound"):
@@ -520,7 +530,7 @@ class TransitionIngressTests(unittest.TestCase):
         guests = MagicMock()
         guests.start_replacement_standby.side_effect = OSError("connection interrupted")
         guests.confirm_replacement_rejoin.side_effect = [
-            bridge.BridgeRejected("rejoin not yet visible"), bridge.Receipt("PASS", "6" * 64),
+            bridge.BridgeRejected("rejoin not yet visible"), (bridge.Receipt("PASS", "6" * 64), 5),
         ]
         stage, sync = MagicMock(return_value=pin), MagicMock()
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
@@ -532,9 +542,9 @@ class TransitionIngressTests(unittest.TestCase):
             fresh_target = replace(target, sequence=5, nonce="7" * 64)
             fresh_start = replace(start, sequence=7, nonce="8" * 64)
             fresh_observe = replace(observe, sequence=8, nonce="9" * 64)
-            transition_ingress._rejoin_replacement(
+            self.assertEqual(transition_ingress._rejoin_replacement(
                 execution, guests, call[2], fresh_target, fresh_start, fresh_observe, "a"*64, stage, sync, 90,
-            )
+            ), 5)
         guests.publish_replacement_standby.assert_called_once()
         published = guests.publish_replacement_standby.call_args.args[0]
         self.assertEqual(published.sequence, start.sequence - 1)
