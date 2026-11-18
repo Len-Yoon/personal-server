@@ -307,7 +307,10 @@ class NativeGuestRuntimeTest(unittest.TestCase):
         live = {f"apps/{service}/config.json": module._digest(new_config) for service in module.SERVICES}
         live[cert_key] = "7"*64
         old = {key: module._digest(original_config) for key in live if key != cert_key} | {cert_key: "7"*64}
-        pins = replace(self.pins("B"), postgres_id="2"*64, inputs_sha256=module._digest(module._json_bytes(old)))
+        spec = b'{"node":"B"}'
+        pins = replace(self.pins("B"), postgres_id="2"*64, inputs_sha256=module._digest(module._json_bytes(old)),
+                       boot_sha256=module._digest(b"boot"), spec_sha256=module._digest(spec))
+        write_before_mock = module._write
         postgres = native_guest_restore.RestorePins(
             boot_sha256=pins.boot_sha256, installation_id=pins.installation_id, inventory_sha256="a"*64,
             postgres_id=pins.postgres_id, uid=999, gid=999, system_id=pins.system_id,
@@ -323,6 +326,7 @@ class NativeGuestRuntimeTest(unittest.TestCase):
             root = Path(temporary)
             stage = root / pins.attempt_id
             stage.mkdir()
+            (stage / "guest-spec.json").write_bytes(spec)
             journal = stage / "journal"
             journal.mkdir()
             (root / "ingress").mkdir()
@@ -349,6 +353,31 @@ class NativeGuestRuntimeTest(unittest.TestCase):
                 with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_generation_unconfirmed"):
                     module.plan_initial_standby_generation(pins, postgres, stage, binding, **args)
                 write.assert_not_called()
+                live[cert_key] = "7"*64
+                planned = module.initial_standby_generation_record(candidate, db, binding)
+                digest = module._digest(planned)
+                with (patch.object(module, "_write", wraps=write_before_mock) as persistent,
+                      patch.object(module, "_assert_initial_standby_closed"),
+                      patch.object(module, "BOOT_ID", SimpleNamespace(read_bytes=lambda: b"boot"))):
+                    with self.assertRaisesRegex(TransitionBlocked, "generation_publication_unconfirmed"):
+                        module.publish_initial_standby_generation(
+                            pins, postgres, stage, binding, generation_record_sha256="5"*64, **args,
+                        )
+                    persistent.assert_not_called()
+                    for _ in range(2):
+                        published = module.publish_initial_standby_generation(
+                            pins, postgres, stage, binding, generation_record_sha256=digest, **args,
+                        )
+                        self.assertEqual(published["record_sha256"], digest)
+                    for wrong in (replace(binding, boot_a_sha256="6"*64), replace(binding, source_sha256="7"*64)):
+                        with self.assertRaisesRegex(TransitionBlocked, "generation_publication_unconfirmed"):
+                            module.publish_initial_standby_generation(
+                                pins, postgres, stage, wrong, generation_record_sha256=digest, **args,
+                            )
+                    self.assertEqual(persistent.call_count, 2)
+                    target = root / binding.attempt_id
+                    self.assertEqual((target / "guest-spec.json").read_bytes(), spec)
+                    self.assertEqual((target / "generation-preflight.json").read_bytes(), planned)
 
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime

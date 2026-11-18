@@ -1,7 +1,7 @@
 """Prepare the exact VM guest app and broker containers in the stopped state."""
 
 from contextlib import ExitStack
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -845,17 +845,8 @@ def clean_initial_standby_runtime_paths(pins, postgres, stage, *, runtime_receip
             "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES)}
 
 
-def plan_initial_standby_generation(pins, postgres, stage, binding, *, runtime_receipt_sha256,
-                                    plan_sha256, cleanup_receipt, assert_no_activation):
-    """Derive B/2 pins for a fresh attempt from validated installed inputs, without writing them."""
-    error = "guest_initial_standby_generation_unconfirmed"
-    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
-    _need(type(binding) is Binding and _match(SHA, plan_sha256), error)
-    binding.fields()
-    stage = Path(stage)
-    _need(stage.name == pins.attempt_id and binding.attempt_id != pins.attempt_id
-          and binding.boot("B") == pins.boot_sha256
-          and not os.path.lexists(stage.parent / binding.attempt_id), error)
+def _initial_generation_cleanup(pins, postgres, stage, runtime_receipt_sha256, plan_sha256, cleanup_receipt,
+                                assert_no_activation, error):
     journal, guard = _initial_retired_guard(
         pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
     )
@@ -867,6 +858,23 @@ def plan_initial_standby_generation(pins, postgres, stage, binding, *, runtime_r
         "status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_sha256,
         "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES),
     } and _digest(_read(journal / "generation-1-broker-config.json", 0, {0o400})) == broker_pin, error)
+    return journal, guard
+
+
+def plan_initial_standby_generation(pins, postgres, stage, binding, *, runtime_receipt_sha256,
+                                    plan_sha256, cleanup_receipt, assert_no_activation):
+    """Derive B/2 pins for a fresh attempt from validated installed inputs, without writing them."""
+    error = "guest_initial_standby_generation_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(type(binding) is Binding and _match(SHA, plan_sha256), error)
+    binding.fields()
+    stage = Path(stage)
+    _need(stage.name == pins.attempt_id and binding.attempt_id != pins.attempt_id
+          and binding.boot("B") == pins.boot_sha256
+          and not os.path.lexists(stage.parent / binding.attempt_id), error)
+    journal, guard = _initial_generation_cleanup(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, cleanup_receipt, assert_no_activation, error,
+    )
     ingress = RUN / "ingress"
     _directory(ingress, 0, private=False)
     _need(not any(ingress.iterdir()), error)
@@ -886,6 +894,68 @@ def plan_initial_standby_generation(pins, postgres, stage, binding, *, runtime_r
     guard()
     _need(not any(ingress.iterdir()) and not os.path.lexists(stage.parent / binding.attempt_id), error)
     return candidate, target_db
+
+
+def initial_standby_generation_record(candidate, postgres, binding):
+    return _json_bytes({"schema_version": 1, "binding": binding.fields(),
+                        "runtime": asdict(candidate), "postgres": asdict(postgres)})
+
+
+def publish_initial_standby_generation(pins, postgres, stage, binding, *, runtime_receipt_sha256,
+                                       plan_sha256, cleanup_receipt, generation_record_sha256,
+                                       assert_no_activation):
+    """Publish an approved B/2 guest spec and its pins under the guest mutation lock."""
+    error = "guest_initial_standby_generation_publication_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(type(binding) is Binding and _match(SHA, plan_sha256) and _match(SHA, generation_record_sha256), error)
+    binding.fields()
+    stage = Path(stage)
+    _directory(stage, 0)
+    _need(stage.name == pins.attempt_id and binding.attempt_id != pins.attempt_id
+          and binding.boot("B") == pins.boot_sha256, error)
+    destination = stage.parent / binding.attempt_id
+    spec = _read(stage / "guest-spec.json", 0, {0o400, 0o600})
+    _need(_digest(spec) == pins.spec_sha256, error)
+    specification_name = "guest-spec.json"
+    record_name = "generation-preflight.json"
+
+    if not os.path.lexists(destination):
+        options = dict(runtime_receipt_sha256=runtime_receipt_sha256, plan_sha256=plan_sha256,
+                       cleanup_receipt=cleanup_receipt, assert_no_activation=assert_no_activation)
+        candidate, db = plan_initial_standby_generation(pins, postgres, stage, binding, **options)
+        record = initial_standby_generation_record(candidate, db, binding)
+        _need(_digest(record) == generation_record_sha256, error)
+        with tempfile.TemporaryDirectory(prefix=".standby-generation-", dir=stage.parent) as directory:
+            pending = Path(directory)
+            _write(pending / specification_name, spec, 0o400)
+            _write(pending / record_name, record, 0o400)
+            _need(_read(pending / specification_name, 0, {0o400}) == spec
+                  and _read(pending / record_name, 0, {0o400}) == record, error)
+            assert_no_activation()
+            _assert_initial_standby_closed(pins, postgres, error)
+            _need(not os.path.lexists(destination) and _digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+            os.rename(pending, destination)
+            _fsync_directory(stage.parent)
+
+    _initial_generation_cleanup(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, cleanup_receipt, assert_no_activation, error,
+    )
+    assert_no_activation()
+    _directory(destination, 0)
+    _need(set(path.name for path in destination.iterdir()) == {specification_name, record_name}
+          and _read(destination / specification_name, 0, {0o400}) == spec, error)
+    record = _read(destination / record_name, 0, {0o400})
+    _need(_digest(record) == generation_record_sha256, error)
+    inputs_sha256 = json.loads(record)["runtime"]["inputs_sha256"]
+    candidate = replace(pins, attempt_id=binding.attempt_id, primary_node="B", generation=2, inputs_sha256=inputs_sha256)
+    candidate.validate()
+    target_db = replace(postgres, attempt_id=binding.attempt_id)
+    target_db.validate()
+    _need(record == initial_standby_generation_record(candidate, target_db, binding), error)
+    _assert_initial_standby_closed(pins, postgres, error)
+    _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    return {"status": "GENERATION_INPUTS_PUBLISHED", "node": "B", "attempt_id": binding.attempt_id,
+            "record_sha256": generation_record_sha256}
 
 
 def observe_runtime_outcome(pins, stage, *, assert_settled):
