@@ -195,8 +195,12 @@ def _bind_rejoin_controller(execution, controller, parameters, *, resume):
         caddy._sync_dir(directory)
 
 
-def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadline, resume, stage_required=False):
+def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadline, resume, stage_required=False,
+                    wal_key="source_fence_wal"):
     """Use one pinned plan through staging and every fresh read-only check."""
+    error = "transition_source_fence_wal_unconfirmed"
+    caddy._need(wal_key in bridge.REJOIN_WAL_KEYS, error)
+
     def run(mode, request_id, limit):
         return starter.run_rejoin(controller, parameters, mode, request_id,
                                   live_sha256=live_sha256, root=root, deadline=limit)
@@ -216,30 +220,33 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
         else:
             run("initialize", init_id, deadline)
         staged = run("stage-rejoin", stage_id, deadline)
-    pin, wal = staged["rejoin_stage_sha256"], staged.get("source_fence_wal")
-    error = "transition_source_fence_wal_unconfirmed"
-    caddy._need(bridge._wal_pin(wal), error)
+    pin = staged["rejoin_stage_sha256"]
+    evidence = bridge.rejoin_wal_evidence(staged, error)
+    caddy._need(wal_key in evidence, error)
+    wal = evidence[wal_key]
 
     def current_stage(limit):
         observed = observe("observe-rejoin-stage", limit)
-        caddy._need(observed["rejoin_stage_sha256"] == pin and observed.get("source_fence_wal") == wal, error)
+        caddy._need(observed["rejoin_stage_sha256"] == pin and bridge.rejoin_wal_evidence(observed, error) == evidence, error)
         return pin
 
     def synchronized(limit):
         observed = observe("check-rejoin", limit)
-        caddy._need(observed["rejoin_stage_sha256"] == pin and observed.get("source_fence_wal") == wal, error)
+        caddy._need(observed["rejoin_stage_sha256"] == pin and bridge.rejoin_wal_evidence(observed, error) == evidence, error)
         return observed
 
     return pin, int(wal, 16), current_stage, synchronized
 
 
 def _prepare_target_generation(guests, binding, sequence, generation, pins, stage, replay_floor, deadline, *,
-                               check_sync, assert_legacy_closed):
-    source_wal = f"{replay_floor:016x}"
+                               check_sync, assert_legacy_closed, wal_key="source_fence_wal"):
+    wal_value = f"{replay_floor:016x}"
+    evidence = {wal_key: wal_value}
+    bridge.rejoin_wal_evidence(evidence, "transition_replacement_replication_unconfirmed")
     request = bridge.Request(binding, generation.primary, bridge.GUEST_PREPARE_GENERATION, sequence,
                              secrets.token_hex(32), {
         "runtime": asdict(pins["pins"]), "postgres": asdict(pins["postgres"]), "generation": asdict(generation),
-        "rejoin_stage_sha256": stage, "source_fence_wal": source_wal,
+        "rejoin_stage_sha256": stage, **evidence,
     })
 
     def current_rejoin(challenge, boundary, limit):
@@ -248,7 +255,8 @@ def _prepare_target_generation(guests, binding, sequence, generation, pins, stag
         assert_legacy_closed()
         observed = check_sync(limit)
         caddy._need(type(observed) is dict and observed.get("rejoin_stage_sha256") == stage
-                    and observed.get("source_fence_wal") == source_wal and observed.get("standby_rejoined") is True
+                    and bridge.rejoin_wal_evidence(observed, "transition_replacement_replication_unconfirmed") == evidence
+                    and observed.get("standby_rejoined") is True
                     and observed.get("authority_opened") is False
                     and type(observed.get("revision")) is int and observed["revision"] == generation.revision,
                     "transition_replacement_replication_unconfirmed")

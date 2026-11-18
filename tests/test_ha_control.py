@@ -504,6 +504,48 @@ class TransitionIngressTests(unittest.TestCase):
             else:
                 starter.restore_rejoin_args.assert_not_called()
 
+    def test_replica_wal_type_survives_windows_readback_and_guest_preparation(self):
+        from ha_control.native_guest_activation import ActivationPins
+
+        bridge = transition_ingress.bridge
+        starter = MagicMock()
+        stage = "f"*64
+        generation = ServingGeneration("B", 2, 2, 3)
+        wal = "0000000000000031"
+        response = {"rejoin_stage_sha256": stage, "replica_fence_wal": wal}
+        starter.run_rejoin.return_value = response
+        with self.assertRaisesRegex(TransitionBlocked, "transition_source_fence_wal_unconfirmed"):
+            transition_ingress._windows_rejoin(
+                starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90, resume=False, wal_key="unknown",
+            )
+        starter.run_rejoin.assert_not_called()
+        pin, floor, current, sync = transition_ingress._windows_rejoin(
+            starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90, resume=False,
+            wal_key="replica_fence_wal",
+        )
+        self.assertEqual((pin, floor, current(80), sync(70)), (stage, 0x31, stage, response))
+        starter.run_rejoin.return_value = {"rejoin_stage_sha256": stage, "source_fence_wal": wal}
+        with self.assertRaisesRegex(TransitionBlocked, "transition_source_fence_wal_unconfirmed"):
+            sync(70)
+
+        guests = MagicMock()
+        binding = bridge.Binding(*(item*64 for item in "abcde"))
+        pins = {"pins": generation, "postgres": generation, "activation": ActivationPins(*(item*64 for item in "123456"))}
+        observed = response | {"standby_rejoined": True, "authority_opened": False, "revision": generation.revision}
+        def prepare(request, serving, stage_pin, floor, deadline, *, assert_rejoin):
+            self.assertEqual(bridge.rejoin_wal_evidence(request.args, "invalid"), {"replica_fence_wal": wal})
+            bridge._args(request.verb, request.node, dict(request.args))
+            with self.assertRaisesRegex(bridge.BridgeRejected, "bridge_args_rejected"):
+                bridge._args(request.verb, request.node, dict(request.args) | {"source_fence_wal": wal})
+            assert_rejoin("1"*64, bridge.PREPARATION_BOUNDARIES[0], deadline)
+            return "7"*64
+        guests.prepare_generation_runtime.side_effect = prepare
+        result = transition_ingress._prepare_target_generation(
+            guests, binding, 4, generation, pins, stage, floor, float("inf"),
+            check_sync=lambda _limit: observed, assert_legacy_closed=lambda: None, wal_key="replica_fence_wal",
+        )
+        self.assertEqual(result["activation"].primary_runtime_receipt_sha256, "7"*64)
+
     def test_network_attachment_resume_requires_recorded_windows_stage(self):
         starter = MagicMock()
         starter.rejoin_stage_intent_present.return_value = False

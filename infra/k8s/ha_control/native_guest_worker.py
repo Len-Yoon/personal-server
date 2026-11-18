@@ -24,6 +24,7 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
+    rejoin_wal_evidence,
     ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_OBSERVE_REPLACEMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
@@ -814,8 +815,9 @@ def observe_generation_preparation(request):
 def prepare_generation(request, assert_windows_current):
     _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
     pins, pg, generation, stage = _generation_preparation_scope(request)
+    wal, = rejoin_wal_evidence(request.args, "guest_generation_prepared_unbound").values()
     result = runtime.prepare_generation_runtime(
-        pins, pg, stage, generation, int(request.args["source_fence_wal"], 16),
+        pins, pg, stage, generation, int(wal, 16),
         assert_windows_rejoin=assert_windows_current,
     )
     raw, persisted = _read_json(stage / "runtime-prepared.json")

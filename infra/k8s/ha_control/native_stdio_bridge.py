@@ -81,9 +81,9 @@ VERBS = {
     # Includes Windows service start and seven serial application readiness waits.
     "activate": ("A", 300, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
     GUEST_PREPARE_GENERATION: ("AB", 240, True, ("runtime", "postgres", "generation",
-                                               "rejoin_stage_sha256", "source_fence_wal")),
+                                               "rejoin_stage_sha256")),
     GUEST_OBSERVE_PREPARATION: ("AB", 45, False, ("runtime", "postgres", "generation",
-                                                 "rejoin_stage_sha256", "source_fence_wal")),
+                                                 "rejoin_stage_sha256")),
     GUEST_PUBLISH_GENERATION: ("AB", 30, True, ("handoff", "generation_handoff_sha256", "effects_plan_sha256")),
     GUEST_ACTIVATE_GENERATION: ("AB", 300, True, ("generation_handoff_sha256", "effects_plan_sha256")),
     GUEST_OBSERVE_GENERATION: ("AB", 30, False, ("generation_handoff_sha256", "effects_plan_sha256")),
@@ -131,6 +131,20 @@ def _bytes(value):
 
 def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+REJOIN_WAL_KEYS = frozenset({"source_fence_wal", "replica_fence_wal"})
+
+
+def rejoin_wal_evidence(value, error, *, optional=False):
+    keys = REJOIN_WAL_KEYS & value.keys()
+    if not keys and optional:
+        return {}
+    _need(len(keys) == 1, error)
+    key, = keys
+    wal = value[key]
+    _need(_wal_pin(wal), error)
+    return {key: wal}
 
 
 def _wal_pin(value):
@@ -261,7 +275,10 @@ def _args(verb, node, args):
     _need(type(verb) is str and verb in VERBS and type(node) is str and node in NODES,
           "bridge_verb_rejected")
     nodes, _, _, keys = VERBS[verb]
-    _need(node in nodes and type(args) is dict and set(args) == set(keys), "bridge_args_rejected")
+    _need(node in nodes and type(args) is dict, "bridge_args_rejected")
+    if verb in {GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION}:
+        keys = (*keys, *rejoin_wal_evidence(args, "bridge_args_rejected"))
+    _need(set(args) == set(keys), "bridge_args_rejected")
     for key, value in args.items():
         if key in {"runtime", "postgres", "generation"}:
             valid = type(value) is dict and 0 < len(_bytes(value)) <= FRAME_BYTES
@@ -269,7 +286,7 @@ def _args(verb, node, args):
             valid = type(value) is dict and 0 < len(_bytes(value)) <= GENERATION_HANDOFF_FRAME_BYTES
         elif key == "runtime_receipt_sha256" and verb == GUEST_VERIFY_PREPARED_GENERATION:
             valid = value is None or _hash(value)
-        elif key == "source_fence_wal":
+        elif key in REJOIN_WAL_KEYS:
             valid = _wal_pin(value)
         elif key == "max_bytes":
             valid = type(value) is int and 0 < value <= TRANSFER_BYTES

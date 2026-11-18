@@ -420,7 +420,7 @@ class GuestSshDispatcher:
         bridge._args(request.verb, request.node, dict(request.args))
         bridge._need(bridge._matches(request.args["generation"], asdict(generation))
                      and request.args["rejoin_stage_sha256"] == stage_pin
-                     and request.args["source_fence_wal"] == f"{replay_floor:016x}", error)
+                     and f"{replay_floor:016x}" in bridge.rejoin_wal_evidence(request.args, error).values(), error)
         result = self._dispatch(request, deadline, assert_windows_current=assert_rejoin)
         bridge._need(result.status == "PASS" and bridge._hash(result.receipt_sha256), error)
         return result.receipt_sha256
@@ -523,9 +523,8 @@ class GuestSshDispatcher:
         revision = result.get('revision') if type(result) is dict else None
         bridge._need(type(revision) is int and 0 < revision < 2**63, 'guest_ssh_replacement_replication_unconfirmed')
         expected['revision'] = revision
-        if type(result) is dict and 'source_fence_wal' in result:
-            bridge._need(bridge._wal_pin(result['source_fence_wal']), 'guest_ssh_replacement_replication_unconfirmed')
-            expected['source_fence_wal'] = result['source_fence_wal']
+        if type(result) is dict:
+            expected |= bridge.rejoin_wal_evidence(result, 'guest_ssh_replacement_replication_unconfirmed', optional=True)
         bridge._need(bridge._matches(result, expected), 'guest_ssh_replacement_replication_unconfirmed')
         return receipt, revision
 
