@@ -68,6 +68,49 @@ class TransitionTargetBridgeTests(unittest.TestCase):
             lock.assert_not_called()
 
 
+class InitialStandbyRetirementBridgeTests(unittest.TestCase):
+    def test_guest_worker_binds_initial_retirement_to_b_and_exact_closed_receipt(self):
+        wire = native_stdio_bridge
+        verb = wire.GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT
+        binding = wire.Binding(*(key * 64 for key in "abcde"))
+        args = {"verify_closed_sha256": "f"*64}
+        req = wire.Request(binding, "B", verb, 1, "1"*64, args)
+        plan = {"node": "B", "attempt_id": binding.attempt_id}
+        original = object.__new__(native_guest_worker.GuestWorker)
+        original.node, original.request, original.args = req.node, req, req.args
+        original.stage = Path("/prior")
+        prepared = {"manifest_sha256": "2"*64, "runtime_receipt_sha256": "3"*64}
+        original._proof = MagicMock(return_value=(args["verify_closed_sha256"], prepared))
+        original._prepared_pins = MagicMock(return_value=("db", "pins", prepared.copy()))
+        original.identity = MagicMock()
+        original._assert_no_activation = MagicMock()
+        original._record = MagicMock()
+
+        def inspect(pins, db, stage, *, runtime_receipt_sha256, assert_no_activation):
+            self.assertEqual((pins, db, stage, runtime_receipt_sha256), ("pins", "db", original.stage, "3"*64))
+            assert_no_activation()
+            return plan
+
+        with patch.object(native_guest_worker, "GuestWorker", return_value=original) as create, \
+                patch.object(native_guest_worker, "mutation_lock") as lock, \
+                patch.object(native_guest_worker.runtime, "observe_initial_standby_retirement", side_effect=inspect) as observe:
+            with self.assertRaisesRegex(wire.BridgeRejected, "bridge_guest_only_request"):
+                wire._Chain("cutover").check(verb, "B", args)
+            self.assertEqual(native_guest_worker.handle(replace(req, node="A")).status, "UNKNOWN")
+            lock.assert_not_called()
+            create.assert_not_called()
+            self.assertEqual(native_guest_worker.handle(req), wire.Receipt("PASS", wire._digest(wire._bytes(plan))))
+            lock.assert_called_once_with(wait=0)
+            original._proof.assert_called_once_with("verify_closed", args["verify_closed_sha256"])
+            original._prepared_pins.assert_called_once_with(prepared["manifest_sha256"])
+            original.identity.assert_called_once()
+            original._assert_no_activation.assert_called_once()
+            original._record.assert_not_called()
+            original._prepared_pins.return_value[2]["runtime_receipt_sha256"] = "4"*64
+            self.assertEqual(native_guest_worker.handle(req).status, "UNKNOWN")
+            observe.assert_called_once()
+
+
 class ReplacementStandbyBridgeTests(unittest.TestCase):
     def test_generation_handoff_rejects_lower_wal_before_dispatch(self):
         from ha_control.native_guest_activation import ServingGeneration

@@ -26,7 +26,8 @@ from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
-    GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET,
+    GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -37,6 +38,7 @@ VERBS = {
     "preflight", "begin_receive", "finish_receive", "restore", "prepare_runtime", "verify_closed",
     "assert_activation_closed", "activate", "assert_live", "observe_restore", "observe_rollback",
     GUEST_RESTORE_READBACK,
+    GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT,
     GUEST_PREFLIGHT_REPLACEMENT,
     GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
@@ -471,6 +473,24 @@ class GuestWorker:
         return self._emit({"manifest_sha256": self.args["manifest_sha256"], "runtime_receipt_sha256": receipt,
                            "closed_postgres_sha256": postgres})
 
+    def observe_initial_standby_retirement(self):
+        """Verify the exact original B attempt under the worker mutation lock."""
+        _need(self.node == "B", "guest_initial_standby_retirement_unconfirmed")
+        _, closed = self._proof("verify_closed", self.args["verify_closed_sha256"])
+        db, pins, prepared = self._prepared_pins(closed["manifest_sha256"])
+        _need(closed["runtime_receipt_sha256"] == prepared["runtime_receipt_sha256"],
+              "guest_initial_standby_retirement_unconfirmed")
+
+        def assert_unactivated():
+            self.identity()
+            self._assert_no_activation()
+
+        plan = runtime.observe_initial_standby_retirement(
+            pins, db, self.stage, runtime_receipt_sha256=closed["runtime_receipt_sha256"],
+            assert_no_activation=assert_unactivated,
+        )
+        return Receipt("PASS", _digest(_bytes(plan)))
+
     def assert_activation_closed(self):
         _need(self.node == "A", "guest_worker_activation_a_required")
         self._assert_no_activation()
@@ -625,6 +645,7 @@ class GuestWorker:
             return self.activate(assert_windows_current)
         handlers = {"preflight": self.preflight, "finish_receive": self.finish_receive, "restore": self.restore_data,
                     GUEST_RESTORE_READBACK: self.read_restore_receipt,
+                    GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT: self.observe_initial_standby_retirement,
                     "prepare_runtime": self.prepare_runtime, "verify_closed": self.verify_closed,
                     "assert_activation_closed": self.assert_activation_closed,
                     "assert_live": self.assert_live,
