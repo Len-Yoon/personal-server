@@ -956,6 +956,34 @@ class PGControlTests(unittest.TestCase):
             self.backend._promoted_history(promoted, state)
             connect.assert_called_with("B", replication=True)
 
+    def test_unplanned_crash_requires_existing_fence_without_mutating_old_primary(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        state = dict(self.state, phase="fencing")
+        with (patch.object(self.backend, "_read", return_value=self.candidate()),
+              patch.object(self.backend, "_local_metadata") as metadata,
+              patch.object(self.fence, "fence") as stop):
+            self.fence.stopped = False
+            with self.assertRaisesRegex(TransitionBlocked, "crash_source_off_unconfirmed"):
+                self.backend.close(state)
+            with self.assertRaisesRegex(TransitionBlocked, "crash_source_off_unconfirmed"):
+                self.backend.fence(state)
+            self.fence.stopped = True
+            self.backend.close(state)
+            metadata.assert_not_called()
+            stop.assert_not_called()
+
+    def test_unplanned_reconciliation_revokes_candidate_without_adopting_a_lost_fence(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        state = dict(self.state, phase="promoting", replica_fence_wal=0x31)
+        self.fence.stopped = False
+        with (patch.object(self.backend, "_read", return_value=self.observation()),
+              patch.object(self.backend, "_local_metadata") as metadata,
+              patch.object(self.backend, "_promoted_history") as history):
+            with self.assertRaisesRegex(TransitionBlocked, "crash_source_off_unconfirmed"):
+                self.backend.close(state)
+            metadata.assert_called_once_with("B", state)
+            history.assert_not_called()
+
     def test_unplanned_promote_records_replayed_replica_wal_before_dispatch(self):
         self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
         self.primary, self.peer = MagicMock(), MagicMock()

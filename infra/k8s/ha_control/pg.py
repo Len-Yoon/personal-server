@@ -560,10 +560,16 @@ class PgBackend:
             # Highest priority after a lost pg_promote response: close the real
             # primary before attempting old-host or replay observations.
             self._local_metadata(state["target"], state)
+            if self._uses_replica_fence_wal() and not self.fenced(state):
+                _deny("crash_source_off_unconfirmed")
             self._promoted_history(candidate, state)
             self._local_metadata(state["target"], state, promoted=True)
             return
         self._candidate(candidate, state)
+        if self._uses_replica_fence_wal():
+            if not self.fenced(state):
+                _deny("crash_source_off_unconfirmed")
+            return
         try:
             self._local_metadata(state["old"], state)
         except TransitionBlocked as error:
@@ -582,6 +588,8 @@ class PgBackend:
 
     def fence(self, state, *, record_source_wal=None):
         self.bind(state)
+        if self._uses_replica_fence_wal():
+            _deny("crash_source_off_unconfirmed")
         if self.plan.get("source_lease_close_required", False):
             # Before inducing an outage on a running VM, prove the old
             # authority is closed and all permit holders have released the
