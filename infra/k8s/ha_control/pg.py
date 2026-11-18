@@ -526,14 +526,12 @@ class PgBackend:
                 _deny("primary_metadata_required")
             if promoted:
                 self._promoted_history(value, state)
-                if state["phase"] == "promoting":
-                    connection.execute("UPDATE ha.control SET primary_node=%s,partner=%s,timeline=%s,epoch=%s,revision=GREATEST(revision+1,%s),serving=ARRAY[%s]::text[],worker=%s,writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second' WHERE singleton=1", (state["target"], state["old"], value["actual_timeline"], state["generation"], state["generation"], state["target"], state["target"]))
-                else:
-                    # Rejoin/validation/ready may revoke a lease, but must never
-                    # adopt a later fork using an older transition approval.
-                    connection.execute("UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1 WHERE singleton=1")
+            if promoted and state["phase"] == "promoting" and value["epoch"] < state["generation"]:
+                connection.execute("UPDATE ha.control SET primary_node=%s,partner=%s,timeline=%s,epoch=%s,revision=GREATEST(revision+1,%s),serving=ARRAY[%s]::text[],worker=%s,writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second' WHERE singleton=1", (state["target"], state["old"], value["actual_timeline"], state["generation"], state["generation"], state["target"], state["target"]))
             else:
-                connection.execute("UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1 WHERE singleton=1")
+                # Reconciliation must not advance a closed generation's revision.
+                connection.execute("""UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1
+                    WHERE singleton=1 AND (writes_open OR history_safe OR expires_at > clock_timestamp())""")
             connection.execute("COMMIT")
 
     def close(self, state):

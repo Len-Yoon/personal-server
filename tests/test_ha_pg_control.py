@@ -1535,6 +1535,16 @@ class PGControlTests(unittest.TestCase):
         self.assertNotIn("timeline=", updates[0])
         self.assertNotIn("epoch=", updates[0])
 
+    def test_promotion_readback_does_not_republish_the_recorded_generation(self):
+        self.primary, self.peer = MagicMock(), MagicMock()
+        state = dict(self.state, phase="promoting")
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), \
+                patch.object(self.backend, "_observe", return_value=self.observation()):
+            self.backend._local_metadata("B", state, promoted=True)
+        update, = [call.args[0] for call in self.primary.execute.call_args_list if call.args[0].startswith("UPDATE")]
+        self.assertNotIn("primary_node=", update)
+        self.assertIn("WHERE singleton=1 AND (writes_open OR history_safe OR expires_at > clock_timestamp())", update)
+
     def test_recorded_later_phase_closes_unexpected_fork_without_adopting_it(self):
         for phase in ("ready", "rejoining", "validating"):
             for changes in ({"actual_timeline": 3}, {"epoch": 6}, {"primary": "A"}):
