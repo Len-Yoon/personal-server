@@ -522,6 +522,8 @@ def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
                 and failover["generation"].primary == "B" and failover.get("resume_rejoin") is None,
                 error)
     failover["generation"].validate()
+    caddy._need(type(main) is caddy.CaddyRuntime and main.execution is None and not main.attempted, error)
+    return_main = caddy.CaddyRuntime(main.root, main.project, run=main.run)
     first = switch_with_observer(main=main, car=car, previous=previous, relay=relay, **failover)
     caddy._need(type(first) is CompletedTransition and first.generation == failover["generation"]
                 and type(first.observer_binding) is dict, error)
@@ -559,5 +561,7 @@ def switch_roundtrip(main, car, previous, relay, *, failover, prepare_return):
         )
 
     returned = returned | {"stage_service": returned["stage_service"] | {"close_previous_service": close_previous}}
-    second = switch_with_observer(main=main, car=car, previous=first.active, relay=first.relay, **returned)
+    second = switch_with_observer(main=return_main, car=car, previous=first.active, relay=first.relay, **returned)
+    caddy._need(type(second) is CompletedTransition and second.generation == generation
+                and type(second.observer_binding) is dict, error)
     return first, second
