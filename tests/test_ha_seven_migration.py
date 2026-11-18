@@ -111,6 +111,53 @@ class InitialStandbyRetirementBridgeTests(unittest.TestCase):
             observe.assert_called_once()
 
 
+    def test_apply_requires_original_b_closed_pin_and_exact_plan_over_dedicated_route(self):
+        wire = native_stdio_bridge
+        verb = wire.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS
+        binding = wire.Binding(*(key * 64 for key in "abcde"))
+        args = {"verify_closed_sha256": "f"*64, "retirement_plan_sha256": "4"*64}
+        req = wire.Request(binding, "B", verb, 1, "1"*64, args)
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        result = {"status": "CONTAINERS_RETIRED", "plan_sha256": args["retirement_plan_sha256"], "count": 8}
+        expected = wire.Receipt("PASS", wire._digest(wire._bytes(result)))
+        with patch.object(dispatcher, "_dispatch", return_value=expected) as dispatch:
+            with self.assertRaises(wire.BridgeRejected):
+                dispatcher(req, 45)
+            with self.assertRaises(wire.BridgeRejected):
+                dispatcher.retire_initial_standby_containers(replace(req, node="A"), 45)
+            dispatch.assert_not_called()
+            self.assertEqual(dispatcher.retire_initial_standby_containers(req, 45), expected)
+            dispatch.assert_called_once_with(req, 45)
+            dispatch.return_value = wire.Receipt("PASS", "5"*64)
+            with self.assertRaisesRegex(wire.BridgeRejected, "initial_standby_retirement_unconfirmed"):
+                dispatcher.retire_initial_standby_containers(req, 45)
+        with self.assertRaisesRegex(wire.BridgeRejected, "bridge_guest_only_request"):
+            wire._Chain("cutover").check(verb, "B", args)
+        self.assertIn(verb, wire.MUTATIONS)
+
+        original = object.__new__(native_guest_worker.GuestWorker)
+        original.node, original.request, original.args = req.node, req, req.args
+        original.stage = Path("/prior")
+        earlier = {"manifest_sha256": "2"*64, "runtime_receipt_sha256": "3"*64}
+        original._proof = MagicMock(return_value=(args["verify_closed_sha256"], earlier))
+        original._prepared_pins = MagicMock(return_value=("db", "pins", earlier.copy()))
+        original.identity = MagicMock()
+        original._assert_no_activation = MagicMock()
+        with patch.object(native_guest_worker, "GuestWorker", return_value=original), \
+                patch.object(native_guest_worker, "mutation_lock") as lock, \
+                patch.object(native_guest_worker.runtime, "retire_initial_standby_containers", return_value=result) as apply:
+            wrong = replace(req, args={"verify_closed_sha256": args["verify_closed_sha256"]})
+            self.assertEqual(native_guest_worker.handle(wrong).status, "UNKNOWN")
+            self.assertEqual(native_guest_worker.handle(replace(req, node="A")).status, "UNKNOWN")
+            lock.assert_not_called()
+            apply.assert_not_called()
+            self.assertEqual(native_guest_worker.handle(req), expected)
+            original._proof.assert_called_once_with("verify_closed", args["verify_closed_sha256"])
+            apply.assert_called_once_with("pins", "db", original.stage, runtime_receipt_sha256="3"*64,
+                                          plan_sha256=args["retirement_plan_sha256"],
+                                          assert_no_activation=original._assert_initial_standby_unactivated)
+
+
 class ReplacementStandbyBridgeTests(unittest.TestCase):
     def test_generation_handoff_rejects_lower_wal_before_dispatch(self):
         from ha_control.native_guest_activation import ServingGeneration

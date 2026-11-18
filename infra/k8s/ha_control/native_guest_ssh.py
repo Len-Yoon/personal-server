@@ -327,7 +327,8 @@ class GuestSshDispatcher:
         bridge._need(type(request) is bridge.Request and request.verb not in
                      {bridge.GUEST_PREFLIGHT_REPLACEMENT, bridge.GUEST_PUBLISH_REPLACEMENT, bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
                       bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_OBSERVE_PREPARATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
-                      bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET},
+                      bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET,
+                      bridge.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -364,6 +365,19 @@ class GuestSshDispatcher:
                              for node, guest in self.guests.items()),
                      "guest_ssh_serving_endpoint_unbound")
         return True
+
+    def retire_initial_standby_containers(self, request, deadline):
+        """Apply an already reviewed B-only plan through the pinned guest transport."""
+        error = "guest_ssh_initial_standby_retirement_unconfirmed"
+        bridge._need(type(request) is bridge.Request and request.node == "B"
+                     and request.verb == bridge.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS, error)
+        result = self._dispatch(request, deadline)
+        expected = bridge._digest(bridge._bytes({
+            "status": "CONTAINERS_RETIRED", "plan_sha256": request.args["retirement_plan_sha256"],
+            "count": len(SERVICES) + 1,
+        }))
+        bridge._need(result.status == "PASS" and result.receipt_sha256 == expected, error)
+        return result
 
     def verify_transition_target(self, request, generation, target, deadline):
         """Check the exact route address via pinned SSH, node, installation and boot identity."""

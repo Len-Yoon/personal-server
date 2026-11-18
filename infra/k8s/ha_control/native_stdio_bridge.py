@@ -54,6 +54,7 @@ GUEST_VERIFY_GENERATION = "verify_live_generation"
 GUEST_VERIFY_PREPARED_GENERATION = "verify_prepared_generation"
 GUEST_TRANSITION_TARGET = "verify_transition_target"
 GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT = "observe_initial_standby_retirement"
+GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS = "retire_initial_standby_containers"
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
 DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION}
 PREPARATION_OBSERVATION_BOUNDARIES = ("observe_preparation:before", "observe_preparation:after")
@@ -91,6 +92,7 @@ VERBS = {
     GUEST_VERIFY_PREPARED_GENERATION: ("AB", 45, False, ("runtime", "runtime_receipt_sha256", "target_sha256")),
     GUEST_TRANSITION_TARGET: ("AB", 30, False, ("installation_id",)),
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT: ("B", 45, False, ("verify_closed_sha256",)),
+    GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS: ("B", 180, True, ("verify_closed_sha256", "retirement_plan_sha256")),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
     "observe_restore": ("A", 60, False, ("manifest_sha256", "restore_intent_sha256")),
@@ -296,7 +298,7 @@ class _Chain:
     def check(self, verb, node, args):
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
                           GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET,
-                          GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT},
+                          GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":
