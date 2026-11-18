@@ -6,12 +6,13 @@ import fcntl
 import os
 from pathlib import Path
 import re
+import stat
 import uuid
 
 from ha_runtime import seven_capture
 from ha_runtime.seven_migration import MigrationRejected
 
-from . import caddy_runtime as caddy
+from . import caddy_runtime as caddy, native_stdio_bridge as bridge
 from .controller import TransitionBlocked, exclusive
 
 
@@ -150,6 +151,53 @@ class TransitionExecution:
     def __init__(self, spec):
         self.spec = copy.deepcopy(spec)
         self.directory = _scope(spec)
+
+    def verify_crash_source_record(self, scope, plan, deadline):
+        """Read the approved pre-crash durability record from the exact attempt directory."""
+        error = "transition_crash_source_unconfirmed"
+        expected = plan.get("crash_source_sha256")
+        caddy._need(bridge._hash(expected) and scope["attempt_id"] == self.spec["attempt_id"], error)
+        bridge._remaining(deadline)
+        path = self.directory / "crash-source.json"
+        reader = seven_capture.Reader()
+        try:
+            info = reader.watch(path).lstat()
+            caddy._need(stat.S_IMODE(info.st_mode) == 0o400 and 0 < info.st_size <= 8192, error)
+            raw = reader.read({"path": str(path), "sha256": expected, "bytes": info.st_size}, limit=8192)
+            record = seven_capture.parse(raw)
+            previous = _observer_paths(self.directory.parent / "runtime.json", scope["legacy_attempt"], self.spec)
+            _observer_runtime(reader, previous, scope["previous_runtime_sha256"],
+                              scope["legacy_plan"], scope["legacy_attempt"], self.spec)
+            reader.unchanged()
+        except (MigrationRejected, OSError, KeyError, TypeError, ValueError):
+            raise TransitionBlocked(error) from None
+        caddy._need(type(record) is dict and set(record) == {"schema_version", "scope", "postgres", "executables"}
+                    and type(record["schema_version"]) is int and record["schema_version"] == 1
+                    and bridge._matches(record["scope"], scope), error)
+        source, target = scope["source_node"], "B" if scope["source_node"] == "A" else "A"
+        expected_pg = {"cluster": plan.get("cluster"), "system_id": str(plan.get("system_id")),
+                       "source": source, "standby": target, "generation": scope["next_generation"] - 1,
+                       "timeline": plan.get("timeline"), "sync_peer": "ha_" + target.lower(),
+                       "replay_lsn": plan.get("required_replay_lsn"), "fsync": True, "full_page_writes": True}
+        caddy._need(type(expected_pg["cluster"]) is str and bool(expected_pg["cluster"])
+                    and re.fullmatch(r"[0-9]+", expected_pg["system_id"])
+                    and type(expected_pg["timeline"]) is int and 0 < expected_pg["timeline"] < scope["next_timeline"]
+                    and type(expected_pg["replay_lsn"]) is str
+                    and re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", expected_pg["replay_lsn"])
+                    and any(int(word, 16) for word in expected_pg["replay_lsn"].split("/"))
+                    and bridge._matches(record["postgres"], expected_pg), error)
+        executables = record["executables"]
+        caddy._need(type(executables) is dict
+                    and set(executables) == set(seven_capture.SERVICES) | {"ha-broker"}, error)
+        runtime = Path(seven_capture.__file__).parent
+        pins = {name: caddy._sha((runtime / name).read_bytes()) for name in ("db.py", "proof.py", "effects.py")}
+        for service, evidence in executables.items():
+            files = {"effects.py"} if service == "ha-broker" else {"db.py", "proof.py"}
+            caddy._need(type(evidence) is dict and set(evidence) == files | {"image_sha256"}
+                        and bridge._hash(evidence["image_sha256"])
+                        and all(evidence[name] == pins[name] for name in files), error)
+        bridge._remaining(deadline)
+        return expected
 
     def publish_observer_runtime(self, *, previous_sha256, legacy_plan, legacy_attempt, assert_legacy_closed):
         """Publish a fresh immutable observer input while the same coordinator holds its lock."""

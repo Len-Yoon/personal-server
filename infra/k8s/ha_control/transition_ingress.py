@@ -396,6 +396,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                        "source_vm_id": controller_setup["old_vm_id"], "source_node": generation.partner,
                        "next_generation": generation.epoch, "next_timeline": generation.timeline}
         assert_source_off = getattr(attach_replacement_network, "assert_crash_source_off", None)
+        if template["source_lease_close_required"] is False:
+            execution.verify_crash_source_record(crash_scope, template, deadline)
         wal_key = _transition_wal_key(template, verify_crash_source, crash_scope, deadline, assert_source_off=assert_source_off)
         start_intent = execution.directory / "replacement-start-intent.json"
         network_intent = execution.directory / "replacement-network-intent.json"
@@ -449,6 +451,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             assert_legacy_closed()
         _bind_rejoin_controller(execution, controller, parameters, resume=resume_rejoin is not None)
         if wal_key == "replica_fence_wal":
+            execution.verify_crash_source_record(crash_scope, template, deadline)
             _transition_wal_key(template, verify_crash_source, crash_scope, deadline, assert_source_off=assert_source_off)
         stage, replay_floor, check_stage, check_sync = _windows_rejoin(
             controller_setup["starter"], controller, parameters, live_sha256=controller_setup["live_sha256"],

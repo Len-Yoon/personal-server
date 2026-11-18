@@ -526,6 +526,62 @@ class TransitionIngressTests(unittest.TestCase):
             else:
                 starter.restore_rejoin_args.assert_not_called()
 
+    def test_crash_source_record_binds_prior_runtime_and_all_write_proof_code(self):
+        from ha_runtime.seven_capture import SERVICES, encoded
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp).resolve()
+            owner = {"pid": 1, "start": 1, "process": "d"*64}
+            attempt = "a"*64
+            previous = "b"*64
+            active = directory / attempt / "ingress"
+            active.parent.mkdir(mode=0o700)
+            active.mkdir(mode=0o700)
+            prior = directory / previous
+            prior.mkdir(mode=0o700)
+            last = encoded({"schema_version": 1, "writer_baseline": {}, "attempt_id": previous,
+                            "plan_sha256": "e"*64})
+            (prior / "runtime.json").write_bytes(last)
+            (prior / "runtime.json").chmod(0o400)
+            execution = transition_execution.TransitionExecution.__new__(transition_execution.TransitionExecution)
+            execution.directory = active
+            execution.spec = {"directory": str(active), "attempt_id": attempt, "plan_sha256": "f"*64,
+                              "project": "personal-server", "coordinator": owner}
+            scope = {"attempt_id": attempt, "legacy_attempt": previous, "legacy_plan": "e"*64,
+                     "previous_runtime_sha256": sha256(last).hexdigest(), "source_vm_id": "fixture",
+                     "source_node": "A", "next_generation": 2, "next_timeline": 2}
+            pg = {"cluster": "fixture", "system_id": "1", "source": "A", "standby": "B", "generation": 1,
+                  "timeline": 1, "sync_peer": "ha_b", "replay_lsn": "0/20", "fsync": True, "full_page_writes": True}
+            runtime = ROOT / "infra/k8s/ha_runtime"
+            def pin(name):
+                return sha256((runtime / name).read_bytes()).hexdigest()
+            executables = {service: {"image_sha256": "c"*64, "db.py": pin("db.py"), "proof.py": pin("proof.py")}
+                           for service in SERVICES}
+            executables["ha-broker"] = {"image_sha256": "d"*64, "effects.py": pin("effects.py")}
+            proof = {"schema_version": 1, "scope": scope, "postgres": pg, "executables": executables}
+            path = active / "crash-source.json"
+            def case(record):
+                if path.exists():
+                    path.unlink()
+                raw = encoded(record)
+                path.write_bytes(raw)
+                path.chmod(0o400)
+                return {"cluster": "fixture", "system_id": "1", "timeline": 1, "required_replay_lsn": "0/20",
+                        "crash_source_sha256": sha256(raw).hexdigest()}
+            with patch.object(caddy_runtime, "_private_dir", side_effect=Path):
+                plan = case(proof)
+                self.assertEqual(execution.verify_crash_source_record(scope, plan, float("inf")), plan["crash_source_sha256"])
+                for invalid in (proof | {"postgres": pg | {"source": "B"}},
+                                proof | {"executables": executables | {"ha-broker": executables["ha-broker"] |
+                                                                        {"effects.py": "a"*64}}}):
+                    blocked = case(invalid)
+                    with self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+                        execution.verify_crash_source_record(scope, blocked, float("inf"))
+                plan = case(proof)
+                path.chmod(0o600)
+                with self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+                    execution.verify_crash_source_record(scope, plan, float("inf"))
+
     def test_crash_mode_requires_plan_bound_readiness_verification(self):
         choose = transition_ingress._transition_wal_key
         plan = {"source_lease_close_required": False, "crash_source_sha256": "a"*64}
