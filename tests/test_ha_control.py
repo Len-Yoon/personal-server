@@ -6,6 +6,9 @@ from email.message import Message
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,10 +19,189 @@ sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Controller, Journal, TransitionBlocked, exclusive
 from ha_control.windows import WindowsFence
 from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_execution, transition_ingress
-from ha_control import wsl_writer_proof
-from ha_control.native_guest_activation import ServingGeneration
+from ha_control import windows_native_ingress as native, wsl_writer_proof
+from ha_control.initial_pg_lease import RECOVERY_OPEN_REVISION
+from ha_control.native_guest_activation import INITIAL_GENERATION, ServingGeneration
 from ha_control.native_guest_ssh import GuestSshDispatcher, SshEndpoint
 from ha_control.native_replacement_network import WindowsReplacementNetwork
+
+
+class WindowsNativeIngressTests(unittest.TestCase):
+    def setUp(self):
+        self.source = (ROOT / "caddy/Caddyfile").read_bytes()
+
+    def render(self, *, source=None, **options):
+        source = self.source if source is None else source
+        inputs = {
+            "source_sha256": sha256(source).hexdigest(),
+            "active_ip": "10.23.45.67",
+            "generation": INITIAL_GENERATION,
+            "plan_sha256": "b" * 64,
+            "tls_files_sha256": "c" * 64,
+        }
+        return native.render_candidate(source, **(inputs | options))
+
+    def test_preserves_host_routes_and_isolates_callback(self):
+        result = self.render()
+        config = result.caddyfile.decode("ascii")
+        rules = json.loads(result.tunnel_ingress)["ingress"]
+        groups = {
+            "portal-web": ("len.pe.kr", "portfolio.len.pe.kr", "file.len.pe.kr", "admin.len.pe.kr"),
+            "book-memo": ("books.len.pe.kr",),
+            "youtube-memo": ("memo.len.pe.kr",),
+            "crawler-worker": ("news.len.pe.kr",),
+        }
+        web_hosts = {host for hosts in groups.values() for host in hosts} | {"portal.len.pe.kr"}
+        actual = {rule["hostname"]: rule for rule in rules[:-1]}
+        self.assertEqual(len(actual), len(rules) - 1)
+        self.assertEqual(set(actual), web_hosts | {car_callback_ingress.PUBLIC_HOST})
+        self.assertEqual(rules[-1], {"service": "http_status:404"})
+        for host in web_hosts:
+            self.assertEqual(actual[host], {
+                "hostname": host, "service": f"http://127.0.0.1:{native.MAIN_ORIGIN_PORT}",
+                "originRequest": {"httpHostHeader": host},
+            })
+        car_host = car_callback_ingress.PUBLIC_HOST
+        self.assertEqual(actual[car_host]["service"], f"http://127.0.0.1:{native.CAR_ORIGIN_PORT}")
+        self.assertEqual(actual[car_host]["originRequest"], {"httpHostHeader": car_host})
+        for service, hosts in groups.items():
+            for host in hosts:
+                site = config.split(f"http://{host}:{native.MAIN_ORIGIN_PORT} {{\n", 1)[1].split("\n}\n", 1)[0]
+                self.assertIn(f"tls_server_name {service}.ha.internal", site)
+                self.assertIn("header_up Host {hostport}", site)
+        self.assertEqual(config.count("    bind 127.0.0.1\n"), len(actual) + 2)
+        self.assertEqual(config.count("import portal_file_upload_limit\n"), 4)
+        self.assertIn("max_size 30MB", config)
+        self.assertIn("redir https://len.pe.kr{uri} permanent", config)
+        self.assertEqual(config.count(f"tls_trust_pool file {native.WINDOWS_TLS}/server-ca.crt"), 8)
+        self.assertEqual(config.count(f"tls_client_auth {native.WINDOWS_TLS}/client.crt {native.WINDOWS_TLS}/client.key"), 8)
+        self.assertNotIn("{env.", config)
+        self.assertNotIn("/run/n100-ha", config)
+        self.assertIn("    log {\n        output discard\n    }\n", config.split("\n\n", 1)[0])
+        _, expected_car = car_callback_ingress.render("10.23.45.67", route_pin=result.route_pin).decode("ascii").split("\n\n", 1)
+        expected_car = expected_car.replace(":8015 {\n", f":{native.CAR_ORIGIN_PORT} {{\n    bind 127.0.0.1\n")
+        self.assertTrue(config.endswith(expected_car.replace("/run/n100-ha/caddy-mtls", native.WINDOWS_TLS)))
+
+    def test_candidate_marker_pins_serving_generation_and_certs(self):
+        initial = self.render()
+        self.assertEqual(initial, self.render())
+        for override in ({"generation": ServingGeneration("B", 2, 2, 4)},
+                         {"active_ip": "10.23.45.68"}, {"plan_sha256": "e" * 64},
+                         {"tls_files_sha256": "e" * 64}):
+            self.assertNotEqual(initial.route_pin, self.render(**override).route_pin)
+        self.assertIn(f"{native.ROUTE_HEADER} {initial.route_pin}".encode(), initial.caddyfile)
+        self.assertIn(f"{car_callback_ingress.ROUTE_HEADER} {initial.route_pin}".encode(), initial.caddyfile)
+        self.assertIn(b"http://len.pe.kr:", self.render(source=self.source.replace(b"\n", b"\r\n")).caddyfile)
+
+    def test_recovered_initial_candidate_requires_its_distinct_attempt(self):
+        recovered = replace(INITIAL_GENERATION, revision=RECOVERY_OPEN_REVISION)
+        self.assertNotEqual(self.render().route_pin,
+                            self.render(generation=recovered, recovery_attempt_id="d" * 64).route_pin)
+        self.assertNotEqual(self.render(generation=recovered, recovery_attempt_id="d" * 64).route_pin,
+                            self.render(generation=recovered, recovery_attempt_id="e" * 64).route_pin)
+        for generation, attempt in ((recovered, None), (recovered, "invalid"), (INITIAL_GENERATION, "d" * 64),
+                                    (replace(recovered, revision=5), "d" * 64),
+                                    (replace(recovered, timeline=True), "d" * 64)):
+            with self.subTest(generation=generation, attempt=attempt), self.assertRaises(TransitionBlocked):
+                self.render(generation=generation, recovery_attempt_id=attempt)
+
+    def test_rejects_drift_unconfirmed_keys_and_unsafe_addresses(self):
+        for options in ({"source_sha256": "b" * 64}, {"active_ip": "127.0.0.1"},
+                        {"generation": replace(INITIAL_GENERATION, revision=3)}, {"tls_files_sha256": None}):
+            with self.subTest(options=options), self.assertRaises(TransitionBlocked):
+                self.render(**options)
+        for source in (
+            self.source.replace(b"import common_tls", b"bind 0.0.0.0\n    import common_tls", 1),
+            self.source.replace(b"books.len.pe.kr", b"car.len.pe.kr"),
+            self.source.replace(b"books.len.pe.kr", b"different.len.pe.kr"),
+            self.source.replace(b"memo.len.pe.kr", b"placeholder").replace(b"books.len.pe.kr", b"memo.len.pe.kr")
+            .replace(b"placeholder", b"books.len.pe.kr"),
+            self.source.replace(b"    import portal_file_upload_limit\n", b"", 1),
+        ):
+            with self.assertRaises(TransitionBlocked):
+                self.render(source=source)
+
+
+    def test_native_package_validation_is_inert_and_checks_exact_artifacts(self):
+        control = ROOT / "infra/k8s/ha_control"
+        installer = control / "windows-ha-native-ingress.ps1"
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for native package validation")
+        support = (
+            "stopped_service_installer/StrictJson.cs", "stopped_service_installer/StoppedService.cs",
+            "stopped_service_installer/PrivateIo.cs", "windows-service-preflight.ps1",
+        )
+        support_hashes = [sha256((control / name).read_bytes()).hexdigest() for name in support]
+        support_sha = sha256("\n".join(support_hashes).encode()).hexdigest()
+        image = bytearray(512)
+        struct.pack_into("<H", image, 0, 0x5a4d)
+        struct.pack_into("<I", image, 60, 64)
+        struct.pack_into("<IHHIIIHHH", image, 64, 0x4550, 0x8664, 1, 0, 0, 0, 240, 2, 0x20b)
+        candidate = self.render()
+        payload = {"caddy.exe": image, "cloudflared.exe": image, "Caddyfile": candidate.caddyfile,
+                   "cloudflared-ingress.json": candidate.tunnel_ingress}
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary).resolve()
+
+            def check(phase, *, overrides=None, mode="Validate", protocol="http2", profile_pin=None):
+                contents = payload | (overrides or {})
+                files = {name: {"sha256": sha256(data).hexdigest(), "bytes": len(data)} for name, data in contents.items()}
+                profile = json.dumps({"schema_version": 1, "source_commit": "a" * 40,
+                                      "route_sha256": candidate.route_pin, "protocol": protocol, "files": files}).encode()
+                for name, data in contents.items():
+                    (package / name).write_bytes(data)
+                (package / "profile.json").write_bytes(profile)
+                snapshot = {path.name: path.read_bytes() for path in package.iterdir()}
+                result = subprocess.run(
+                    [str(pwsh), "-NoProfile", "-NonInteractive", "-File", str(installer), "-Mode", mode,
+                     "-InputDirectory", str(package), "-ProfileSha256", profile_pin or sha256(profile).hexdigest(),
+                     "-SupportSha256", support_sha], capture_output=True, text=True, timeout=20,
+                )
+                self.assertTrue(result.stdout, result.stderr)
+                receipt = json.loads(result.stdout)
+                self.assertEqual({path.name: path.read_bytes() for path in package.iterdir()}, snapshot)
+                self.assertIs(receipt["service_started"], False)
+                self.assertIs(receipt["credentials_staged"], False)
+                if phase is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(receipt["status"], "validated")
+                    self.assertEqual(receipt["artifact_count"], 4)
+                else:
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(receipt["phase"], phase)
+                    self.assertIs(receipt["published"], False)
+                    self.assertIs(receipt["incomplete_private_staging"], False)
+
+            check(None)
+            check("profile", profile_pin="b" * 64)
+            check("profile", protocol=["http2"])
+            check("artifacts", overrides={"caddy.exe": image[:68] + b"\x4c\x01" + image[70:]})
+            check("artifacts", overrides={"cloudflared-ingress.json": candidate.tunnel_ingress.replace(
+                b"{", b'{"credentials-file":"fixture",', 1)})
+            check("artifacts", overrides={"Caddyfile": candidate.caddyfile + b"\nhttp://:8199 {\n    respond 200\n}\n"})
+            blocks = candidate.caddyfile.split(b"\n\n")
+            check(None, overrides={"Caddyfile": b"\n\n".join(blocks[:3] + [blocks[4], blocks[3]] + blocks[5:])})
+            for order in ((1, 0, 2), (0, 2, 1)):
+                with self.subTest(section_order=order):
+                    altered = b"\n\n".join([blocks[index] for index in order] + blocks[3:])
+                    check("artifacts", overrides={"Caddyfile": altered})
+            # check recalculates the profile SHA for each altered Caddyfile.
+            for line in (b"    import ../mutable.caddy\n", b"    import C:/mutable.caddy\n",
+                         b"    request_header X-Route {$UNTRUSTED}\n"):
+                with self.subTest(line=line):
+                    altered = candidate.caddyfile.replace(b"    import common_tls\n", line + b"    import common_tls\n", 1)
+                    check("artifacts", overrides={"Caddyfile": altered})
+            for previous, replacement in (
+                (b"https://10.23.45.67:10443", b"http://10.23.45.67:10443"),
+                (b"tls_server_name portal-web.ha.internal", b"tls_server_name wrong.ha.internal"),
+                (b"tls_trust_pool file C:/ProgramData/N100HA/ingress/tls/server-ca.crt", b"tls_insecure_skip_verify"),
+                (b"C:/ProgramData/N100HA/ingress/tls/client.key", b"C:/Mutable/client.key"),
+            ):
+                with self.subTest(previous=previous):
+                    self.assertIn(previous, candidate.caddyfile)
+                    check("artifacts", overrides={"Caddyfile": candidate.caddyfile.replace(previous, replacement, 1)})
+            if sys.platform != "win32":
+                check("native_intent", mode="Stage")
 
 
 class WindowsReplacementNetworkTests(unittest.TestCase):

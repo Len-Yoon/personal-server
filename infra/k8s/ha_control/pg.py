@@ -119,6 +119,23 @@ class PgBackend:
         # A fence-only approval never authorizes PostgreSQL state changes.
         if isinstance(value, dict):
             expected = 'ha-initial-wsl-cutover' if 'initial_wsl_cutover' in value else 'ha-transition'
+            if 'initial_cutover_recovery' in value:
+                from .initial_windows_gate import InitialWindowsGate, RECOVERY_ACTION, RECOVERY_FIELDS
+
+                recovery = value['initial_cutover_recovery']
+                if (type(self.fence_adapter) is not InitialWindowsGate
+                        or self.fence_adapter._installed_runtime is not True
+                        or self.fence_adapter.plan_data is not value
+                        or 'initial_wsl_cutover' not in value or value.get('profile') != 'enforced-vm-v1'
+                        or value.get('node') != 'A'
+                        or any(type(value.get(key)) is not int or value[key] != 1 for key in ('generation', 'timeline'))
+                        or type(recovery) is not dict or recovery.keys() != RECOVERY_FIELDS
+                        or not all(type(pin) is str and re.fullmatch(r'[a-f0-9]{64}', pin)
+                                   for pin in recovery.values())):
+                    _deny('initial_recovery_native_scope_required')
+                expected = RECOVERY_ACTION
+            elif 'initial_effect_quarantine' in value:
+                _deny('initial_recovery_native_scope_required')
             if value.get('_approval_action') != expected:
                 _deny('ha_transition_approval_required')
         if (not isinstance(value, dict) or not isinstance(value.get("cluster"), str)

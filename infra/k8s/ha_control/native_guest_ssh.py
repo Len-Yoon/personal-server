@@ -1,6 +1,7 @@
 """Mac-side SSH transport for one fixed, hash-verified guest worker invocation."""
 
 import base64
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -328,7 +329,8 @@ class GuestSshDispatcher:
                      {bridge.GUEST_PREFLIGHT_REPLACEMENT, bridge.GUEST_PUBLISH_REPLACEMENT, bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
                       bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_OBSERVE_PREPARATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
                       bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET,
-                      bridge.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS},
+                      bridge.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS, bridge.GUEST_QUIESCE_INITIAL_RECOVERY,
+                      bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, bridge.GUEST_OBSERVE_CAR_ISOLATION},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -465,6 +467,48 @@ class GuestSshDispatcher:
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_ACTIVATE_GENERATION,
                      'guest_ssh_request_unbound')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
+
+    def quiesce_initial_recovery(self, request, deadline, *, assert_windows_closed):
+        error = "guest_ssh_initial_recovery_unbound"
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY
+                     and request.node == "A" and callable(assert_windows_closed), error)
+        return self._dispatch(request, deadline, assert_windows_current=assert_windows_closed)
+
+    def observe_initial_recovery_hold(self, request, deadline):
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
+                     and request.node == "A", 'guest_ssh_initial_recovery_unbound')
+        return self._dispatch(request, deadline)
+
+    def observe_car_isolation(self, request, deadline):
+        error = "guest_ssh_car_isolation_unconfirmed"
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_CAR_ISOLATION
+                     and request.node == "A", error)
+        receipt = self._dispatch(request, deadline)
+        bridge._need(type(receipt) is bridge.Receipt and receipt.status == "PASS"
+                     and bridge._hash(receipt.receipt_sha256), error)
+        return receipt.receipt_sha256
+
+    def verify_initial_recovery_hold(self, args, sequence, challenge_sha256, hold_sha256, deadline):
+        """Bind a fresh authenticated guest readback to a specific recovery challenge."""
+        error = "guest_ssh_initial_recovery_hold_unconfirmed"
+        bridge._need(bridge._hash(challenge_sha256) and bridge._hash(hold_sha256)
+                     and type(sequence) is int and 0 < sequence <= bridge.MAX_REQUESTS
+                     and type(args) is dict, error)
+        args = args.copy()
+        verb = bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
+        bridge._args(verb, "A", args)
+        evidence = {"binding": self.binding.fields(), "node": "A", "verb": verb,
+                    "sequence": sequence, "args": args,
+                    "challenge_sha256": challenge_sha256, "hold_sha256": hold_sha256}
+        # On the SSH wire the guest echoes this nonce in its authenticated reply.
+        nonce = bridge._digest(bridge._bytes(evidence))
+        request = bridge.Request(self.binding, "A", verb, sequence, nonce, args)
+        bridge._remaining(deadline)
+        readback = self.observe_initial_recovery_hold(request, deadline)
+        bridge._need(type(readback) is bridge.Receipt and readback.status == "PASS"
+                     and readback.receipt_sha256 == hold_sha256, error)
+        bridge._remaining(deadline)
+        return nonce
 
     def observe_generation_activation(self, request, deadline, *, assert_guard):
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_GENERATION
@@ -622,14 +666,65 @@ class GuestSshDispatcher:
                     output = bridge._bytes(envelope | receipt.fields('restore'))
             else:
                 preparation = request.verb == bridge.GUEST_PREPARE_GENERATION
+                boundaries = ACTIVATION_BOUNDARIES
+                if preparation:
+                    boundaries = bridge.PREPARATION_BOUNDARIES
+                elif request.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY:
+                    boundaries = bridge.QUIESCENCE_BOUNDARIES
                 output = _activation_exchange(
                     command, payload, limit, request.nonce, assert_windows_current,
                     bind_boundary=request.verb != "activate",
-                    boundaries=bridge.PREPARATION_BOUNDARIES if preparation else ACTIVATION_BOUNDARIES,
+                    boundaries=boundaries,
                     boundary_seconds=bridge.PREPARATION_BOUNDARY_SECONDS if preparation else bridge.ACTIVATION_BOUNDARY_SECONDS,
                 )
             bridge._need(_same_files(stamps), 'guest_ssh_local_file_changed')
         return output
+
+
+class RecoveryGuestProofReader:
+    """Renew read-only guest observations without resetting any mutating dispatch session."""
+
+    def __init__(self, binding, args, hold_sha256, *, jump, guests, known_hosts, launcher_sha256):
+        error = "guest_ssh_recovery_proof_unconfirmed"
+        bridge._need(type(args) is dict and bridge._hash(hold_sha256), error)
+        self.args = args.copy()
+        bridge._args(bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, "A", self.args)
+        self.binding = binding
+        self.hold_sha256 = hold_sha256
+        self.settings = dict(jump=jump, guests=dict(guests), known_hosts=dict(known_hosts),
+                             launcher_sha256=launcher_sha256)
+        self.dispatcher = GuestSshDispatcher(binding, **self.settings)
+        self.sequence = 0
+        self.window = 0
+        self.recent = deque(maxlen=1024)
+        self.lock = threading.Lock()
+
+    def read(self, purpose, challenge_sha256, deadline):
+        error = "guest_ssh_recovery_proof_unconfirmed"
+        bridge._need(purpose in ("held_admission", "provider_isolation") and bridge._hash(challenge_sha256)
+                     and type(deadline) in (int, float) and self.lock.acquire(blocking=False), error)
+        try:
+            bridge._remaining(deadline)
+            identity = (purpose, challenge_sha256)
+            bridge._need(identity not in self.recent, error)
+            self.recent.append(identity)
+            if self.sequence == bridge.MAX_REQUESTS:
+                self.dispatcher = GuestSshDispatcher(self.binding, **self.settings)
+                self.sequence = 0
+                self.window += 1
+            self.sequence += 1
+            challenge = bridge._digest(bridge._bytes({
+                "purpose": purpose, "challenge_sha256": challenge_sha256, "window": self.window,
+                "binding": self.binding.fields(), "hold_sha256": self.hold_sha256,
+            }))
+            if purpose == "held_admission":
+                return self.dispatcher.verify_initial_recovery_hold(
+                    self.args, self.sequence, challenge, self.hold_sha256, deadline)
+            request = bridge.Request(self.binding, "A", bridge.GUEST_OBSERVE_CAR_ISOLATION, self.sequence,
+                                     challenge, self.args | {"hold_sha256": self.hold_sha256})
+            return self.dispatcher.observe_car_isolation(request, deadline)
+        finally:
+            self.lock.release()
 
 
 def _activation_exchange(command, payload, deadline, request_nonce, assert_windows_current, *, bind_boundary=False,

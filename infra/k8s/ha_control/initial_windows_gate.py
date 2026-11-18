@@ -17,12 +17,14 @@ from .controller import TransitionBlocked
 
 
 ACTION = 'ha-initial-wsl-cutover'
+RECOVERY_ACTION = 'ha-recover-initial-writer'
 PROFILE = 'enforced-vm-v1'
 SHA = re.compile(r'[a-f0-9]{64}\Z')
 SID = re.compile(r'S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\Z')
 INSTALL_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z')
 APPROVAL_FIELDS = {'schema_version', 'action', 'authority_kind', 'installation_id', 'source_commit',
                    'installed_at', 'plan_sha256'}
+RECOVERY_FIELDS = {'attempt_id', 'predecessor_terminal_sha256', 'predecessor_service_sha256'}
 ARGS_FIELDS = ('format', 'service_name', 'service_sid', 'python_path', 'python_sha256', 'launcher_path',
                'launcher_sha256', 'plan_path', 'plan_sha256', 'approval_path', 'approval_sha256', 'mode', 'host_sha256')
 WRITERS = {'S-1-5-18', 'S-1-5-32-544'}  # SYSTEM and BUILTIN\Administrators
@@ -77,9 +79,9 @@ def _args(raw):
     return values
 
 
-def _service(installation):
-    _need(type(installation) is str and SHA.fullmatch(installation))
-    name = f'N100HA_{installation[:24]}_controller'
+def initial_service_identity(scope_sha256):
+    _need(type(scope_sha256) is str and SHA.fullmatch(scope_sha256))
+    name = f'N100HA_{scope_sha256[:24]}_controller'
     digest = hashlib.sha1(name.upper().encode('utf-16-le'), usedforsecurity=False).digest()
     sid = 'S-1-5-80-' + '-'.join(str(number) for number in struct.unpack('<5I', digest))
     return name, sid
@@ -91,7 +93,7 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
     plan, approval = _decode(plan_raw), _decode(approval_raw)
     _need(type(plan) is dict and type(approval) is dict and approval.keys() == APPROVAL_FIELDS
           and type(approval['schema_version']) is int and approval['schema_version'] == 1
-          and approval['action'] == ACTION and approval['authority_kind'] == 'installed-runtime'
+          and approval['authority_kind'] == 'installed-runtime'
           and approval['plan_sha256'] == plan_pin
           and type(plan.get('schema_version')) is int and plan['schema_version'] == 2
           and plan.get('profile') == PROFILE and plan.get('node') == 'A'
@@ -101,7 +103,21 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
     mode = plan.get('initial_wsl_cutover')
     _need(type(mode) is dict and mode == {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
           and type(mode['schema_version']) is int)
-    name, expected_sid = _service(plan.get('installation_id'))
+    action = approval['action']
+    original_name, original_sid = initial_service_identity(plan.get('installation_id'))
+    if 'initial_cutover_recovery' in plan:
+        recovery = plan['initial_cutover_recovery']
+        _need(action == RECOVERY_ACTION and type(recovery) is dict and recovery.keys() == RECOVERY_FIELDS
+              and all(type(value) is str and SHA.fullmatch(value) for value in recovery.values()))
+        name, expected_sid = initial_service_identity(recovery['attempt_id'])
+        _need(name != original_name and expected_sid != original_sid)
+    else:
+        _need(action == ACTION)
+        name, expected_sid = original_name, original_sid
+    if 'initial_effect_quarantine' in plan:
+        _need(action == RECOVERY_ACTION)
+        from .initial_pg_lease import InitialPgLeaseRecovery
+        InitialPgLeaseRecovery.quarantine_binding(plan)
     configuration = plan.get('windows_enforced')
     _need(type(configuration) is dict and configuration.get('service_name') == settings['service_name'] == name
           and configuration.get('service_sid') == settings['service_sid'] == sid == expected_sid
@@ -111,7 +127,7 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
           and type(approval['installed_at']) is str and INSTALL_TIME.fullmatch(approval['installed_at']))
     installed = datetime.fromisoformat(approval['installed_at'].replace('Z', '+00:00'))
     _need(installed < now)
-    return plan | {'_approval_action': ACTION}, plan_pin, approval_pin
+    return plan | {'_approval_action': action}, plan_pin, approval_pin
 
 
 def _check_acl(owner, entries, *, depth, os_drive_root, private_reader):

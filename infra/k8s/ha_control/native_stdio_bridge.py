@@ -24,6 +24,7 @@ from types import MappingProxyType
 
 
 VERSION = 1
+INITIAL_RECOVERY_HOLD = "initial-recovery-hold.json"
 FRAME_BYTES = 4096
 GENERATION_HANDOFF_FRAME_BYTES = 8192
 # Each boundary opens a Windows SSH check before the guest samples its own
@@ -55,13 +56,19 @@ GUEST_VERIFY_PREPARED_GENERATION = "verify_prepared_generation"
 GUEST_TRANSITION_TARGET = "verify_transition_target"
 GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT = "observe_initial_standby_retirement"
 GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS = "retire_initial_standby_containers"
+GUEST_QUIESCE_INITIAL_RECOVERY = "quiesce_initial_recovery"
+GUEST_OBSERVE_INITIAL_RECOVERY_HOLD = "observe_initial_recovery_hold"
+GUEST_OBSERVE_CAR_ISOLATION = "observe_car_isolation"
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
-DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION}
+DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION, GUEST_QUIESCE_INITIAL_RECOVERY}
+QUIESCENCE_BOUNDARIES = ("recovery_hold", "recovery_stop_broker", "recovery_stop_apps", "recovery_stopped")
 PREPARATION_OBSERVATION_BOUNDARIES = ("observe_preparation:before", "observe_preparation:after")
 PREPARATION_BOUNDARIES = tuple(f"prepare_generation:{index}" for index in range(1, 5))
 PREPARATION_BOUNDARY_SECONDS = 24
 REPLACEMENT_ARGS = ("bootstrap_manifest_sha256", "rejoin_stage_sha256")
 RESTORE_ARGS = ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")
+INITIAL_RECOVERY_ARGS = ("recovery_attempt_id", "installation_id", "runtime_receipt_sha256",
+                         "activation_receipt_sha256", "protected_inventory_sha256", "car_route_release_sha256")
 VERBS = {
     # allowed nodes, maximum seconds, mutation, additional typed request fields
     "preflight": ("AB", 45, False, ("target_system_id_sha256",)),
@@ -93,6 +100,9 @@ VERBS = {
     GUEST_TRANSITION_TARGET: ("AB", 30, False, ("installation_id",)),
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT: ("B", 45, False, ("verify_closed_sha256",)),
     GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS: ("B", 180, True, ("verify_closed_sha256", "retirement_plan_sha256")),
+    GUEST_QUIESCE_INITIAL_RECOVERY: ("A", 95, True, INITIAL_RECOVERY_ARGS),
+    GUEST_OBSERVE_INITIAL_RECOVERY_HOLD: ("A", 20, False, INITIAL_RECOVERY_ARGS),
+    GUEST_OBSERVE_CAR_ISOLATION: ("A", 20, False, (*INITIAL_RECOVERY_ARGS, "hold_sha256")),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
     "observe_restore": ("A", 60, False, ("manifest_sha256", "restore_intent_sha256")),
@@ -286,6 +296,8 @@ def _args(verb, node, args):
             valid = type(value) is dict and 0 < len(_bytes(value)) <= GENERATION_HANDOFF_FRAME_BYTES
         elif key == "runtime_receipt_sha256" and verb == GUEST_VERIFY_PREPARED_GENERATION:
             valid = value is None or _hash(value)
+        elif key == "car_route_release_sha256" and verb == GUEST_QUIESCE_INITIAL_RECOVERY:
+            valid = value is None or _hash(value)
         elif key in REJOIN_WAL_KEYS:
             valid = _wal_pin(value)
         elif key == "max_bytes":
@@ -315,7 +327,8 @@ class _Chain:
     def check(self, verb, node, args):
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
                           GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET,
-                          GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS},
+                          GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
+                          GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":

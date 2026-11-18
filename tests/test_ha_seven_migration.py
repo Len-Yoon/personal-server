@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sqlite3
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -25,12 +26,353 @@ sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
 from ha_control import frozen_ingress, frozen_transport, native_frozen_capture, native_guest_restore
-from ha_control import native_guest_activation, native_guest_live
-from ha_control import native_guest_ssh, native_guest_worker, native_stdio_bridge
+from ha_control import native_guest_activation, native_guest_live, native_guest_recovery_observer
+from ha_control import native_guest_handoff_io, native_guest_ssh, native_guest_worker, native_stdio_bridge
+from ha_control.native_windows_activation import WindowsActivationLease
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+class InitialRecoveryMutationLockTests(unittest.TestCase):
+    def test_recovery_read_only_proofs_roll_sessions_without_reusing_recent_challenges(self):
+        wire = native_stdio_bridge
+        binding = wire.Binding(*(value*64 for value in "abcde"))
+        verb = wire.GUEST_OBSERVE_CAR_ISOLATION
+        args = {key: "f"*64 for key in wire.INITIAL_RECOVERY_ARGS}
+        deadline = time.monotonic() + 10
+        first, second = MagicMock(), MagicMock()
+        first.observe_car_isolation.return_value = "1"*64
+        second.observe_car_isolation.return_value = "2"*64
+        with patch.object(native_guest_ssh, "GuestSshDispatcher", side_effect=(first, second)) as open_transport:
+            reader = native_guest_ssh.RecoveryGuestProofReader(
+                binding, args, "3"*64, jump=None, guests={}, known_hosts={}, launcher_sha256="4"*64)
+            for sequence in range(1, wire.MAX_REQUESTS + 1):
+                self.assertEqual(reader.read("provider_isolation", f"{sequence:064x}", deadline), "1"*64)
+            self.assertEqual(reader.read("provider_isolation", "5"*64, deadline), "2"*64)
+            self.assertEqual(open_transport.call_count, 2)
+            self.assertEqual(first.observe_car_isolation.call_count, wire.MAX_REQUESTS)
+            prior = first.observe_car_isolation.call_args_list[0].args[0]
+            current = second.observe_car_isolation.call_args.args[0]
+            self.assertEqual((prior.sequence, current.sequence), (1, 1))
+            self.assertNotEqual(prior.nonce, current.nonce)
+            self.assertEqual((current.node, current.verb, current.args["hold_sha256"]), ("A", verb, "3"*64))
+            with self.assertRaisesRegex(wire.BridgeRejected, "guest_ssh_recovery_proof_unconfirmed"):
+                reader.read("provider_isolation", f"{1:064x}", deadline)
+            second.observe_car_isolation.assert_called_once()
+            second.verify_initial_recovery_hold.return_value = "6"*64
+            self.assertEqual(reader.read("held_admission", "7"*64, deadline), "6"*64)
+            second.verify_initial_recovery_hold.assert_called_once()
+            second.quiesce_initial_recovery.assert_not_called()
+
+    def test_current_held_admission_binds_guest_receipt_and_checks_predecessor_again(self):
+        wire = native_stdio_bridge
+        binding = wire.Binding(*(value*64 for value in "abcde"))
+        verb = wire.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
+        args = {key: "f"*64 for key in wire.VERBS[verb][3]}
+        deadline = time.monotonic() + 10
+        guests = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        guests.binding, guests.inflight = binding, False
+        guests.last_sequence, guests.nonces, guests.lock = 0, set(), threading.Lock()
+        hold = "1"*64
+
+        def reply(_node, payload, _limit, _request, _windows):
+            envelope = json.loads(payload)
+            self.assertEqual(envelope.pop("args"), args)
+            return wire._bytes(envelope | wire.Receipt("PASS", hold).fields(verb))
+
+        predecessor = dict(prior_args_sha256="2"*64, service_instance_sha256="3"*64,
+                           terminal_state_sha256="4"*64)
+        lease = WindowsActivationLease(SimpleNamespace(binding=binding), None, dict(
+            first_write_proof_sha256=None, service_instance_sha256=predecessor["service_instance_sha256"]))
+        challenge = "5"*64
+        options = dict(challenge_sha256=challenge, hold_sha256=hold,
+                       predecessor=predecessor, assert_guard=lambda: None)
+        with patch.object(guests, "_invoke", side_effect=reply) as invoke, patch.object(
+                lease, "read_stopped_predecessor", return_value=predecessor) as stopped:
+            evidence = lease.verify_held_recovery_guest(guests, args, 1, deadline, **options)
+            self.assertTrue(wire._hash(evidence))
+            self.assertEqual(stopped.call_count, 2)
+            self.assertEqual(invoke.call_count, 1)
+            with self.assertRaisesRegex(wire.BridgeRejected, "guest_ssh_replay_rejected"):
+                lease.verify_held_recovery_guest(guests, args, 1, deadline, **options)
+            with self.assertRaisesRegex(wire.BridgeRejected, "guest_ssh_initial_recovery_hold_unconfirmed"):
+                guests.verify_initial_recovery_hold(args, 2, challenge, "6"*64, deadline)
+
+            stopped.side_effect = [predecessor, predecessor | {"terminal_state_sha256": "6"*64}]
+            with self.assertRaisesRegex(wire.BridgeRejected, "native_initial_recovery_hold_unconfirmed"):
+                lease.verify_held_recovery_guest(guests, args, 3, deadline, **options)
+            stopped.side_effect = None
+            clock = MagicMock(return_value=deadline - 1)
+
+            def guard_crosses_deadline():
+                clock.return_value = deadline
+
+            with patch.object(wire.time, "monotonic", clock):
+                with self.assertRaisesRegex(wire.BridgeRejected, "bridge_deadline"):
+                    lease.verify_held_recovery_guest(
+                        guests, args, 4, deadline, **(options | {"assert_guard": guard_crosses_deadline}))
+
+    def test_quiescence_requires_dedicated_duplex_dispatch_and_current_recovery_proof(self):
+        wire = native_stdio_bridge
+        binding = wire.Binding(*(value*64 for value in "abcde"))
+        verb = wire.GUEST_QUIESCE_INITIAL_RECOVERY
+        args = {key: "f"*64 for key in wire.VERBS[verb][3]}
+        request = wire.Request(binding, "A", verb, 1, "1"*64, args)
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        with patch.object(dispatcher, "_dispatch", return_value=wire.Receipt("PASS", "8"*64)) as dispatch:
+            with self.assertRaisesRegex(wire.BridgeRejected, "bridge_guest_only_request"):
+                wire._Chain("cutover").check(verb, "A", args)
+            with self.assertRaises(wire.BridgeRejected):
+                dispatcher(request, 40)
+            with self.assertRaises(wire.BridgeRejected):
+                dispatcher.quiesce_initial_recovery(replace(request, node="B"), 40, assert_windows_closed=lambda *_: "8"*64)
+            with self.assertRaises(wire.BridgeRejected):
+                dispatcher.quiesce_initial_recovery(request, 40, assert_windows_closed=None)
+            dispatch.assert_not_called()
+            proof = lambda *_: "8"*64
+            self.assertEqual(dispatcher.quiesce_initial_recovery(request, 40, assert_windows_closed=proof),
+                             wire.Receipt("PASS", "8"*64))
+            dispatch.assert_called_once_with(request, 40, assert_windows_current=proof)
+
+        def stop_exact(_binding, *, assert_recovery_closed, **_args):
+            for boundary in wire.QUIESCENCE_BOUNDARIES:
+                if not assert_recovery_closed("8"*64, boundary):
+                    raise TransitionBlocked("recovery proof missing")
+            return "9"*64
+
+        worker = native_guest_worker
+        with patch.object(worker, "quiesce_initial_recovery", side_effect=stop_exact) as stop:
+            self.assertEqual(worker.handle(request).status, "UNKNOWN")
+            self.assertEqual(worker.handle(replace(request, node="B"), assert_windows_current=proof).status, "UNKNOWN")
+            stop.assert_not_called()
+            observer = MagicMock(side_effect=["0"*64, None])
+            self.assertEqual(worker.handle(request, assert_windows_current=observer).status, "UNKNOWN")
+            self.assertEqual([call.args[1] for call in observer.call_args_list], list(wire.QUIESCENCE_BOUNDARIES[:2]))
+            observer = MagicMock(return_value="8"*64)
+            self.assertEqual(worker.handle(request, assert_windows_current=observer), wire.Receipt("PASS", "9"*64))
+            self.assertEqual([call.args[1] for call in observer.call_args_list], list(wire.QUIESCENCE_BOUNDARIES))
+            self.assertEqual(len({call.args[0] for call in observer.call_args_list}), 4)
+
+    def test_durable_recovery_hold_blocks_ordinary_guest_worker_after_descriptor_closes(self):
+        worker = native_guest_worker
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            lock = root / "mutation.lock"
+            hold = root / native_stdio_bridge.INITIAL_RECOVERY_HOLD
+            lock.touch(mode=0o600)
+            info = lock.lstat()
+            if info.st_uid != 0:
+                lock_scope = SimpleNamespace(st_mode=info.st_mode, st_uid=0,
+                                             st_nlink=info.st_nlink, st_dev=info.st_dev, st_ino=info.st_ino)
+            else:
+                lock_scope = info
+
+            def observe(path):
+                if path == lock:
+                    return lock_scope
+                return original_lstat(path)
+
+            original_lstat = Path.lstat
+            with patch.object(worker, "ROOT", root), patch.object(worker, "LOCK", lock), \
+                    patch.object(worker.runtime, "_directory"), patch.object(Path, "lstat", observe):
+                with worker.mutation_lock():
+                    pass
+                hold.touch(mode=0o600)
+                for _ in range(2):
+                    with self.assertRaisesRegex(TransitionBlocked, "^guest_worker_initial_recovery_held$"):
+                        with worker.mutation_lock():
+                            self.fail("ordinary activation ran while recovery was pending")
+                hold.unlink()
+                hold.symlink_to(root / "missing")
+                with self.assertRaisesRegex(TransitionBlocked, "^guest_worker_initial_recovery_held$"):
+                    with worker.mutation_lock():
+                        self.fail("dangling recovery record bypassed the fence")
+
+    def test_inline_handoff_disallows_publish_but_allows_observation_under_hold(self):
+        namespace = {"__name__": "_guest_handoff_test"}
+        exec(compile(native_guest_handoff_io.REMOTE_SOURCE, "<guest-handoff>", "exec"), namespace)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            attempt = "a" * 64
+            stage = root / attempt
+            stage.mkdir(mode=0o700)
+            (root / "mutation.lock").touch(mode=0o600)
+            (root / native_stdio_bridge.INITIAL_RECOVERY_HOLD).touch(mode=0o600)
+            boot = root / "boot"
+            boot.write_bytes(b"boot")
+            namespace.update(ROOT=root, UID=os.geteuid(), BOOT=boot, RUNTIME=root / "runtime",
+                             INSTALLATION=root / "installed", check_request=MagicMock(),
+                             directory=lambda path, private: path.lstat(),
+                             read_file=lambda *_args, **_kwargs: b'{"node":"A","installation_id":"test"}',
+                             check_worker=MagicMock(return_value={"received": True}))
+            request = {"boot_sha256": sha(b"boot"), "installation_id": "test",
+                       "binding": {"attempt_id": attempt}}
+            with self.assertRaisesRegex(ValueError, "^guest_handoff_unconfirmed$"):
+                namespace["execute"](request | {"operation": "publish"})
+            self.assertFalse((stage / "activation-handoff.json").exists())
+            namespace["check_worker"].assert_not_called()
+            self.assertEqual(namespace["execute"](request | {"operation": "read"}),
+                             {"checked": {"received": True}})
+
+    def test_quiescence_persists_hold_before_stopping_exact_broker_then_apps(self):
+        worker = native_guest_worker
+        boot = b"current-boot"
+        binding = native_stdio_bridge.Binding("a"*64, "b"*64, "c"*64, sha(boot), "d"*64)
+        roles = sorted(worker.SERVICES | {"ha-broker"})
+        containers = {role: {"container_id": str(index)*64, "image_id": "sha256:" + "f"*64}
+                      for index, role in enumerate(roles)}
+        identity = {name: "f"*64 for name in ("cluster", "system_id_sha256", "source_commit", "manifest_sha256",
+                                             "restore_receipt_sha256", "engine_id_sha256", "protected_inventory_sha256")}
+        prepared = identity | {"status": "PREPARED", "containers": containers, "node": "A", "installation_id": "0"*64,
+                               "attempt_id": binding.attempt_id, "plan_sha256": binding.plan_sha256, "boot_sha256": sha(boot)}
+        config = {"node": "A", "generation": 1, "installation_id": prepared["installation_id"],
+                  "release": {"source_commit": prepared["source_commit"]}, "binding": {"plan_sha256": binding.plan_sha256}}
+        prepared["broker_sha256"] = sha(encoded(config))
+        authority = {"schema_version": 3, "authority_kind": "installed-runtime", "installation_id": config["installation_id"],
+                     "installed_at": "2020-01-01T00:00:00Z", "source_commit": prepared["source_commit"],
+                     "config_sha256": prepared["broker_sha256"], "plan_sha256": binding.plan_sha256,
+                     "action": "start-effect-broker"}
+        activated = prepared | {"status": "STARTED", "authority_files": {"broker/authority.json": sha(encoded(authority))}}
+        broker = containers["ha-broker"]["container_id"]
+        plan = {"recovery_attempt_id": "e"*64, "installation_id": "0"*64,
+                "runtime_receipt_sha256": sha(encoded(prepared)),
+                "activation_receipt_sha256": sha(encoded(activated))}
+        active = {
+            item["container_id"]: {
+                "Name": role, "Image": item["image_id"],
+                "Config": {"Labels": {"com.docker.compose.service": role, worker.runtime.ATTEMPT_LABEL: binding.attempt_id}},
+                "HostConfig": {"RestartPolicy": {"Name": "no"}, "AutoRemove": False}, "RestartCount": 0,
+                "Mounts": [], "State": {"Running": True, "Paused": False, "Restarting": False, "OOMKilled": False,
+                                        "Dead": False, "Status": "running", "Pid": 10, "ExitCode": 0, "StartedAt": "1"},
+            } for role, item in containers.items()
+        }
+        postgres = "9"*64
+        active[postgres] = {"Config": {"Labels": {"com.docker.compose.service": "postgres"}}}
+        plan["protected_inventory_sha256"] = sha(encoded({postgres: active[postgres]}))
+        rows = {worker.restore.INSTALLATION.name: {"node": "A", "installation_id": plan["installation_id"],
+                                                  "source_commit": "9"*40},
+                "runtime-prepared.json": prepared, "runtime-activation.json": activated}
+
+        @contextmanager
+        def lock():
+            events.append("locked")
+            yield
+
+        def read_json(path):
+            if path.name == native_stdio_bridge.INITIAL_RECOVERY_HOLD:
+                raw = path.read_bytes()
+                return raw, json.loads(raw)
+            return encoded(rows[path.name]), rows[path.name]
+
+        for case in ("success", "partial_stop", "foreign_running", "legacy_authority"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                events = []
+                objects = copy.deepcopy(active)
+                marker = root / native_stdio_bridge.INITIAL_RECOVERY_HOLD
+                broker_root = root / "runtime/broker"
+                broker_root.mkdir(parents=True)
+                route = broker_root / "car-route-release.json"
+                route_backup = root / binding.attempt_id / f"recovery-{plan['recovery_attempt_id']}-car-route-release.json"
+                route_backup.parent.mkdir()
+                raw_authority = encoded(authority if case != "legacy_authority" else authority | {"schema_version": 1})
+                (broker_root / "authority.json").write_bytes(raw_authority)
+                (broker_root / "config.json").write_bytes(encoded(config))
+                activation = activated | {"authority_files": {"broker/authority.json": sha(raw_authority)}}
+                rows["runtime-activation.json"] = activation
+                car_release = encoded({"schema_version": 1, "action": "enable-car-after-route-verification",
+                                       "broker_authority_sha256": sha(raw_authority), "route_verification_sha256": "2"*64})
+                route.write_bytes(car_release)
+                scoped_plan = plan.copy()
+                scoped_plan["activation_receipt_sha256"] = sha(encoded(activation))
+                scoped_plan["car_route_release_sha256"] = sha(car_release)
+                if case == "foreign_running":
+                    foreign = "8"*64
+                    objects[foreign] = copy.deepcopy(active[broker])
+                    objects[foreign]["Config"]["Labels"][worker.runtime.ATTEMPT_LABEL] = "1"*64
+                    scoped_plan["protected_inventory_sha256"] = sha(encoded({key: objects[key] for key in (postgres, foreign)}))
+
+                def press_stop(command, signal, stop_timeout, *targets, timeout):
+                    self.assertTrue(marker.is_file())
+                    self.assertEqual((command, signal, stop_timeout, timeout), ("stop", "--signal=SIGTERM", "--timeout=-1", 25))
+                    self.assertNotIn(postgres, targets)
+                    self.assertEqual(route.exists(), targets == (broker,))
+                    if targets != (broker,):
+                        self.assertEqual(route_backup.read_bytes(), car_release)
+                    events.append(targets)
+                    for identifier in targets:
+                        objects[identifier]["State"].update(Running=False, Status="exited", Pid=0, FinishedAt="2")
+                        if case == "partial_stop" and targets != (broker,):
+                            raise subprocess.TimeoutExpired("stop", timeout)
+
+                with patch.object(worker, "ROOT", root), patch.object(worker, "_read_json", side_effect=read_json), \
+                        patch.object(worker.os, "geteuid", return_value=0), patch.object(worker, "mutation_lock", lock), \
+                        patch.object(worker, "_guest_mutation_descriptor", lock), \
+                        patch.object(worker.restore, "BOOT_ID", SimpleNamespace(read_bytes=lambda: boot)), \
+                        patch.object(worker.runtime, "ROOT", root / "runtime"), patch.object(worker.runtime, "_fsync_directory"), \
+                        patch.object(worker.runtime, "_directory"), patch.object(worker.runtime, "_inventory", return_value=objects), \
+                        patch.object(worker.runtime, "inventory_sha256", side_effect=lambda items: sha(encoded(items))), \
+                        patch.object(worker.runtime, "_write", side_effect=lambda path, raw, *_: path.write_bytes(raw)), \
+                        patch.object(worker.runtime, "_read", side_effect=lambda path, *_, **__: path.read_bytes()), \
+                        patch.object(worker.runtime, "_docker", side_effect=press_stop) as docker:
+                    if case in {"foreign_running", "legacy_authority"}:
+                        with self.assertRaisesRegex(TransitionBlocked, "guest_initial_recovery_quiescence_unverified"):
+                            worker.quiesce_initial_recovery(binding, **scoped_plan, assert_recovery_closed=lambda *_: True)
+                        self.assertEqual(events, ["locked"])
+                        self.assertFalse(marker.exists())
+                        self.assertEqual(route.read_bytes(), car_release)
+                        self.assertFalse(route_backup.exists())
+                        continue
+                    if case == "partial_stop":
+                        with self.assertRaises(subprocess.TimeoutExpired):
+                            worker.quiesce_initial_recovery(binding, **scoped_plan, assert_recovery_closed=lambda *_: True)
+                        self.assertEqual(events, ["locked", (broker,), tuple(sorted(set(active)-{broker, postgres}))])
+                        self.assertFalse(objects[broker]["State"]["Running"])
+                        self.assertEqual(sum(not objects[ident]["State"]["Running"] for ident in active if ident != postgres), 2)
+                    else:
+                        result = worker.quiesce_initial_recovery(binding, **scoped_plan, assert_recovery_closed=lambda *_: True)
+                        self.assertEqual(result, sha(marker.read_bytes()))
+                        self.assertEqual(events, ["locked", (broker,), tuple(sorted(set(active)-{broker, postgres}))])
+                    self.assertTrue(marker.is_file())
+                    self.assertFalse(route.exists())
+                    self.assertEqual(route_backup.read_bytes(), car_release)
+                    wire = native_stdio_bridge
+                    observed = wire.Request(binding, "A", wire.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, 2, "7"*64, scoped_plan)
+                    result = worker.handle(observed)
+                    if case == "partial_stop":
+                        self.assertEqual(result.status, "UNKNOWN")
+                    else:
+                        self.assertEqual(result, wire.Receipt("PASS", sha(marker.read_bytes())))
+                        isolation = wire.Request(binding, "A", wire.GUEST_OBSERVE_CAR_ISOLATION, 3, "8"*64,
+                                                 scoped_plan | {"hold_sha256": sha(marker.read_bytes())})
+                        stopped_proof = worker.handle(isolation)
+                        self.assertEqual(stopped_proof.status, "PASS")
+                        broker_state = objects[broker]["State"]
+                        broker_state.update(Status="running", Running=True, Pid=11)
+                        self.assertEqual(worker.handle(isolation).status, "UNKNOWN")
+                        broker_state["StartedAt"] = "3"
+                        restarted_proof = worker.handle(isolation)
+                        self.assertEqual(restarted_proof.status, "PASS")
+                        self.assertNotEqual(restarted_proof, stopped_proof)
+                        self.assertEqual(worker.handle(observed).status, "UNKNOWN")
+                        self.assertEqual(worker.handle(replace(
+                            isolation, args=isolation.args | {"hold_sha256": "0"*64})).status, "UNKNOWN")
+                        route.write_bytes(car_release)
+                        self.assertEqual(worker.handle(observed).status, "UNKNOWN")
+                        self.assertEqual(worker.handle(isolation).status, "UNKNOWN")
+                        route.unlink()
+                        original_lstat = Path.lstat
+
+                        def deny_route_stat(path):
+                            if path == route:
+                                raise PermissionError("fixture")
+                            return original_lstat(path)
+
+                        with patch.object(Path, "lstat", deny_route_stat):
+                            self.assertEqual(worker.handle(isolation).status, "UNKNOWN")
+                    self.assertEqual(docker.call_count, 2)
 
 
 class TransitionTargetBridgeTests(unittest.TestCase):
@@ -601,6 +943,51 @@ class NativeGuestActivationTests(unittest.TestCase):
 
 
 class NativeGuestLiveTests(unittest.TestCase):
+    def test_recovered_a_lease_rejects_old_revision_and_changed_boot(self):
+        live = native_guest_live
+        boot = b"fixture-boot"
+        plan = "a"*64
+        source = "b"*40
+        shared = dict(boot_sha256=sha(boot), installation_id="c"*64, system_id="123",
+                      plan_sha256=plan, manifest_sha256="d"*64, cluster="fixture",
+                      postgres_id="e"*64, validate=lambda: None)
+        pins = SimpleNamespace(**shared, node="A", primary_node="A", generation=1,
+                               attempt_id="f"*64, release={"source_commit": source})
+        postgres = SimpleNamespace(**shared, source_commit=source, peer_ipv4="192.0.2.11")
+        sampled = datetime.now(timezone.utc)
+        observed = {
+            "identity": ["postgres", "ha", "ha_A", False, "123", "on", "remote_apply",
+                         "FIRST1(ha_b)", "on", "on", 1],
+            "authority": ["fixture", 1, 4, "A", "B", 1, ["A"], "A", "AS", True, True],
+            "lease_clock": [sampled.isoformat(), (sampled + timedelta(seconds=5)).isoformat()],
+            "binding": [["fixture", "123", source, plan, live.runtime.config.BROKER_ROLE]],
+            "peers": [["192.0.2.11", "0/20"]],
+        }
+        options = dict(recovery_attempt_id="1"*64, challenge_sha256="2"*64, deadline=time.monotonic()+10)
+        boot_file = MagicMock()
+        boot_file.read_bytes.return_value = boot
+        with patch.object(live.os, "geteuid", return_value=0), patch.object(live.runtime, "BOOT_ID", boot_file), \
+                patch.object(live.runtime, "_runtime_identity", return_value={}), \
+                patch.object(live.restore, "_pg", return_value=observed) as read:
+            with patch.object(live.time, "monotonic", return_value=options["deadline"] - 0.5):
+                first = live.observe_recovered_a_lease(pins, postgres, **options)
+                self.assertEqual(read.call_args.kwargs["timeout"], 0.5)
+                read.side_effect = subprocess.TimeoutExpired("docker", 0.5)
+                with self.assertRaisesRegex(TransitionBlocked, "guest_live_recovery_lease_unconfirmed"):
+                    live.observe_recovered_a_lease(pins, postgres, **options)
+                read.side_effect = None
+            second = live.observe_recovered_a_lease(pins, postgres, **(options | {"challenge_sha256": "3"*64}))
+            self.assertNotEqual(first, second)
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
+                live._lease(pins, postgres)
+            observed["authority"][2] = 2
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
+                live.observe_recovered_a_lease(pins, postgres, **options)
+            observed["authority"][2] = 4
+            boot_file.read_bytes.side_effect = [boot, b"rebooted"]
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_recovery_lease_unconfirmed"):
+                live.observe_recovered_a_lease(pins, postgres, **options)
+
     def test_portal_readiness_finishes_before_other_ingress_requests(self):
         live = native_guest_live
         pin = "a" * 64
@@ -2268,6 +2655,101 @@ print(json.dumps(response), flush=True)
                 self.assertFalse(backend.legacy_open)
                 self.assertNotIn('restore_legacy', backend.calls)
                 self.assertEqual(json.loads(path.read_bytes())['phase'], phase)
+
+class NativeGuestRecoveryObserverTests(unittest.TestCase):
+    def setUp(self):
+        self.bridge = native_stdio_bridge
+        self.boot_raw = b"guest-boot"
+        self.boot = sha(self.boot_raw)
+        self.hold = {
+            "node": "A", "attempt_id": "a" * 64,
+            "binding": self.bridge.Binding("1" * 64, "2" * 64, "3" * 64, self.boot, "4" * 64).fields(),
+            **{key: "5" * 64 for key in self.bridge.INITIAL_RECOVERY_ARGS if key != "recovery_attempt_id"},
+        }
+        raw = self.bridge._bytes(self.hold)
+        self.hold_sha = sha(raw)
+        self.frame = {"version": 1, "purpose": "held_admission", "nonce": "b" * 64,
+                      "hold_sha256": self.hold_sha, "guest_boot_sha256": self.boot}
+        self.observer = native_guest_recovery_observer.Observer(self.hold_sha, self.boot)
+        worker = native_guest_worker
+        for target, name, value in (
+            (worker.restore, "BOOT_ID", SimpleNamespace(read_bytes=lambda: self.boot_raw)),
+            (worker, "_read_json", lambda _: (raw, self.hold)),
+        ):
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_held_scope_and_replay(self):
+        with patch.object(native_guest_worker, "handle", return_value=self.bridge.Receipt("PASS", self.hold_sha)) as handle:
+            self.assertEqual(self.observer.observe(self.frame), self.frame | {"observation_sha256": self.hold_sha})
+            request, = handle.call_args.args
+            self.assertEqual(request.verb, self.bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD)
+            self.assertEqual(request.args["recovery_attempt_id"], self.hold["attempt_id"])
+            with self.assertRaises(self.bridge.BridgeRejected):
+                self.observer.observe(self.frame)
+            handle.assert_called_once()
+
+    def test_only_two_purposes_and_no_args_override(self):
+        with patch.object(native_guest_worker, "handle") as handle:
+            for frame in (self.frame | {"purpose": "activate"}, self.frame | {"args": {}},
+                          self.frame | {"hold_sha256": "c" * 64}, self.frame | {"version": True}):
+                with self.assertRaises(self.bridge.BridgeRejected):
+                    self.observer.observe(frame)
+            handle.assert_not_called()
+
+    def test_provider_observation_and_positive_receipt_required(self):
+        valid = "d" * 64
+        with patch.object(native_guest_worker, "handle", side_effect=(
+            self.bridge.Receipt("UNKNOWN"), self.bridge.Receipt("PASS", valid),
+        )) as handle:
+            frame = self.frame | {"purpose": "provider_isolation"}
+            with self.assertRaises(self.bridge.BridgeRejected):
+                self.observer.observe(frame)
+            frame |= {"nonce": "e" * 64}
+            self.assertEqual(self.observer.observe(frame)["observation_sha256"], valid)
+            request, = handle.call_args.args
+            self.assertEqual(request.verb, self.bridge.GUEST_OBSERVE_CAR_ISOLATION)
+            self.assertEqual(request.args["hold_sha256"], self.hold_sha)
+
+    def test_listener_survives_timeout_and_rejects_non_host_peer(self):
+        observed = []
+
+        def observe(frame):
+            observed.append(frame)
+            if len(observed) == 1:
+                time.sleep(0.5)
+            return frame
+
+        streams = [socket.socketpair() for _ in range(3)]
+        for pair in streams:
+            for stream in pair:
+                self.addCleanup(stream.close)
+        incoming = self.bridge._bytes(self.frame)
+        for _, client in streams:
+            client.sendall(incoming)
+        host_cid = 2
+        listener = MagicMock()
+        listener.accept.side_effect = [
+            (streams[0][0], (3, 0)), (streams[1][0], (host_cid, 0)),
+            (streams[2][0], (host_cid, 0)),
+        ]
+        old_handler = signal.getsignal(signal.SIGALRM)
+        self.addCleanup(signal.signal, signal.SIGALRM, old_handler)
+        with patch.object(socket, "VMADDR_CID_HOST", host_cid, create=True), \
+                patch.object(native_guest_recovery_observer, "REQUEST_SECONDS", 0.05):
+            with self.assertRaises(StopIteration):
+                native_guest_recovery_observer._serve(listener, SimpleNamespace(observe=observe))
+        self.assertEqual(observed, [self.frame, self.frame])
+        self.assertEqual(streams[2][1].recv(len(incoming) + 1), incoming)
+        self.assertEqual(streams[1][1].recv(1), b"")
+
+    def test_rejects_old_boot_before_observing(self):
+        self.boot_raw = b"after-reboot"
+        with patch.object(native_guest_worker, "handle") as handle:
+            with self.assertRaises(self.bridge.BridgeRejected):
+                self.observer.observe(self.frame)
+            handle.assert_not_called()
 
 if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='--postgres-integration':

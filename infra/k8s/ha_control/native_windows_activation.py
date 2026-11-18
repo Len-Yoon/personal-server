@@ -4,12 +4,17 @@ import base64
 import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import os
+from pathlib import Path
 import re
 import secrets
+import stat
 from subprocess import TimeoutExpired
 import time
 
 from . import native_stdio_bridge as bridge
+from .controller import exclusive
+from .native_guest_ssh import _checked_file
 from .native_windows_ssh import fixed_script
 from .provision_enforced import closure_service_args
 
@@ -197,6 +202,14 @@ class WindowsActivationLease:
 
     def read_prior_service_args(self, deadline, *, assert_guard, require_terminal=False):
         """Read prior stopped args and optionally confirm its protected terminal journal."""
+        return self._read_prior_service(deadline, assert_guard=assert_guard,
+                                        require_terminal=require_terminal)["prior_args_sha256"]
+
+    def read_stopped_predecessor(self, deadline, *, assert_guard):
+        """Read the protected terminal, arguments and exact stopped instance as one record."""
+        return self._read_prior_service(deadline, assert_guard=assert_guard, require_terminal=True)
+
+    def _read_prior_service(self, deadline, *, assert_guard, require_terminal):
         error = "native_initial_prior_args_unconfirmed"
         bridge._need(type(require_terminal) is bool, error)
         assert_guard()
@@ -219,7 +232,233 @@ class WindowsActivationLease:
             expected["terminal_state_sha256"] = terminal
         bridge._need(bridge._hash(pin) and bridge._matches(result, expected), error)
         assert_guard()
-        return pin
+        return expected
+
+    def quiesce_initial_recovery(self, guests, request, deadline, *, predecessor, assert_guard,
+                                 read_database_closed):
+        """Pin the stopped Windows predecessor across the dedicated guest operation."""
+        error = "native_initial_recovery_quiescence_unconfirmed"
+        keys = {"prior_args_sha256", "service_instance_sha256", "terminal_state_sha256"}
+        bridge._need(type(request) is bridge.Request and request.binding == self.custody.binding
+                     and request.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY and request.node == "A"
+                     and type(predecessor) is dict and set(predecessor) == keys
+                     and all(bridge._hash(pin) for pin in predecessor.values())
+                     and predecessor["service_instance_sha256"] == self.service_instance_sha256
+                     and callable(assert_guard) and callable(read_database_closed), error)
+        bridge._args(request.verb, request.node, request.args)
+        selected = predecessor.copy()
+        expected_args = bridge._bytes(request.args)
+
+        def assert_windows_closed(challenge, boundary, boundary_deadline):
+            bridge._need(bridge._hash(challenge) and boundary in bridge.QUIESCENCE_BOUNDARIES
+                         and bridge._bytes(request.args) == expected_args, error)
+            assert_guard()
+            prior = self.read_stopped_predecessor(boundary_deadline, assert_guard=assert_guard)
+            bridge._need(bridge._matches(prior, selected), error)
+            pg = read_database_closed(challenge=challenge, deadline=boundary_deadline)
+            bridge._remaining(boundary_deadline)
+            bridge._need(bridge._hash(pg), error)
+            assert_guard()
+            return bridge._digest(bridge._bytes({
+                "challenge": challenge, "boundary": boundary, "request_nonce": request.nonce,
+                "request_args_sha256": bridge._digest(expected_args), "predecessor": selected,
+                "closed_database_sha256": pg,
+            }))
+
+        assert_guard()
+        receipt = guests.quiesce_initial_recovery(request, deadline, assert_windows_closed=assert_windows_closed)
+        assert_guard()
+        bridge._need(type(receipt) is bridge.Receipt and receipt.status == "PASS"
+                     and bridge._hash(receipt.receipt_sha256), error)
+        return receipt.receipt_sha256
+
+    def observe_initial_recovery_hold(self, guests, issued, request, deadline, *, predecessor, assert_guard,
+                                      read_database_closed):
+        """Reconcile an already issued stop without dispatching another one."""
+        error = "native_initial_recovery_hold_unconfirmed"
+        bridge._need(type(issued) is bridge.Request and type(request) is bridge.Request
+                     and issued.binding == request.binding == self.custody.binding
+                     and issued.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY
+                     and request.verb == bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
+                     and issued.node == request.node == "A" and issued.args == request.args
+                     and type(issued.sequence) is int and type(request.sequence) is int
+                     and 0 < issued.sequence < request.sequence <= bridge.MAX_REQUESTS
+                     and bridge._hash(issued.nonce) and bridge._hash(request.nonce) and issued.nonce != request.nonce
+                     and callable(assert_guard) and callable(read_database_closed)
+                     and type(predecessor) is dict and set(predecessor) == {
+                         "prior_args_sha256", "service_instance_sha256", "terminal_state_sha256"}
+                     and all(bridge._hash(pin) for pin in predecessor.values())
+                     and predecessor["service_instance_sha256"] == self.service_instance_sha256, error)
+        bridge._args(request.verb, request.node, request.args)
+        expected = predecessor.copy()
+        args_sha256 = bridge._digest(bridge._bytes(request.args))
+
+        def verify(phase):
+            bridge._need(bridge._digest(bridge._bytes(request.args)) == args_sha256, error)
+            prior = self.read_stopped_predecessor(deadline, assert_guard=assert_guard)
+            bridge._need(bridge._matches(prior, expected), error)
+            challenge = bridge._digest(bridge._bytes({"issued": issued.nonce, "observe": request.nonce,
+                                                    "args_sha256": args_sha256, "phase": phase}))
+            bridge._need(bridge._hash(read_database_closed(challenge=challenge, deadline=deadline)), error)
+            bridge._remaining(deadline)
+            assert_guard()
+
+        verify("before")
+        receipt = guests.observe_initial_recovery_hold(request, deadline)
+        bridge._need(type(receipt) is bridge.Receipt and receipt.status == "PASS"
+                     and bridge._hash(receipt.receipt_sha256), error)
+        verify("after")
+        return receipt.receipt_sha256
+
+    def verify_held_recovery_guest(self, guests, args, sequence, deadline, *, challenge_sha256, hold_sha256,
+                                   predecessor, assert_guard):
+        """Read the exact stopped predecessor and guest hold within one challenge deadline."""
+        error = "native_initial_recovery_hold_unconfirmed"
+        bridge._need(type(predecessor) is dict and set(predecessor) == {
+                         "prior_args_sha256", "service_instance_sha256", "terminal_state_sha256"}
+                     and all(bridge._hash(pin) for pin in predecessor.values())
+                     and predecessor["service_instance_sha256"] == self.service_instance_sha256
+                     and getattr(guests, "binding", None) == self.custody.binding
+                     and callable(assert_guard), error)
+        prior = predecessor.copy()
+
+        def verify_predecessor():
+            bridge._remaining(deadline)
+            actual = self.read_stopped_predecessor(deadline, assert_guard=assert_guard)
+            bridge._need(bridge._matches(actual, prior), error)
+
+        verify_predecessor()
+        readback = guests.verify_initial_recovery_hold(args, sequence, challenge_sha256, hold_sha256, deadline)
+        bridge._need(bridge._hash(readback), error)
+        verify_predecessor()
+        bridge._remaining(deadline)
+        assert_guard()
+        bridge._remaining(deadline)
+        return bridge._digest(bridge._bytes({"challenge_sha256": challenge_sha256, "predecessor": prior,
+                                            "guest_hold_readback_sha256": readback}))
+
+    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard):
+        """Require the same protected Windows heartbeat around the paired database read."""
+        error = "native_initial_recovery_publication_unconfirmed"
+        bridge._need(type(recovery) is dict and set(recovery) == {
+                         "attempt_id", "predecessor_terminal_sha256", "predecessor_service_sha256"}
+                     and all(bridge._hash(pin) for pin in recovery.values())
+                     and bridge._hash(self.service_instance_sha256)
+                     and callable(powershell) and callable(observe_pair) and callable(assert_guard), error)
+        binding = self.custody.binding
+        challenge = secrets.token_hex(32)
+        source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
+            'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            'AttemptId': binding.attempt_id, 'PriorSha256': challenge,
+            'ExpectedServiceInstanceSha256': self.service_instance_sha256,
+            'RecoveryAttemptId': recovery['attempt_id'],
+            'RecoveryPredecessorTerminalSha256': recovery['predecessor_terminal_sha256'],
+            'RecoveryPredecessorServiceSha256': recovery['predecessor_service_sha256'],
+        })
+
+        def read():
+            assert_guard()
+            bridge._remaining(deadline)
+            value = powershell(source, deadline)
+            bridge._need(type(value) is dict and set(value) == {
+                             'windows_generation', 'windows_generation_sha256', 'live_lease_sha256'}
+                         and type(value['windows_generation']) is int and value['windows_generation'] == 1
+                         and bridge._hash(value['windows_generation_sha256'])
+                         and bridge._hash(value['live_lease_sha256']), error)
+            return value
+
+        before = read().copy()
+        paired = observe_pair(challenge=challenge, lease_sha256=before['live_lease_sha256'], deadline=deadline)
+        bridge._need(bridge._hash(paired) and bridge._matches(read(), before), error)
+        assert_guard()
+        bridge._remaining(deadline)
+        return bridge._digest(bridge._bytes({"challenge": challenge, "windows": before, "postgres_sha256": paired}))
+
+    def run_recovery_quiescence_once(self, guests, issued, observation, deadline, *, directory, store_sha256,
+                                     recovery_plan_sha256, predecessor, assert_guard, read_database_closed):
+        """Persist one approved POSIX coordinator dispatch before any stop."""
+        error = "native_initial_recovery_dispatch_unconfirmed"
+        bridge._need(os.name == "posix" and type(issued) is bridge.Request and type(observation) is bridge.Request
+                     and issued.binding == observation.binding == self.custody.binding
+                     and issued.node == observation.node == "A" and issued.args == observation.args
+                     and issued.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY
+                     and observation.verb == bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
+                     and type(issued.sequence) is int and type(observation.sequence) is int
+                     and 0 < issued.sequence < observation.sequence <= bridge.MAX_REQUESTS
+                     and bridge._hash(issued.nonce) and bridge._hash(observation.nonce) and issued.nonce != observation.nonce
+                     and bridge._hash(store_sha256) and bridge._hash(recovery_plan_sha256)
+                     and type(predecessor) is dict and set(predecessor) == {
+                         "prior_args_sha256", "service_instance_sha256", "terminal_state_sha256"}
+                     and all(bridge._hash(pin) for pin in predecessor.values())
+                     and predecessor["service_instance_sha256"] == self.service_instance_sha256
+                     and callable(assert_guard) and callable(read_database_closed), error)
+        bridge._args(issued.verb, issued.node, issued.args)
+        bridge._args(observation.verb, observation.node, observation.args)
+        args = json.loads(bridge._bytes(issued.args))
+        issued = bridge.Request(issued.binding, "A", issued.verb, issued.sequence, issued.nonce, args)
+        observation = bridge.Request(observation.binding, "A", observation.verb, observation.sequence,
+                                     observation.nonce, args.copy())
+        predecessor = predecessor.copy()
+        directory = Path(directory)
+        bridge._need(directory.is_absolute() and directory.resolve(strict=True) == directory
+                     and directory.name == args["recovery_attempt_id"], error)
+        for parent in (directory, *directory.parents):
+            item = parent.lstat()
+            bridge._need(stat.S_ISDIR(item.st_mode) and item.st_uid in {0, os.geteuid()}
+                         and (not item.st_mode & 0o022 or item.st_uid == 0 and item.st_mode & stat.S_ISVTX), error)
+        identity = directory.lstat()
+        bridge._need(identity.st_uid == os.geteuid() and not identity.st_mode & 0o077
+                     and store_sha256 == bridge._digest(bridge._bytes(
+                         {"path": str(directory), "device": identity.st_dev, "inode": identity.st_ino})), error)
+        path = directory / "quiesce-issued.json"
+        done = directory / "quiesce-observed.json"
+        intent = bridge._bytes({"schema_version": 1, "recovery_plan_sha256": recovery_plan_sha256,
+                                "binding": issued.binding.fields(), "node": "A", "verb": issued.verb,
+                                "nonce": issued.nonce, "sequence": issued.sequence, "args": args,
+                                "predecessor": predecessor, "store_sha256": store_sha256})
+        options = {"predecessor": predecessor, "assert_guard": assert_guard, "read_database_closed": read_database_closed}
+
+        def durable_create(name, raw, parent_fd):
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(parent_fd)
+
+        with exclusive(directory / "quiesce.lock"):
+            parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                observed_dir = os.fstat(parent_fd)
+                bridge._need((observed_dir.st_dev, observed_dir.st_ino) == (identity.st_dev, identity.st_ino), error)
+                assert_guard()
+                bridge._remaining(deadline)
+                if os.path.lexists(path):
+                    recorded, _ = _checked_file(path, private=True, maximum=bridge.FRAME_BYTES)
+                    bridge._need(recorded == intent, error)
+                    hold = self.observe_initial_recovery_hold(guests, issued, observation, deadline, **options)
+                else:
+                    bridge._need(not os.path.lexists(done), error)
+                    prior = self.read_stopped_predecessor(deadline, assert_guard=assert_guard)
+                    bridge._need(bridge._matches(prior, predecessor), error)
+                    challenge = bridge._digest(bridge._bytes({"intent_sha256": bridge._digest(intent),
+                                                            "phase": "before_dispatch"}))
+                    bridge._need(bridge._hash(read_database_closed(challenge=challenge, deadline=deadline)), error)
+                    bridge._remaining(deadline)
+                    assert_guard()
+                    durable_create(path.name, intent, parent_fd)
+                    hold = self.quiesce_initial_recovery(guests, issued, deadline, **options)
+                assert_guard()
+                bridge._need(bridge._hash(hold), error)
+                receipt = bridge._bytes({"issued_sha256": bridge._digest(intent), "hold_sha256": hold})
+                if os.path.lexists(done):
+                    recorded, _ = _checked_file(done, private=True, maximum=bridge.FRAME_BYTES)
+                    bridge._need(recorded == receipt, error)
+                else:
+                    durable_create(done.name, receipt, parent_fd)
+                return hold
+            finally:
+                os.close(parent_fd)
 
     def _service_retirement(self, operation, deadline):
         custody = self.custody

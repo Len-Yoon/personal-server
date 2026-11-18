@@ -33,6 +33,7 @@ BOOT = Path('/proc/sys/kernel/random/boot_id')
 INSTALLATION = Path('/etc/n100-ha-bootstrap-intent.json')
 RUNTIME = Path('/etc/n100-ha')
 APPS = __APPS__
+INITIAL_RECOVERY_HOLD = __INITIAL_RECOVERY_HOLD__
 UID = 0
 LIMIT = 4096
 PIN = re.compile(r'[a-f0-9]{64}\Z')
@@ -168,6 +169,8 @@ def execute(value):
              and stat.S_IMODE(info.st_mode) == 0o600
              and signature(info) == signature(os.stat('mutation.lock', dir_fd=root, follow_symlinks=False)))
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if value['operation'] == 'publish':
+            need(absent(root, INITIAL_RECOVERY_HOLD))
         stage = stack.enter_context(opened(attempt, os.O_RDONLY | os.O_DIRECTORY, root))
         info = os.fstat(stage)
         need(stat.S_ISDIR(info.st_mode) and info.st_uid == UID and not info.st_mode & 0o077
@@ -211,7 +214,8 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
-'''.replace('__APPS__', repr(tuple(sorted(SERVICES))))
+'''.replace('__APPS__', repr(tuple(sorted(SERVICES)))).replace(
+    '__INITIAL_RECOVERY_HOLD__', repr(bridge.INITIAL_RECOVERY_HOLD))
 
 REMOTE_COMMAND = shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', REMOTE_SOURCE))
 EVIDENCE_FIELDS = {'manifest_sha256', 'restore_receipt_sha256', 'runtime_receipt_sha256',

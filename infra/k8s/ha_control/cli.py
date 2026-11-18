@@ -161,11 +161,17 @@ def run(args):
             raise TransitionBlocked("plan_bound_journal_required")
         validate_bundle(p)
         if 'initial_wsl_cutover' in p:
+            recovering = 'initial_cutover_recovery' in p
+            if recovering and 'windows_recovery_observers' not in p:
+                raise TransitionBlocked('initial_recovery_native_observer_required')
             if args.command != 'serve' or not getattr(args, 'arm', False):
                 raise TransitionBlocked('initial_cutover_requires_explicit_serve')
-            from .initial_lease_service import native_initial_observer, serve_initial
-            with native_initial_observer(backend) as observer:
-                return serve_initial(backend, journal, observer)
+            from .initial_lease_service import (native_initial_observer, native_recovery_observer,
+                                                serve_initial, serve_initial_recovery)
+            factory, serve = ((native_recovery_observer, serve_initial_recovery) if recovering
+                              else (native_initial_observer, serve_initial))
+            with factory(backend) as observer:
+                return serve(backend, journal, observer)
         transition_service = args.command in {"transition-serve", "transition-rearm"}
         write_command = transition_service or args.command in {"advance", "serve"}
         if p.get("profile") == "enforced-vm-v1" and p["generation"] >= 2 and write_command:

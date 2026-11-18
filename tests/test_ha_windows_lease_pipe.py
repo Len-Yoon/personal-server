@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 from queue import Queue
@@ -11,7 +15,131 @@ from unittest.mock import Mock, patch
 from infra.k8s.ha_control import enforced_windows, initial_lease_service, windows_lease_pipe
 
 
+class RecoveryProofWireTests(unittest.TestCase):
+    def test_native_response_matches_python_and_rejects_unbound_observation(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        self.assertTrue(Path(runtime).is_file(), "PowerShell required for recovery wire verification")
+        protocol = (Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
+                    / "windows-ha-recovery-proof-protocol.ps1")
+        source = r"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+. $env:HA_RECOVERY_PROTOCOL
+$pins = ConvertFrom-Json -AsHashtable $env:HA_RECOVERY_PINS
+$fact = [pscustomobject]@{
+    challenge_sha256=$env:HA_RECOVERY_DIGEST; closed=$true; observation_sha256=('a'*64)
+}
+$mac = [Security.Cryptography.HMACSHA256]::new([byte[]]::new(32))
+try { [Console]::Write((New-HaRecoveryProofFrame $env:HA_RECOVERY_CHALLENGE $pins $fact $mac)) }
+finally { $mac.Dispose() }
+"""
+        for purpose in ("held_admission", "provider_isolation"):
+            with self.subTest(purpose=purpose):
+                pins = windows_lease_pipe.RecoveryProofPins(
+                    *(letter*64 for letter in "abcdef12"), "S-1-5-80-1-2-3-4-5", purpose)
+                challenge = pins.challenge()
+                raw = json.dumps(challenge, separators=(",", ":"), sort_keys=True)
+                env = os.environ | {"HA_RECOVERY_PROTOCOL": str(protocol), "HA_RECOVERY_CHALLENGE": raw,
+                                    "HA_RECOVERY_PINS": json.dumps(vars(pins)),
+                                    "HA_RECOVERY_DIGEST": hashlib.sha256(raw.encode()).hexdigest()}
+                args = (runtime, "-NoProfile", "-NonInteractive", "-Command", source)
+                result = subprocess.run(args, env=env, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(windows_lease_pipe.verify_response(
+                    result.stdout, challenge, 2, key=bytearray(32), monotonic=lambda: 0), "a"*64)
+                stale = subprocess.run(args, env=env | {"HA_RECOVERY_DIGEST": "0"*64},
+                                       capture_output=True, timeout=15)
+                self.assertNotEqual(stale.returncode, 0)
+                self.assertEqual(stale.stdout, b"")
+
+    def test_recovery_requires_distinct_challenge_and_mac_domain(self):
+        pipe = windows_lease_pipe
+        sid = "S-1-5-80-1-2-3-4-5"
+        pins = pipe.RecoveryProofPins(*(letter*64 for letter in "abcdef12"), sid, "held_admission")
+        challenge = pins.challenge()
+        key = bytearray(b"x"*32)
+
+        def response(sample, *, prefix=b""):
+            body = json.dumps(sample | {"closed": True, "observation_sha256": "1"*64}).encode()
+            return json.dumps({"body": base64.b64encode(body).decode(),
+                               "mac": hmac.digest(key, prefix + body, "sha256").hex()}).encode() + b"\n"
+
+        recovery_domain = pipe.RECOVERY_SCOPE.encode() + b"\0"
+        self.assertEqual(pipe.verify_response(response(challenge, prefix=recovery_domain), challenge, 2,
+                                              key=key, monotonic=lambda: 0), "1"*64)
+        with self.assertRaises(ValueError):
+            pipe.verify_response(response(challenge), challenge, 2, key=key, monotonic=lambda: 0)
+        for modified in (challenge | {"purpose": "provider_isolation"},
+                         challenge | {"hold_sha256": "0"*64},
+                         pins.challenge()):
+            # A good MAC for another purpose, pin or fresh nonce still fails.
+            with self.assertRaises(ValueError):
+                pipe.verify_response(response(modified, prefix=recovery_domain), challenge, 2,
+                                     key=key, monotonic=lambda: 0)
+        with self.assertRaises(ValueError):
+            pipe.verify_response(response(challenge, prefix=recovery_domain), challenge, 2,
+                                 key=key, monotonic=lambda: 2)
+        legacy = pipe.ProofPins("a"*64,"b"*64,1,"c"*64,sid,"d"*64,"e"*64).challenge()
+        self.assertEqual(pipe.verify_response(response(legacy), legacy, 2, key=key, monotonic=lambda: 0), "1"*64)
+        with self.assertRaises(ValueError):
+            pipe.verify_response(response(legacy), challenge, 2, key=key, monotonic=lambda: 0)
+
+    def test_recovery_pins_cannot_select_legacy_pipe_and_vice_versa(self):
+        pipe = windows_lease_pipe
+        sid = "S-1-5-80-1-2-3-4-5"
+        legacy = pipe.ProofPins("a"*64,"b"*64,1,"c"*64,sid,"d"*64,"e"*64)
+        recovery = pipe.RecoveryProofPins(*(letter*64 for letter in "abcdef12"), sid, "provider_isolation")
+        args = {"server_pid": 5, "key_path": None, "key_sha256": "1"*64, "powershell": None,
+                "client": None, "client_sha256": "2"*64, "compiler_root": None}
+        with patch.object(pipe.sys, "platform", "win32"):
+            for pins, name in ((legacy, "n100ha-recovery-proof-"), (recovery, "n100ha-lease-proof-")):
+                with self.assertRaises(ValueError):
+                    pipe.PersistentLeaseProofClient(pins=pins, pipe_name=name+"a"*32, **args)
+
+
 class WindowsLeaseResponseBudgetTests(unittest.TestCase):
+    def test_offline_closure_checks_wsl_before_and_after_task_and_process_readback(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        self.assertTrue(Path(runtime).is_file(), "PowerShell required for offline closure verification")
+        script = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control/windows-reactivation.ps1"
+        source = r"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($env:HA_OFFLINE_GUARD,[ref]$tokens,[ref]$errors)
+if ($errors.Count -ne 0) { throw 'offline_guard_parse' }
+$definition = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-HaWslOfflineReactivationClosed'
+}, $false)
+. ([scriptblock]::Create($definition.Extent.Text))
+$calls = [Collections.Generic.List[string]]::new()
+function Assert-HaReactivationHost($Plan) { $calls.Add('boot') }
+function Assert-HaWslWorkloadsAbsent {
+    $calls.Add('wsl')
+    if ($script:wslReturned -and $calls.Count -eq 5) { throw 'wsl_returned' }
+}
+function Assert-HaReactivationInfrastructureClosed($Plan, [switch]$WslOffline) {
+    if (-not $WslOffline) { throw 'requires_idle_anchor' }
+    $calls.Add('tasks')
+}
+function Assert-HaReactivationProcessesClosed { $calls.Add('processes') }
+$script:wslReturned = $false
+Assert-HaWslOfflineReactivationClosed @{}
+if (($calls -join ',') -cne 'boot,wsl,tasks,processes,wsl') { throw 'offline_guard_order' }
+$calls.Clear()
+$script:wslReturned = $true
+try { Assert-HaWslOfflineReactivationClosed @{}; throw 'wsl_return_missed' } catch {
+    if ($_.Exception.Message -cne 'wsl_returned') { throw }
+}
+exit 0
+"""
+        result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", source),
+                                env=os.environ | {"HA_OFFLINE_GUARD": str(script)},
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_transition_observer_instances_have_distinct_pinned_names(self):
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
         self.assertTrue(Path(runtime).is_file(), "PowerShell required for observer instance verification")
@@ -42,6 +170,16 @@ $config.arguments.CallbackConfigSha256 = 'c'*64
 $c = Get-ObserverInstanceNames $config
 if ($b.task -ceq $c.task -or $b.ready -ceq $c.ready -or $b.task -ceq $initial.task -or
     $b.ready -ceq $initial.ready -or $config.arguments.AttemptId -cne $attempt) { throw 'instance_collision' }
+$config.arguments | Add-Member NoteProperty RecoveryProtocolSha256 ('d'*64)
+$recovery = Get-ObserverInstanceNames $config
+if ($recovery.task -cne ('N100HA_lease_observer_recovery_' + ('c'*64)) -or
+    $recovery.ready -cne ('lease-observer-recovery-ready-' + ('c'*64) + '.json') -or
+    $recovery.task -ceq $c.task -or $recovery.ready -ceq $c.ready) { throw 'recovery_instance_collision' }
+$config.PSObject.Properties.Remove('instance_sha256')
+try { $null = Get-ObserverInstanceNames $config; throw 'unpinned_recovery_accepted' } catch {
+    if ($_.Exception.Message -cne 'observer_task_instance_pin') { throw }
+}
+exit 0
 '''
         result = subprocess.run(
             (runtime, "-NoProfile", "-NonInteractive", "-Command", source),

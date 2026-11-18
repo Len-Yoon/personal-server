@@ -16,10 +16,18 @@ function Assert-LocalPath([string]$Path) {
 
 function Get-ObserverInstanceNames($Config) {
     $argsMap = $Config.arguments
+    $recovery = 'RecoveryProtocolSha256' -cin $argsMap.PSObject.Properties.Name
+    if ($recovery -and 'instance_sha256' -cnotin $Config.PSObject.Properties.Name) {
+        throw 'observer_task_instance_pin'
+    }
     if ('instance_sha256' -cin $Config.PSObject.Properties.Name) {
         $instance = $Config.instance_sha256
         if ($instance -isnot [string] -or $instance -cnotmatch '\A[a-f0-9]{64}\z' -or
             $instance -cne $argsMap.CallbackConfigSha256) { throw 'observer_task_instance_pin' }
+        if ($recovery) {
+            return @{task=('N100HA_lease_observer_recovery_' + $instance);
+                     ready=('lease-observer-recovery-ready-' + $instance + '.json')}
+        }
         return @{task=('N100HA_lease_observer_transition_' + $instance);
                  ready=('lease-observer-transition-ready-' + $instance + '.json')}
     }
@@ -68,9 +76,19 @@ try {
     if ([IO.Path]::GetDirectoryName($config.server_path) -cne $root.FullName -or
         $config.server_sha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'observer_task_server_scope' }
     $argsMap = $config.arguments
-    $pins = @('PlanSha256','AttemptId','WindowsBootSha256','WslBootSha256','CollectorSha256','ReactivationPlanSha256',
-        'MarkerSha256','CallbackSha256','CallbackConfigSha256','KeySha256')
     $paths = @('CallbackPath','CallbackConfigPath','KeyPath','ReadyPath')
+    $scope = 'n100ha-legacy-closure-v1'
+    $pipePattern = '\An100ha-lease-proof-[a-f0-9]{32}\z'
+    if ('RecoveryProtocolSha256' -cin $argsMap.PSObject.Properties.Name) {
+        $pins = @('PlanSha256','AttemptId','WindowsBootSha256','CallbackSha256','CallbackConfigSha256','KeySha256',
+            'RecoveryProtocolSha256')
+        $paths += 'RecoveryProtocolPath'
+        $scope = 'n100ha-initial-recovery-v1'
+        $pipePattern = '\An100ha-recovery-proof-[a-f0-9]{32}\z'
+    } else {
+        $pins = @('PlanSha256','AttemptId','WindowsBootSha256','WslBootSha256','CollectorSha256','ReactivationPlanSha256',
+            'MarkerSha256','CallbackSha256','CallbackConfigSha256','KeySha256')
+    }
     $required = $pins + $paths + @('PipeName','OperatorSid','ServiceSid','Generation')
     if (@($argsMap.PSObject.Properties).Count -ne $required.Count -or
         @($argsMap.PSObject.Properties.Name | Where-Object {$_ -cnotin $required}).Count -ne 0 -or
@@ -78,7 +96,7 @@ try {
         ($argsMap.Generation -isnot [int] -and $argsMap.Generation -isnot [long]) -or
         $argsMap.OperatorSid -cne $operatorSid -or $argsMap.Generation -ne 1 -or
         $argsMap.ServiceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
-        $argsMap.PipeName -cnotmatch '\An100ha-lease-proof-[a-f0-9]{32}\z') { throw 'observer_task_arguments' }
+        $argsMap.PipeName -cnotmatch $pipePattern) { throw 'observer_task_arguments' }
     foreach ($name in $pins) {
         if ($argsMap.$name -isnot [string] -or $argsMap.$name -cnotmatch '\A[a-f0-9]{64}\z') { throw 'observer_task_arguments' }
     }
@@ -149,7 +167,7 @@ try {
                 throw 'observer_task_ready_unconfirmed'
             }
             $record = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($ready.FullName))
-            if ($record.scope -cne 'n100ha-legacy-closure-v1' -or $record.server_sid -cne $operatorSid -or $record.pid -lt 1 -or
+            if ($record.scope -cne $scope -or $record.server_sid -cne $operatorSid -or $record.pid -lt 1 -or
                 $record.attempt_id -cne $argsMap.AttemptId -or $record.pipe_name -cne $argsMap.PipeName -or
                 $record.plan_sha256 -cne $argsMap.PlanSha256 -or $record.callback_config_sha256 -cne $argsMap.CallbackConfigSha256) {
                 throw 'observer_task_ready_unconfirmed'

@@ -19,6 +19,7 @@ from ha_runtime.seven_capture import parse
 from ha_runtime.seven_migration import MigrationRejected
 
 from . import native_guest_restore as restore, native_guest_runtime as runtime
+from .initial_pg_lease import RECOVERY_OPEN_REVISION
 from .legacy_writers import TransitionBlocked, _need
 
 
@@ -70,15 +71,25 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres, generation=None):
+def _lease(pins, postgres, generation=None, *, recovery_deadline=None):
+    _need(recovery_deadline is None or generation is None, "guest_live_pg_binding_unconfirmed")
     if generation is None:
-        primary, partner, epoch, revision, timeline = "A", "B", 1, 2, 1
+        primary, partner, epoch, timeline = "A", "B", 1, 1
+        revision = RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2
     else:
         generation.validate()
         primary, partner = generation.primary, generation.partner
         epoch, revision, timeline = generation.epoch, generation.revision, generation.timeline
         _need(pins.node == primary, "guest_live_pg_binding_unconfirmed")
-    observed = restore._pg(postgres, OPEN_STATE)
+    if recovery_deadline is None:
+        observed = restore._pg(postgres, OPEN_STATE)
+    else:
+        remaining = recovery_deadline - time.monotonic()
+        _need(remaining > 0, "guest_live_recovery_lease_unconfirmed")
+        try:
+            observed = restore._pg(postgres, OPEN_STATE, timeout=min(10, remaining))
+        except subprocess.TimeoutExpired:
+            raise TransitionBlocked("guest_live_recovery_lease_unconfirmed") from None
     identity = ["postgres", "ha", "ha_" + primary, False, pins.system_id,
                 "on", "remote_apply", f"FIRST1(ha_{partner.lower()})", "on", "on", timeline]
     authority = [pins.cluster, epoch, revision, primary, partner, timeline, [primary], primary, "AS", True, True]
@@ -95,6 +106,29 @@ def _lease(pins, postgres, generation=None):
     _need(0 < (expires - sampled).total_seconds() <= 5 and datetime.now(timezone.utc) < expires,
           "guest_live_pg_lease_expired")
     return observed, sampled, expires, replay
+
+
+def observe_recovered_a_lease(pins, postgres, *, recovery_attempt_id, challenge_sha256, deadline):
+    """Read the recovered lease through the same guest-local PostgreSQL connection."""
+    error = "guest_live_recovery_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A"
+          and type(pins.generation) is int and pins.generation == 1
+          and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release["source_commit"]
+          and runtime._match(runtime.SHA, recovery_attempt_id) and recovery_attempt_id != pins.attempt_id
+          and runtime._match(runtime.SHA, challenge_sha256) and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256
+          and replay > 0 and datetime.now(timezone.utc) < expires and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({
+        **runtime._runtime_identity(pins), "recovery_attempt_id": recovery_attempt_id,
+        "challenge_sha256": challenge_sha256, "postgres": observed,
+    }))
 
 
 def _authority_paths():

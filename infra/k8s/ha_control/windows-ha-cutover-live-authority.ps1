@@ -4,6 +4,9 @@ param(
     [string]$AttemptId,
     [string]$PriorSha256,
     [string]$ExpectedServiceInstanceSha256,
+    [string]$RecoveryAttemptId,
+    [string]$RecoveryPredecessorTerminalSha256,
+    [string]$RecoveryPredecessorServiceSha256,
     [string]$TransitionHandoffSha256,
     [string]$TransitionBoundarySha256,
     [switch]$Retire,
@@ -325,6 +328,16 @@ function Read-RejoinReceipt {
 }
 
 try {
+    $recovering = $PSBoundParameters.ContainsKey('RecoveryAttemptId') -or
+        $PSBoundParameters.ContainsKey('RecoveryPredecessorTerminalSha256') -or
+        $PSBoundParameters.ContainsKey('RecoveryPredecessorServiceSha256')
+    if ($recovering -and ($ReadRejoinReceipt -or $ReadClosureReceipt -or $ReadPriorServiceArgs -or $Retire -or
+            $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256 -or
+            $ExpectedServiceInstanceSha256 -cnotmatch $pattern -or $RecoveryAttemptId -cnotmatch $pattern -or
+            $RecoveryPredecessorTerminalSha256 -cnotmatch $pattern -or
+            $RecoveryPredecessorServiceSha256 -cnotmatch $pattern -or $RecoveryAttemptId -ceq $AttemptId)) {
+        throw 'live_authority_recovery_scope'
+    }
     if ($RequireTerminalInitial -and -not $ReadPriorServiceArgs) { throw 'initial_service_retirement_scope' }
     if ($ReadRejoinReceipt) {
         if ($ReadPriorServiceArgs -or $ReadClosureReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
@@ -352,9 +365,12 @@ try {
         Read-TransitionAuthority @('S-1-5-18','S-1-5-32-544',$sid)
         return
     }
+    $fileName = if ($recovering) { 'initial-recovery-service-' + $RecoveryAttemptId + '.json' }
+        else { 'initial-service-' + $AttemptId + '.json' }
     if ($LegacyPlanSha256 -cnotmatch $pattern -or $AttemptId -cnotmatch $pattern -or $PriorSha256 -cnotmatch $pattern -or
-        $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
-        -not $BindingPath.EndsWith(('-' + $AttemptId + '.json'),[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
+        $BindingPath -cnotmatch ('\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\' + [regex]::Escape($fileName) + '\z')) {
+        throw 'live_authority_scope'
+    }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $admins = @('S-1-5-18','S-1-5-32-544',$sid)
     $inputFile = Read-Scope $BindingPath $admins
@@ -370,11 +386,15 @@ try {
         ($plan.service_pid -isnot [int] -and $plan.service_pid -isnot [long]) -or $plan.service_pid -lt 1 -or
         -not $plan.state_path.EndsWith('\journal\controller-state.json',[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
     $identity = [Security.Principal.NTAccount]::new('NT SERVICE',$plan.service_name).Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($recovering -and $plan.service_name -cne ('N100HA_' + $RecoveryAttemptId.Substring(0,24) + '_controller')) {
+        throw 'live_authority_recovery_scope'
+    }
     # Bind directly to the validated service key instead of enumerating Win32_Service.
     $service = Find-BoundService $plan
     if ($ReadPriorServiceArgs) {
         if ($service.State -cne 'Stopped' -or $service.ProcessId -ne 0 -or
-            $service.StartMode -cnotin @('Manual','Disabled') -or $service.ServiceType -cne 'Own Process' -or
+            $service.StartMode -cnotin @('Manual','Disabled') -or
+            ($RequireTerminalInitial -and $service.StartMode -cne 'Disabled') -or $service.ServiceType -cne 'Own Process' -or
             $service.DesktopInteract -or $service.StartName -ine ('NT SERVICE\' + $plan.service_name) -or
             $service.PathName -cnotmatch '\A"[A-Za-z]:\\[A-Za-z0-9_.\\-]+\\windows-service-host\.exe"\z') {
             throw 'live_authority_prior_args'
@@ -443,12 +463,40 @@ try {
         $saved = Read-Scope $plan.state_path ($admins + $identity)
         $record = ConvertFrom-Json -InputObject $saved.raw
         $age = ([DateTime]::UtcNow - $saved.write_time).TotalMilliseconds
-        if ($record.phase -cne 'serving' -or $record.kind -cne 'initial-wsl-cutover' -or $record.schema_version -ne 1 -or
+        $kind = if ($recovering) { 'initial-wsl-cutover-recovery' } else { 'initial-wsl-cutover' }
+        if ($record.phase -cne 'serving' -or $record.kind -cne $kind -or $record.schema_version -ne 1 -or
             $record.generation -ne 1 -or $record.sequence -lt 1 -or $record.attempt_id -cne $AttemptId -or
             $record.legacy_plan_sha256 -cne $LegacyPlanSha256 -or $record.controller_plan_sha256 -cne $plan.controller_plan_sha256 -or
             $record.first_write_proof_sha256 -cne $plan.first_write_proof_sha256 -or $record.lease_proof_sha256 -cnotmatch $pattern -or
             $record.proof_elapsed_ms -lt 0 -or $record.proof_elapsed_ms -ge 4000 -or ($age + $record.proof_elapsed_ms) -ge 4800 -or $age -lt 0 -or $age -gt 2900 -or
             $process.HasExited) { throw 'live_authority_lease' }
+        if ($recovering) {
+            $names = @($record.recovery.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+            foreach ($field in @('schema_version','generation','sequence','revision')) {
+                if ($record.$field -isnot [int] -and $record.$field -isnot [long]) {
+                    throw 'live_authority_recovery_scope'
+                }
+            }
+            if (($names -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
+                $record.revision -ne 4 -or ($record.proof_elapsed_ms -isnot [int] -and
+                    $record.proof_elapsed_ms -isnot [long] -and $record.proof_elapsed_ms -isnot [double]) -or
+                [double]::IsNaN([double]$record.proof_elapsed_ms) -or
+                $record.recovery.attempt_id -cne $RecoveryAttemptId -or
+                $record.recovery.predecessor_service_sha256 -cne $RecoveryPredecessorServiceSha256 -or
+                $record.recovery.predecessor_terminal_sha256 -cne $RecoveryPredecessorTerminalSha256 -or
+                $service.StartMode -cne 'Manual' -or $service.StartName -ine ('NT SERVICE\' + $plan.service_name)) {
+                throw 'live_authority_recovery_scope'
+            }
+            $service = Find-BoundService $plan
+            $confirmedAge = ([DateTime]::UtcNow - $saved.write_time).TotalMilliseconds
+            if ($service.State -cne 'Running' -or $service.ProcessId -ne $plan.service_pid -or
+                $service.StartMode -cne 'Manual' -or $service.StartName -ine ('NT SERVICE\' + $plan.service_name) -or
+                $service.ServiceType -cne 'Own Process' -or $service.DesktopInteract -or $process.HasExited -or
+                $confirmedAge -lt 0 -or $confirmedAge -gt 2900 -or
+                $confirmedAge + $record.proof_elapsed_ms -ge 4800) {
+                throw 'live_authority_recovery_scope'
+            }
+        }
         [ordered]@{windows_generation=1;windows_generation_sha256=(Get-Digest ($inputFile.raw + ':' + $saved.raw + ':' + $PriorSha256));
             live_lease_sha256=$record.lease_proof_sha256}|ConvertTo-Json -Compress
     } finally { $process.Dispose() }

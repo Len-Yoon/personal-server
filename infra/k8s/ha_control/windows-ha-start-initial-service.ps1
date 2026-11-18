@@ -11,6 +11,8 @@ param(
     [string]$PreflightSha256,
     [string]$ScmVerifierPath,
     [string]$ExpectedActivationIntentSha256,
+    [string]$RecoveryAttemptId,
+    [string]$RecoveryReservationSha256,
     [switch]$StartTransition,
     [switch]$VerifyPreparedTransition,
     [switch]$PublishTransitionArgs,
@@ -31,6 +33,61 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $hashPattern = '\A[a-f0-9]{64}\z'
+
+function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$ReservationSha,
+                                   [string]$Name,[string]$HostPath,[string]$Parent){
+    $recovery=$Plan.initial_cutover_recovery
+    $identity='N100HA_'+$Attempt.Substring(0,24)
+    $root=Join-Path $Parent $identity
+    $approvalFields=@($Approval.PSObject.Properties.Name|Sort-Object -CaseSensitive)
+    foreach($field in @('action','authority_kind','installation_id','installed_at','plan_sha256','source_commit')){
+        if($Approval.$field -isnot [string]){throw 'initial_service_recovery_scope'}
+    }
+    if(($approvalFields -join ',') -cne 'action,authority_kind,installation_id,installed_at,plan_sha256,schema_version,source_commit' -or
+        ($Approval.schema_version -isnot [int] -and $Approval.schema_version -isnot [long]) -or
+        $Approval.schema_version -ne 1 -or $Approval.authority_kind -cne 'installed-runtime' -or
+        $Approval.installation_id -cnotmatch $hashPattern -or $Approval.plan_sha256 -cnotmatch $hashPattern -or
+        $Approval.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+        $Approval.installed_at -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\z' -or
+        [DateTimeOffset]::Parse($Approval.installed_at,[Globalization.CultureInfo]::InvariantCulture) -ge [DateTimeOffset]::UtcNow){
+        throw 'initial_service_recovery_scope'
+    }
+    if($Parent -cne 'C:\ProgramData' -or $Plan.installation_id -cnotmatch $hashPattern -or
+        $Attempt.Substring(0,24) -ceq $Plan.installation_id.Substring(0,24) -or
+        $Name -cne ($identity+'_controller') -or
+        $HostPath -cne (Join-Path $root 'host\windows-service-host.exe') -or
+        $Approval.action -cne 'ha-recover-initial-writer' -or
+        $Plan.initial_service_start.reservation_receipt_sha256 -cne $ReservationSha -or
+        (@($recovery.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+            'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
+        $recovery.attempt_id -cne $Attempt -or $recovery.attempt_id -ceq $Plan.initial_cutover_handoff.attempt_id -or
+        $recovery.predecessor_service_sha256 -cnotmatch $hashPattern -or
+        $recovery.predecessor_terminal_sha256 -cnotmatch $hashPattern){
+        throw 'initial_service_recovery_scope'
+    }
+    $receipt=Read-PinnedJson (Join-Path $root 'reservation-receipt.json') $ReservationSha
+    if($receipt.format -cne 'fresh-recovery-service-reservation-receipt-v1' -or
+        $receipt.installation_id -cne $Plan.installation_id -or $receipt.recovery_attempt_id -cne $Attempt){
+        throw 'initial_service_recovery_scope'
+    }
+    foreach($field in @('ready_to_start','runtime_authority_issued','service_started','args_present','namespace_changed')){
+        if($receipt.$field -isnot [bool] -or $receipt.$field){throw 'initial_service_recovery_scope'}
+    }
+    if($receipt.ownership_receipt_sha256 -cnotmatch $hashPattern -or
+        $receipt.service_config_sha256 -cnotmatch $hashPattern){throw 'initial_service_recovery_scope'}
+    $ownership=Read-PinnedJson (Join-Path $root 'namespace-service-ownership.json') $receipt.ownership_receipt_sha256
+    if($ownership.format -cne 'ha-owned-recovery-service-v1' -or
+        $ownership.installation_id -cne $Plan.installation_id -or $ownership.recovery_attempt_id -cne $Attempt -or
+        $ownership.service_name -cne $Name -or $ownership.service_sid -cne $Plan.windows_enforced.service_sid -or
+        $ownership.service_image_sha256 -cne $Plan.windows_enforced.service_image_sha256 -or
+        $ownership.service_config_sha256 -cne $receipt.service_config_sha256 -or
+        $ownership.predecessor_service_sha256 -cne $recovery.predecessor_service_sha256 -or
+        $ownership.predecessor_terminal_sha256 -cne $recovery.predecessor_terminal_sha256 -or
+        $ownership.new_owned_service -isnot [bool] -or -not $ownership.new_owned_service -or
+        $ownership.scm_registration_complete -isnot [bool] -or -not $ownership.scm_registration_complete){
+        throw 'initial_service_recovery_scope'
+    }
+}
 
 function Read-PinnedJson([string]$Path, [string]$Sha) {
     if ($Path -cnotmatch '\A[A-Za-z]:\\[A-Za-z0-9_.\\-]+\z' -or $Path -match '\\\.\.?(\\|$)') {
@@ -461,7 +518,10 @@ try {
     $transition = $rejoin -or $PublishTransitionArgs -or $VerifyPreparedTransition -or $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
     $modes = @(@($PublishTransitionArgs,$VerifyPreparedTransition,$StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
     if ($rejoin) { $modes++ }
+    $recovering=[bool]$RecoveryAttemptId -or [bool]$RecoveryReservationSha256
     if (-not $Go -or $modes -gt 1 -or
+        ($recovering -and ($transition -or $RecoveryAttemptId -cnotmatch $hashPattern -or
+                           $RecoveryReservationSha256 -cnotmatch $hashPattern)) -or
         ($PublishTransitionArgs -and $PreviousArgsSha256 -cnotmatch $hashPattern) -or
         (-not $PublishTransitionArgs -and $PreviousArgsSha256 -cne '') -or
         ($rejoin -and ($RejoinMode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin') -or
@@ -497,6 +557,13 @@ try {
     }
     $scope = $plan.windows_enforced
     $startScope = $plan.initial_service_start
+    $action = if($recovering){'ha-recover-initial-writer'}else{'ha-initial-wsl-cutover'}
+    if ($recovering) {
+        Assert-RecoveryStartScope $plan $approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))
+    } elseif ('initial_cutover_recovery' -cin $plan.PSObject.Properties.Name) {
+        throw 'initial_service_recovery_scope'
+    }
     if ($plan.initial_cutover_handoff.activation_intent_sha256 -cne $ExpectedActivationIntentSha256) {
         throw 'initial_service_intent_unbound'
     }
@@ -510,7 +577,7 @@ try {
         $scope.service_image_sha256 -cne $ServiceHostSha256 -or $startScope.preflight_sha256 -cne $PreflightSha256 -or
         $startScope.service_image_path_sha256 -cne $configuredImageHash -or $startScope.binding_path -cne $BindingPath -or
         $plan.initial_wsl_cutover.primary_node -cne 'A' -or $plan.initial_wsl_cutover.partner_node -cne 'B' -or
-        $approval.action -cne 'ha-initial-wsl-cutover' -or $approval.plan_sha256 -cne $PlanSha256 -or
+        $approval.action -cne $action -or $approval.plan_sha256 -cne $PlanSha256 -or
         $approval.installation_id -cne $plan.installation_id -or $approval.source_commit -cne $plan.source_commit) {
         throw 'initial_service_plan_scope'
     }
@@ -522,9 +589,10 @@ try {
     $argsPath = Join-Path $directory 'service.args'
     $statePath = Join-Path ([IO.Path]::GetDirectoryName($PlanPath)) 'journal\controller-state.json'
     $attempt = $plan.initial_cutover_handoff.attempt_id
+    $bindingName=if($recovering){'initial-recovery-service-'+$RecoveryAttemptId+'.json'}
+        else{'initial-service-'+$attempt+'.json'}
     if ($attempt -cnotmatch $hashPattern -or
-        $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
-        -not $BindingPath.EndsWith(('-' + $attempt + '.json'),[StringComparison]::Ordinal) -or
+        $BindingPath -cnotmatch ('\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\'+[regex]::Escape($bindingName)+'\z') -or
         (Test-Path -LiteralPath $BindingPath)) { throw 'initial_service_binding_scope' }
     if (Test-Path -LiteralPath $argsPath) { throw 'initial_service_args_exist' }
     if ((Test-Path -LiteralPath $statePath) -or -not (Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($statePath)) -PathType Container)) {
@@ -596,7 +664,8 @@ public static class HaInitialLeaseFileTime {
     $scm = [TrustedStoppedV1.Native]::new()
     try {
         $scm.OpenForRead($ServiceName)
-        [TrustedStoppedV1.Contract]::Inputs($plan.installation_id,$ServiceName,$hostPath)
+        $identityScope=if($recovering){$RecoveryAttemptId}else{$plan.installation_id}
+        [TrustedStoppedV1.Contract]::Inputs($identityScope,$ServiceName,$hostPath)
         [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$current.PathName)
     } finally { $scm.Dispose() }
     # Once invoked, a missing response is an uncertain activation. Preserve all records.
@@ -617,7 +686,8 @@ public static class HaInitialLeaseFileTime {
             } finally { $stream.Dispose() }
             if ($lease.phase -ceq 'serving') {
                 $age = ([DateTime]::UtcNow - $written).TotalMilliseconds
-                if ($lease.kind -cne 'initial-wsl-cutover' -or $lease.schema_version -ne 1 -or $age -lt 0 -or $age -gt 2900 -or
+                $kind=if($recovering){'initial-wsl-cutover-recovery'}else{'initial-wsl-cutover'}
+                if ($lease.kind -cne $kind -or $lease.schema_version -ne 1 -or $age -lt 0 -or $age -gt 2900 -or
                     $lease.attempt_id -cne $attempt -or $lease.generation -ne 1 -or $lease.sequence -lt 1 -or
                     $lease.controller_plan_sha256 -cne $PlanSha256 -or $lease.first_write_proof_sha256 -cnotmatch $hashPattern -or
                     $lease.activation_intent_sha256 -cne $plan.initial_cutover_handoff.activation_intent_sha256 -or
@@ -625,6 +695,24 @@ public static class HaInitialLeaseFileTime {
                     $lease.legacy_plan_sha256 -cne $plan.initial_cutover_handoff.legacy_plan_sha256 -or
                     $lease.proof_elapsed_ms -lt 0 -or $lease.proof_elapsed_ms -ge 4000 -or ($age + $lease.proof_elapsed_ms) -ge 4800 -or
                     $native.PathName -cne $current.PathName) { throw 'initial_service_lease_unconfirmed' }
+                if($recovering){
+                    foreach($field in @('schema_version','generation','sequence','revision')){
+                        if($lease.$field -isnot [int] -and $lease.$field -isnot [long]){
+                            throw 'initial_service_lease_unconfirmed'
+                        }
+                    }
+                    $recoveryFields=@($lease.recovery.PSObject.Properties.Name|Sort-Object -CaseSensitive)
+                    if($lease.revision -ne 4 -or $lease.lease_proof_sha256 -isnot [string] -or
+                        $lease.lease_proof_sha256 -cnotmatch $hashPattern -or
+                        ($lease.proof_elapsed_ms -isnot [int] -and $lease.proof_elapsed_ms -isnot [long] -and
+                         $lease.proof_elapsed_ms -isnot [double]) -or [double]::IsNaN([double]$lease.proof_elapsed_ms) -or
+                        ($recoveryFields -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
+                        $lease.recovery.attempt_id -cne $RecoveryAttemptId -or
+                        $lease.recovery.predecessor_service_sha256 -cne $plan.initial_cutover_recovery.predecessor_service_sha256 -or
+                        $lease.recovery.predecessor_terminal_sha256 -cne $plan.initial_cutover_recovery.predecessor_terminal_sha256){
+                        throw 'initial_service_lease_unconfirmed'
+                    }
+                }
                 $process = Get-Process -Id $native.ProcessId -ErrorAction Stop
                 try {
                     if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $hostPath) {

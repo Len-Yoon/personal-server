@@ -1,6 +1,6 @@
 """Durable Windows service lifecycle for the first A write lease."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -10,16 +10,22 @@ import stat
 import time
 
 from .controller import Journal, TransitionBlocked, exclusive
-from .initial_pg_lease import INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, InitialPgLease, LegacyResponseTimeout
+from .initial_pg_lease import (
+    INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, RECOVERY_ACTION, RECOVERY_FIELDS, RECOVERY_OPEN_REVISION,
+    InitialPgLease, InitialPgLeaseRecovery, LegacyResponseTimeout,
+)
 from .enforced_windows import _powershell_path
+from .initial_windows_gate import initial_service_identity
 from .pg import PgUnavailable
-from .windows_lease_pipe import CLIENT_FAILURES, PersistentLeaseProofClient, ProofPins
+from .windows_lease_pipe import CLIENT_FAILURES, PersistentLeaseProofClient, ProofPins, RecoveryProofPins
 
 
 SHA = re.compile(r'[a-f0-9]{64}\Z')
 HANDOFF_KEYS = {'attempt_id', 'legacy_plan_sha256', 'restore_receipt_sha256', 'activation_intent_sha256'}
 OBSERVER_KEYS = {'pipe_name', 'server_pid', 'key_sha256', 'windows_boot_sha256',
                  'wsl_boot_sha256', 'collector_sha256', 'client_sha256', 'marker_sha256'}
+RECOVERY_OBSERVER_KEYS = {'guest_boot_sha256', 'hold_sha256', 'broker_scope_sha256', 'resource_set_sha256',
+                          'held_admission', 'provider_isolation'}
 MARKER = Path(r'C:\ProgramData\N100HA-Cutover\ha-controller-owner.json')
 CLOSURE_FAILURE_CODES = frozenset({
     'legacy_pipe_client_unavailable', 'legacy_pipe_request_rejected',
@@ -38,6 +44,8 @@ LEASE_FAILURE_CODES = frozenset({
     'initial_replication_barrier_unconfirmed', 'initial_replication_deadline_exceeded',
     'initial_replication_identity_unverified', 'initial_service_handoff_unverified',
     'initial_service_live_closure_unverified', 'initial_service_proof_deadline_exceeded',
+    'initial_recovery_admission_unverified',
+    'initial_recovery_quarantine_unverified',
     'native_host_guard_required', 'pg_identity_mismatch', 'server_enforcement_unverified',
 }) | CLOSURE_FAILURE_CODES
 
@@ -48,12 +56,12 @@ def _pin(value):
     return value
 
 
-def _handoff(backend):
+def _handoff(backend, *, action='ha-initial-wsl-cutover'):
     plan = backend.plan
     approved = plan.get('initial_cutover_handoff')
     if (type(approved) is not dict or set(approved) != HANDOFF_KEYS
             or plan.get('initial_wsl_cutover') != INITIAL_CUTOVER
-            or plan.get('_approval_action') != 'ha-initial-wsl-cutover'
+            or plan.get('_approval_action') != action
             or backend.fence_adapter._installed_runtime is not True):
         raise TransitionBlocked('initial_service_handoff_unverified')
     handoff = {key: _pin(value) for key, value in approved.items()}
@@ -64,6 +72,12 @@ def _handoff(backend):
 
 
 def _read_pinned(path, digest):
+    def unique(pairs):
+        data = dict(pairs)
+        if len(data) != len(pairs):
+            raise ValueError()
+        return data
+
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size,
                 info.st_mtime_ns, getattr(info, 'st_file_attributes', 0))
@@ -93,7 +107,7 @@ def _read_pinned(path, digest):
                 or identity(after) != identity(named_after)
                 or hashlib.sha256(raw).hexdigest() != digest):
             raise ValueError()
-        return json.loads(raw), (before.st_dev, before.st_ino)
+        return json.loads(raw, object_pairs_hook=unique), (before.st_dev, before.st_ino)
     except (OSError, ValueError, TypeError):
         raise TransitionBlocked('initial_service_handoff_unverified') from None
 
@@ -145,8 +159,8 @@ class WindowsInitialObserver:
 
 
 @contextmanager
-def native_initial_observer(backend):
-    handoff = _handoff(backend)
+def native_initial_observer(backend, *, action='ha-initial-wsl-cutover'):
+    handoff = _handoff(backend, action=action)
     plan = backend.plan
     params = plan.get('windows_initial_observer')
     if type(params) is not dict or set(params) != OBSERVER_KEYS:
@@ -168,6 +182,120 @@ def native_initial_observer(backend):
     with client:
         yield WindowsInitialObserver(client, backend.plan_path.with_name('initial-cutover-activation.json'),
                                      _pin(params['marker_sha256']), plan['cluster'])
+
+
+def _request_recovery_proof(client, deadline, failure):
+    try:
+        _pin(client.request(deadline))
+    except (ValueError, OSError, TransitionBlocked):
+        raise TransitionBlocked(failure) from None
+    if time.monotonic() >= deadline:
+        raise TransitionBlocked(failure)
+
+
+class _HeldRecoveryAdmission:
+    """Observe the durable guest hold without authorizing its removal."""
+    def __init__(self, client):
+        self.client = client
+        self.deadline = 0
+
+    def assert_held(self, deadline):
+        self.deadline = 0
+        _request_recovery_proof(self.client, deadline, 'initial_recovery_admission_unverified')
+        self.deadline = deadline
+        return True
+
+    def publish(self):
+        # The journal carries the fresh first heartbeat. Guest release has a
+        # separate readback of that publication and the replicated DB stamp.
+        if time.monotonic() >= self.deadline:
+            raise TransitionBlocked('initial_recovery_admission_unverified')
+        self.deadline = 0
+
+
+class WindowsRecoveryObserver:
+    def __init__(self, legacy, held, provider, handoff, recovery):
+        self.legacy, self.held, self.provider = legacy, held, provider
+        self.handoff, self.recovery = handoff.copy(), recovery.copy()
+
+    def assert_intent(self, handoff):
+        return self.legacy.assert_intent(handoff)
+
+    def assert_legacy_closed(self, handoff, deadline):
+        return self.legacy.assert_legacy_closed(handoff, deadline)
+
+    def assert_exclusion_held(self, handoff, deadline):
+        return self.legacy.assert_exclusion_held(handoff, deadline)
+
+    @contextmanager
+    def recovery_admission(self, handoff, recovery):
+        if handoff != self.handoff or recovery != self.recovery:
+            raise TransitionBlocked('initial_recovery_admission_unverified')
+        yield _HeldRecoveryAdmission(self.held)
+
+    def assert_quarantine_held(self, handoff, recovery, broker, resources, deadline):
+        failure = 'initial_recovery_quarantine_unverified'
+        if (handoff != self.handoff or recovery != self.recovery or self.provider is None
+                or broker != self.provider.pins.broker_scope_sha256
+                or resources != self.provider.pins.resource_set_sha256):
+            raise TransitionBlocked(failure)
+        _request_recovery_proof(self.provider, deadline, failure)
+        return True
+
+
+@contextmanager
+def native_recovery_observer(backend):
+    """Use distinct authenticated pipes for admission and provider isolation."""
+    failure = 'initial_recovery_native_observer_required'
+    handoff = _handoff(backend, action=RECOVERY_ACTION)
+    recovery = _recovery_predecessor(backend, handoff)
+    plan = backend.plan
+    params = plan.get('windows_recovery_observers')
+    legacy_params = plan.get('windows_initial_observer')
+    if (type(params) is not dict or set(params) != RECOVERY_OBSERVER_KEYS
+            or type(legacy_params) is not dict or set(legacy_params) != OBSERVER_KEYS):
+        raise TransitionBlocked(failure)
+    quarantine = InitialPgLeaseRecovery.quarantine_binding(plan)
+    if (quarantine is None and params['provider_isolation'] is not None
+            or quarantine is not None and (quarantine[1], quarantine[3]) !=
+                (params['broker_scope_sha256'], params['resource_set_sha256'])):
+        raise TransitionBlocked(failure)
+    purposes = ('held_admission', 'provider_isolation') if quarantine is not None else ('held_admission',)
+    connections = {}
+    for purpose in purposes:
+        endpoint = params[purpose]
+        if type(endpoint) is not dict or set(endpoint) != {'pipe_name', 'server_pid', 'key_sha256'}:
+            raise TransitionBlocked(failure)
+        # The stable deployment digest predates the observing processes. The
+        # final SCM plan pins their PIDs/keys separately under its approval.
+        pins = RecoveryProofPins(handoff['legacy_plan_sha256'], recovery['attempt_id'],
+                                 _pin(legacy_params['windows_boot_sha256']), _pin(params['guest_boot_sha256']),
+                                 recovery['predecessor_terminal_sha256'], _pin(params['hold_sha256']),
+                                 _pin(params['broker_scope_sha256']), _pin(params['resource_set_sha256']),
+                                 plan['windows_enforced']['service_sid'], purpose)
+        connections[purpose] = (pins, endpoint.copy())
+    endpoints = [legacy_params, *(item[1] for item in connections.values())]
+    for field in ('pipe_name', 'server_pid', 'key_sha256'):
+        values = [endpoint[field] for endpoint in endpoints]
+        if any(type(value) is not (int if field == 'server_pid' else str) for value in values) or len(set(values)) != len(values):
+            raise TransitionBlocked(failure)
+    with ExitStack() as stack:
+        legacy = stack.enter_context(native_initial_observer(backend, action=RECOVERY_ACTION))
+        clients = {}
+        for purpose, (pins, endpoint) in connections.items():
+            try:
+                client = PersistentLeaseProofClient(
+                    pins=pins, **endpoint, powershell=_powershell_path(),
+                    client=Path(__file__).with_name('windows-ha-lease-proof-client.ps1'),
+                    key_path=backend.plan_path.with_name(f'initial-recovery-{purpose}.key'),
+                    compiler_root=backend.plan_path.parent / 'journal',
+                    client_sha256=_pin(legacy_params['client_sha256']),
+                )
+            except (ValueError, OSError, TypeError):
+                raise TransitionBlocked(failure) from None
+            clients[purpose] = stack.enter_context(client)
+        yield WindowsRecoveryObserver(legacy, clients['held_admission'], clients.get('provider_isolation'),
+                                      handoff, recovery)
 
 
 @contextmanager
@@ -208,16 +336,110 @@ def serve_initial(backend, journal_path, observer):
     exact service process when consuming a heartbeat.
     """
     handoff = _handoff(backend)
+    return _serve(backend, journal_path, observer, handoff)
+
+
+def _recovery_predecessor(backend, handoff):
+    recovery = backend.plan.get('initial_cutover_recovery')
+    error = 'initial_recovery_predecessor_unverified'
+    if type(recovery) is not dict or set(recovery) != set(RECOVERY_FIELDS):
+        raise TransitionBlocked(error)
+    recovery = {key: _pin(recovery[key]) for key in RECOVERY_FIELDS}
+    original_name, _ = initial_service_identity(backend.plan.get('installation_id'))
+    recovery_name, recovery_sid = initial_service_identity(recovery['attempt_id'])
+    windows = backend.plan.get('windows_enforced')
+    if (original_name == recovery_name or type(windows) is not dict
+            or windows.get('service_name') != recovery_name or windows.get('service_sid') != recovery_sid):
+        raise TransitionBlocked(error)
+    root = backend.plan_path.parent
+    previous, _ = _read_pinned(root / 'initial-predecessor-state.json', recovery['predecessor_terminal_sha256'])
+    service, _ = _read_pinned(root / 'initial-predecessor-service.json', recovery['predecessor_service_sha256'])
+    old_scope = {key: handoff[key] for key in HANDOFF_KEYS}
+    terminal_fields = set(HANDOFF_KEYS) | {'controller_plan_sha256', 'schema_version', 'kind',
+                                           'phase', 'generation', 'sequence'}
+    service_fields = {'attempt_id', 'controller_plan_sha256', 'first_write_proof_sha256', 'legacy_plan_sha256',
+                      'service_created_ticks', 'service_image_path_sha256', 'service_name', 'service_pid', 'state_path'}
+    if (type(previous) is not dict or type(service) is not dict
+            or set(previous) not in (terminal_fields, terminal_fields | {'failure_code'})
+            or set(service) != service_fields
+            or type(previous.get('schema_version')) is not int or previous['schema_version'] != 1
+            or previous.get('kind') != 'initial-wsl-cutover'
+            or previous.get('phase') not in ('lease_lost', 'local_revoke_observed')
+            or type(previous.get('generation')) is not int or previous['generation'] != 1
+            or type(previous.get('sequence')) is not int or previous['sequence'] < 1
+            or any(previous.get(key) != value for key, value in old_scope.items())
+            or any(service.get(key) != previous.get(key)
+                   for key in ('attempt_id', 'legacy_plan_sha256', 'controller_plan_sha256'))
+            or service.get('service_name') != original_name
+            or type(service.get('service_pid')) is not int or service['service_pid'] < 1
+            or type(service['service_created_ticks']) is not str
+            or not re.fullmatch(r'[1-9][0-9]{0,18}', service['service_created_ticks'])
+            or type(service['state_path']) is not str
+            or not re.fullmatch(r'[A-Za-z]:\\(?:[A-Za-z0-9_. -]+\\)+journal\\controller-state\.json', service['state_path'])
+            or any(type(service[key]) is not str or not SHA.fullmatch(service[key])
+                   for key in ('first_write_proof_sha256', 'service_image_path_sha256'))
+            or recovery['attempt_id'] == handoff['attempt_id']
+            or _pin(previous.get('controller_plan_sha256')) == handoff['controller_plan_sha256']):
+        raise TransitionBlocked(error)
+    return recovery
+
+
+def serve_initial_recovery(backend, journal_path, observer):
+    """Serve under native admission, which remains closed durably until published.
+
+    The admission context must leave application activation disabled on any
+    exit before publish, including process termination or uncertain revoke.
+    """
+    return _serve(backend, journal_path, observer, _handoff(backend, action=RECOVERY_ACTION), recovering=True)
+
+
+def _serve(backend, journal_path, observer, handoff, *, recovering=False):
     journal = Journal(journal_path)
     state = {'cluster': backend.plan['cluster'], 'generation': 1, 'timeline': 1, 'target': 'A', 'old': 'B'}
-    with exclusive(Path(journal_path).with_suffix('.lock')):
+    if not recovering and 'initial_effect_quarantine' in backend.plan:
+        raise TransitionBlocked('initial_recovery_quarantine_unverified')
+    if recovering:
+        expected = backend.plan_path.parent / 'journal/controller-state.json'
+        if journal.path != expected or not expected.is_absolute() or expected.parent.is_symlink():
+            raise TransitionBlocked('initial_recovery_journal_unverified')
+    with exclusive(Path(journal_path).with_suffix('.lock')), ExitStack() as admission:
         if os.path.lexists(journal.path):
             raise TransitionBlocked('initial_service_reconciliation_required')
         observer.assert_intent(handoff)
         stable = {'schema_version': 1, 'kind': 'initial-wsl-cutover', 'generation': 1, **handoff}
+        recovery = _recovery_predecessor(backend, handoff) if recovering else None
+        lease_options = {}
+        if recovery is not None:
+            if not callable(getattr(observer, 'recovery_admission', None)):
+                raise TransitionBlocked('initial_recovery_admission_unverified')
+            if 'initial_effect_quarantine' in backend.plan:
+                InitialPgLeaseRecovery.quarantine_binding(backend.plan)
+                verify_quarantine = getattr(observer, 'assert_quarantine_held', None)
+                if not callable(verify_quarantine):
+                    raise TransitionBlocked('initial_recovery_quarantine_unverified')
+                lease_options['assert_quarantine_held'] = lambda pin, resources, deadline: verify_quarantine(
+                    handoff, recovery, pin, resources, deadline)
+            admission_handle = admission.enter_context(observer.recovery_admission(handoff, recovery))
+            stable.update(kind='initial-wsl-cutover-recovery', recovery=recovery, revision=RECOVERY_OPEN_REVISION)
+
+        first_publication = False
+
+        def assert_admission(deadline):
+            if recovery is not None and not first_publication:
+                if admission_handle.assert_held(deadline) is not True:
+                    raise TransitionBlocked('initial_recovery_admission_unverified')
+
+        def closure(_, deadline):
+            assert_admission(deadline)
+            return observer.assert_legacy_closed(handoff, deadline)
+
+        def exclusion(_, deadline):
+            assert_admission(deadline)
+            return observer.assert_exclusion_held(handoff, deadline)
+
         journal.save(stable | {'phase': 'opening', 'sequence': 0})
-        lease = InitialPgLease(backend, lambda _, deadline: observer.assert_legacy_closed(handoff, deadline),
-                               assert_exclusion_held=lambda _, deadline: observer.assert_exclusion_held(handoff, deadline))
+        lease_type = InitialPgLeaseRecovery if recovering else InitialPgLease
+        lease = lease_type(backend, closure, assert_exclusion_held=exclusion, **lease_options)
         sequence = 0
         failure_code = None
         try:
@@ -232,6 +454,10 @@ def serve_initial(backend, journal_path, observer):
                 journal.save(stable | {'phase': 'serving', 'sequence': sequence, 'lease_proof_sha256': _pin(proof),
                                        'first_write_proof_sha256': first_proof, 'proof_elapsed_ms': round(elapsed * 1000, 3)},
                              windows_retry_until=min(started + INITIAL_PROOF_SECONDS, time.monotonic() + 0.15))
+                if recovery is not None and not first_publication:
+                    admission_handle.publish()
+                    admission.close()
+                first_publication = True
                 time.sleep(max(0, 1 - (time.monotonic() - started)))
                 proof = lease.renew(state)
         except Exception as error:
@@ -245,7 +471,9 @@ def serve_initial(backend, journal_path, observer):
             revoked = False
             try:
                 revoked = lease.revoke(state) is True
-            except (OSError, TransitionBlocked):
+            except Exception:
+                # No successful publication: admission stays durably closed
+                # even if the database reply was lost and revoke is uncertain.
                 pass
             terminal = stable | {'phase': 'local_revoke_observed' if revoked else 'lease_lost',
                                  'sequence': sequence}

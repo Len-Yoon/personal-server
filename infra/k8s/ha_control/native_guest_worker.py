@@ -18,7 +18,8 @@ import subprocess
 import sys
 import time
 
-from ha_runtime.config import SERVICES
+from ha_runtime.config import DatabaseUnavailable, SERVICES
+from ha_egress.boot import validate_authority as validate_broker_authority
 
 from . import frozen_ingress, native_guest_restore as restore, native_guest_runtime as runtime
 from . import native_guest_activation as activation, native_guest_live as live
@@ -28,8 +29,9 @@ from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_OBSERVE_REPLACEMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
+    GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, QUIESCENCE_BOUNDARIES,
     GUEST_TRANSITION_TARGET,
-    GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, INITIAL_RECOVERY_HOLD, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -42,6 +44,9 @@ VERBS = {
     GUEST_RESTORE_READBACK,
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT,
     GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
+    GUEST_QUIESCE_INITIAL_RECOVERY,
+    GUEST_OBSERVE_INITIAL_RECOVERY_HOLD,
+    GUEST_OBSERVE_CAR_ISOLATION,
     GUEST_PREFLIGHT_REPLACEMENT,
     GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
@@ -116,8 +121,8 @@ def read_request(stream):
 
 
 @contextmanager
-def mutation_lock(wait=0):
-    """All guest mutators must use this installed lock, including activation."""
+def _guest_mutation_descriptor(wait=0):
+    """Hold the installed guest mutation lock without inspecting the recovery hold."""
     runtime._directory(ROOT, 0)
     before = LOCK.lstat()
     _need(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
@@ -138,6 +143,251 @@ def mutation_lock(wait=0):
     finally:
         # A detached receiver inherits the same file description.
         os.close(descriptor)
+
+
+@contextmanager
+def mutation_lock(wait=0):
+    with _guest_mutation_descriptor(wait=wait) as descriptor:
+        # Test under the installed mutation lock. A damaged or interrupted
+        # recovery record must fence ordinary workers just as a valid one does.
+        try:
+            (ROOT / INITIAL_RECOVERY_HOLD).lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise TransitionBlocked("guest_worker_initial_recovery_held")
+        yield descriptor
+
+
+def _initial_recovery_inventory(binding, containers, protected_inventory_sha256, stopped, baseline=None):
+    error = "guest_initial_recovery_quiescence_unverified"
+    _need(type(containers) is dict and set(containers) == SERVICES | {"ha-broker"}
+          and all(type(item) is dict and set(item) == {"container_id", "image_id"}
+                  and _hash(item["container_id"])
+                  and runtime._match(r"sha256:[a-f0-9]{64}", item["image_id"])
+                  for item in containers.values()), error)
+    ids = {item["container_id"] for item in containers.values()}
+    _need(len(ids) == len(containers), error)
+    objects = runtime._inventory()
+    owned = {identifier for identifier, item in objects.items()
+             if (item["Config"]["Labels"] or {}).get(runtime.ATTEMPT_LABEL) == binding.attempt_id}
+    _need(owned == ids, error)
+    unowned = {identifier: item for identifier, item in objects.items() if identifier not in ids}
+    for item in unowned.values():
+        if runtime._service(item) in containers:
+            state = item["State"]
+            _need(state["Status"] in {"created", "exited"} and state["Running"] is False
+                  and state["Restarting"] is False and state["Paused"] is False
+                  and item["HostConfig"]["RestartPolicy"]["Name"] == "no", error)
+    contract = {}
+    for service, pin in containers.items():
+        item = objects[pin["container_id"]]
+        state = item["State"]
+        running = state["Running"] if stopped is None else service not in stopped
+        _need(type(running) is bool and runtime._service(item) == service and item["Image"] == pin["image_id"]
+              and item["HostConfig"]["RestartPolicy"]["Name"] == "no" and item["HostConfig"]["AutoRemove"] is False
+              and item["RestartCount"] == 0
+              and state["Running"] is running and state["Paused"] is False and state["Restarting"] is False
+              and state["OOMKilled"] is False and state["Dead"] is False
+              and state["Status"] == ("running" if running else "exited")
+              and type(state["Pid"]) is int and (state["Pid"] > 0 if running else state["Pid"] == 0)
+              and (running or (type(state["ExitCode"]) is int and state["ExitCode"] in {0, 143}
+                               and state["FinishedAt"] > state["StartedAt"])), error)
+        layout = _digest(_bytes({"container": {key: item[key] for key in ("Name", "Image", "Config", "HostConfig")},
+                                 "mounts": sorted(item["Mounts"], key=lambda mount: mount["Destination"])}))
+        _need(type(state["StartedAt"]) is str and state["StartedAt"], error)
+        contract[service] = {"layout_sha256": layout, "started_at": state["StartedAt"], "running": running}
+    protected = runtime.inventory_sha256(unowned)
+    _need(protected == protected_inventory_sha256, error)
+    if baseline is not None:
+        original, original_protected = baseline
+        _need(protected == original_protected and original.keys() == contract.keys()
+              and all(record["layout_sha256"] == original[name]["layout_sha256"]
+                      for name, record in contract.items()), error)
+        if stopped is not None:
+            _need(all(record["started_at"] == original[name]["started_at"] for name, record in contract.items()), error)
+        else:
+            broker = contract["ha-broker"]
+            _need(not broker["running"] or broker["started_at"] != original["ha-broker"]["started_at"], error)
+    return contract, protected
+
+
+def quiesce_initial_recovery(binding, *, recovery_attempt_id, installation_id, runtime_receipt_sha256,
+                             activation_receipt_sha256, protected_inventory_sha256,
+                             assert_recovery_closed, car_route_release_sha256=None):
+    """Durably hold ordinary activation and stop only A's installed workloads.
+
+    The caller supplies a live authenticated authority check for the exact
+    recovery attempt, closed database pair and drained external effects.
+    A failure after persistence leaves the hold in place for reconciliation.
+    """
+    error = "guest_initial_recovery_quiescence_unverified"
+    _need(os.geteuid() == 0 and type(binding) is Binding and callable(assert_recovery_closed)
+          and all(_hash(pin) for pin in (recovery_attempt_id, installation_id, runtime_receipt_sha256,
+                                         activation_receipt_sha256, protected_inventory_sha256))
+          and (car_route_release_sha256 is None or _hash(car_route_release_sha256))
+          and recovery_attempt_id != binding.attempt_id, error)
+    source = binding.fields()
+    stage = ROOT / binding.attempt_id
+    _need(_digest(restore.BOOT_ID.read_bytes()) == binding.boot("A"), error)
+    runtime._directory(stage, 0)
+    raw, prepared = _read_json(stage / "runtime-prepared.json")
+    activated_raw, activated = _read_json(stage / "runtime-activation.json")
+    _, installed = _read_json(restore.INSTALLATION)
+    original = {"node": "A", "installation_id": installation_id, "attempt_id": binding.attempt_id,
+                "plan_sha256": binding.plan_sha256, "boot_sha256": binding.boot("A")}
+    retained_identity = ("cluster", "system_id_sha256", "source_commit", "manifest_sha256",
+                         "restore_receipt_sha256", "engine_id_sha256", "protected_inventory_sha256")
+    _need(_digest(raw) == runtime_receipt_sha256 and installed.get("node") == "A"
+          and installed.get("installation_id") == installation_id
+          and prepared.get("status") == "PREPARED" and activated.get("status") == "STARTED"
+          and _digest(activated_raw) == activation_receipt_sha256
+          and all(prepared.get(field) == activated.get(field) == value for field, value in original.items())
+          and all(type(prepared.get(field)) is str and prepared[field] and activated.get(field) == prepared[field]
+                  for field in retained_identity)
+          and prepared.get("containers") == activated.get("containers"), error)
+    containers = prepared.get("containers")
+    scope = {"schema_version": 1, "binding": source, "node": "A", "installation_id": installation_id,
+             "attempt_id": recovery_attempt_id, "runtime_receipt_sha256": runtime_receipt_sha256,
+             "activation_receipt_sha256": activation_receipt_sha256,
+             "car_route_release_sha256": car_route_release_sha256}
+
+
+    with mutation_lock():
+        baseline = _initial_recovery_inventory(binding, containers, protected_inventory_sha256, set())
+        ids = {item["container_id"] for item in containers.values()}
+        route_path = runtime.ROOT / "broker/car-route-release.json"
+        route_backup = stage / f"recovery-{recovery_attempt_id}-car-route-release.json"
+        route = None
+        if car_route_release_sha256 is not None:
+            route = runtime._read(route_path, 0, {0o444}, limit=4096)
+            value = json.loads(route, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+            authority_path = route_path.with_name("authority.json")
+            config_path = route_path.with_name("config.json")
+            raw_config = runtime._read(config_path, 0, {0o444})
+            raw_authority = runtime._read(authority_path, 0, {0o444}, limit=4096)
+            config = json.loads(raw_config, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+            authority = json.loads(raw_authority, object_pairs_hook=_pairs, parse_constant=_reject_constant)
+            _need(type(config) is dict and type(authority) is dict
+                  and type(authority.get("schema_version")) is int and authority["schema_version"] == 3
+                  and authority.get("installation_id") == installation_id
+                  and config.get("installation_id") == installation_id
+                  and config.get("node") == "A" and type(config.get("generation")) is int and config["generation"] == 1
+                  and _digest(raw_config) == prepared["broker_sha256"]
+                  and _digest(raw_authority) == activated["authority_files"]["broker/authority.json"], error)
+            try:
+                validate_broker_authority(authority, config, _digest(raw_config))
+            except DatabaseUnavailable:
+                raise TransitionBlocked(error) from None
+            _need(_digest(route) == car_route_release_sha256 and type(value) is dict
+                  and set(value) == {"schema_version", "action", "broker_authority_sha256", "route_verification_sha256"}
+                  and type(value["schema_version"]) is int and value["schema_version"] == 1
+                  and value["action"] == "enable-car-after-route-verification"
+                  and value["broker_authority_sha256"] == _digest(raw_authority)
+                  and _hash(value["route_verification_sha256"]) and not os.path.lexists(route_backup), error)
+        intent = _bytes(scope | {"containers": containers, "container_contracts": baseline[0],
+                                  "protected_inventory_sha256": baseline[1]})
+        intent_pin = _digest(intent)
+        _need(assert_recovery_closed(intent_pin, QUIESCENCE_BOUNDARIES[0]) is True, error)
+        path = ROOT / INITIAL_RECOVERY_HOLD
+        runtime._write(path, intent)
+
+        def assert_held(boundary):
+            _need(runtime._read(path, 0, {0o600}) == intent
+                  and _digest(restore.BOOT_ID.read_bytes()) == binding.boot("A")
+                  and assert_recovery_closed(intent_pin, boundary) is True, error)
+
+        assert_held(QUIESCENCE_BOUNDARIES[1])
+        broker = containers["ha-broker"]["container_id"]
+        runtime._docker("stop", "--signal=SIGTERM", "--timeout=-1", broker, timeout=25)
+        _initial_recovery_inventory(binding, containers, protected_inventory_sha256, {"ha-broker"}, baseline)
+        assert_held(QUIESCENCE_BOUNDARIES[2])
+        if route is not None:
+            runtime._write(route_backup, route, 0o400)
+            _need(runtime._read(route_backup, 0, {0o400}, limit=4096) == route
+                  and runtime._read(route_path, 0, {0o444}, limit=4096) == route, error)
+            _need(runtime._read(config_path, 0, {0o444}) == raw_config
+                  and runtime._read(authority_path, 0, {0o444}, limit=4096) == raw_authority, error)
+            route_path.unlink()
+            runtime._fsync_directory(route_path.parent)
+            _need(not os.path.lexists(route_path), error)
+        runtime._docker("stop", "--signal=SIGTERM", "--timeout=-1", *sorted(ids - {broker}), timeout=25)
+        _initial_recovery_inventory(binding, containers, protected_inventory_sha256, set(containers), baseline)
+        if route is not None:
+            _need(not os.path.lexists(route_path) and runtime._read(route_backup, 0, {0o400}, limit=4096) == route, error)
+        assert_held(QUIESCENCE_BOUNDARIES[3])
+        return intent_pin
+
+
+def _read_initial_recovery_hold(request):
+    error = "guest_initial_recovery_hold_unverified"
+    args = request.args
+    _need(os.geteuid() == 0 and request.node == "A" and request.binding.attempt_id != args["recovery_attempt_id"], error)
+    _need(_digest(restore.BOOT_ID.read_bytes()) == request.binding.boot("A"), error)
+    path = ROOT / INITIAL_RECOVERY_HOLD
+    stage = ROOT / request.binding.attempt_id
+    raw, hold = _read_json(path)
+    prepared_raw, prepared = _read_json(stage / "runtime-prepared.json")
+    active_raw, active = _read_json(stage / "runtime-activation.json")
+    _, installed = _read_json(restore.INSTALLATION)
+    expected = {"schema_version": 1, "binding": request.binding.fields(), "node": "A",
+                "attempt_id": args["recovery_attempt_id"], "installation_id": args["installation_id"],
+                **{name: args[name] for name in ("runtime_receipt_sha256", "activation_receipt_sha256",
+                                                "protected_inventory_sha256", "car_route_release_sha256")},
+                "containers": prepared.get("containers"), "container_contracts": hold.get("container_contracts")}
+    contracts = hold.get("container_contracts")
+    _need(raw == _bytes(expected) and hold == expected and installed.get("node") == "A"
+          and installed.get("installation_id") == args["installation_id"]
+          and prepared.get("status") == "PREPARED" and active.get("status") == "STARTED"
+          and _digest(prepared_raw) == args["runtime_receipt_sha256"]
+          and _digest(active_raw) == args["activation_receipt_sha256"]
+          and active.get("containers") == hold["containers"] and type(contracts) is dict
+          and set(contracts) == SERVICES | {"ha-broker"}
+          and all(type(value) is dict and set(value) == {"layout_sha256", "started_at", "running"}
+                  and _hash(value["layout_sha256"]) and type(value["started_at"]) is str and value["started_at"]
+                  and value["running"] is True for value in contracts.values()), error)
+    return raw, hold, prepared, active
+
+
+def _assert_car_route_blocked(request, raw, prepared, active):
+    error = "guest_initial_recovery_car_isolation_unverified"
+    args = request.args
+    broker = runtime.ROOT / "broker"
+    backup = ROOT / request.binding.attempt_id / f"recovery-{args['recovery_attempt_id']}-car-route-release.json"
+    _need(_digest(runtime._read(backup, 0, {0o400}, limit=4096)) == args["car_route_release_sha256"]
+          and _digest(runtime._read(broker / "config.json", 0, {0o444})) == prepared["broker_sha256"]
+          and _digest(runtime._read(broker / "authority.json", 0, {0o444}, limit=4096))
+            == active["authority_files"]["broker/authority.json"]
+          and runtime._read(ROOT / INITIAL_RECOVERY_HOLD, 0, {0o600}, limit=65536) == raw
+          and _digest(restore.BOOT_ID.read_bytes()) == request.binding.boot("A"), error)
+    try:
+        (broker / "car-route-release.json").lstat()
+    except FileNotFoundError:
+        return
+    raise TransitionBlocked(error)
+
+
+def observe_initial_recovery_hold(request):
+    args = request.args
+    with _guest_mutation_descriptor():
+        raw, hold, prepared, active = _read_initial_recovery_hold(request)
+        _initial_recovery_inventory(request.binding, hold["containers"], args["protected_inventory_sha256"],
+                                    SERVICES | {"ha-broker"},
+                                    (hold["container_contracts"], args["protected_inventory_sha256"]))
+        _assert_car_route_blocked(request, raw, prepared, active)
+        return Receipt("PASS", _digest(raw))
+
+
+def observe_car_isolation(request):
+    """Verify the same route block whether the exact broker is stopped or newly started."""
+    args = request.args
+    raw, hold, prepared, active = _read_initial_recovery_hold(request)
+    _need(_digest(raw) == args["hold_sha256"], "guest_initial_recovery_car_isolation_unverified")
+    _assert_car_route_blocked(request, raw, prepared, active)
+    current, _ = _initial_recovery_inventory(request.binding, hold["containers"], args["protected_inventory_sha256"],
+        None, (hold["container_contracts"], args["protected_inventory_sha256"]))
+    _assert_car_route_blocked(request, raw, prepared, active)
+    return Receipt("PASS", _digest(_bytes(_scope(request) | {"hold_sha256": args["hold_sha256"], "containers": current})))
 
 
 class GuestWorker:
@@ -977,6 +1227,19 @@ def handle(request, assert_windows_current=None):
         _args(request.verb, request.node, request.args)
         if request.verb == GUEST_TRANSITION_TARGET:
             return verify_transition_target(request)
+        if request.verb == GUEST_OBSERVE_INITIAL_RECOVERY_HOLD:
+            return observe_initial_recovery_hold(request)
+        if request.verb == GUEST_OBSERVE_CAR_ISOLATION:
+            return observe_car_isolation(request)
+        if request.verb == GUEST_QUIESCE_INITIAL_RECOVERY:
+            _need(callable(assert_windows_current), "guest_worker_live_windows_required")
+
+            def assert_closed(intent_pin, boundary):
+                challenge = _digest(_bytes({"request": _scope(request), "intent_sha256": intent_pin, "boundary": boundary}))
+                return _hash(assert_windows_current(challenge, boundary))
+
+            pin = quiesce_initial_recovery(request.binding, **request.args, assert_recovery_closed=assert_closed)
+            return Receipt("PASS", pin)
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
             if request.verb == GUEST_PREFLIGHT_REPLACEMENT:
                 return preflight_replacement_standby(request)
