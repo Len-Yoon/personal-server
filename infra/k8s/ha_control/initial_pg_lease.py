@@ -478,8 +478,16 @@ class InitialPgLeaseRecovery(InitialPgLease):
             self._deadline(started)
 
     def _legacy(self, state, started, **options):
-        self._assert_provider_isolation(started)
-        return super()._legacy(state, started, **options)
+        if self.quarantine is None:
+            return super()._legacy(state, started, **options)
+        # These observations use separate authenticated clients and share the
+        # same deadline. Join both before any caller can authorize a write.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            isolation = pool.submit(self._assert_provider_isolation, started)
+            observed_from = super()._legacy(state, started, **options)
+            isolation.result()
+        self._deadline(started)
+        return observed_from
 
     @staticmethod
     def _quarantine_observation(connection, *, renewal=False):

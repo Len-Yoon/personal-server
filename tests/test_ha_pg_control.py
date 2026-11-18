@@ -12,6 +12,7 @@ import subprocess
 from types import SimpleNamespace
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, call, patch
@@ -3128,6 +3129,7 @@ class InitialPgLeaseTests(unittest.TestCase):
             self.assertRegex(lease.observe_closed(self.state, challenge=challenge, deadline=deadline), r'^[a-f0-9]{64}$')
             self.assertTrue(all(call.kwargs == {"renewal": False} for call in observe.call_args_list))
         self.assertFalse(self.opened)
+
         unrelated_active = False
 
         def stored_isolation(_connection, *, renewal):
@@ -3142,6 +3144,85 @@ class InitialPgLeaseTests(unittest.TestCase):
             lease.renew(self.state)
             self.assertTrue(self.opened)
             self.assertEqual(self.revision, 4)
+
+    def test_recovery_quarantine_and_closure_share_deadline_and_overlap(self):
+        lease = self.recovery_lease()
+        lease.quarantine = ((), 'c' * 64, 'd' * 64, '7' * 64)
+        rendezvous = threading.Barrier(2)
+        started = time.monotonic()
+        deadline = started + INITIAL_PROOF_SECONDS
+
+        def isolation(broker, resources, actual_deadline):
+            self.assertEqual((broker, resources), ('c' * 64, '7' * 64))
+            self.assertEqual(actual_deadline, deadline)
+            rendezvous.wait(timeout=1)
+            return True
+
+        def closure(state, actual_deadline):
+            self.assertEqual(actual_deadline, deadline)
+            rendezvous.wait(timeout=1)
+            return True
+
+        lease.assert_quarantine_held = isolation
+        lease.assert_legacy_closed = closure
+        observed = lease._legacy(self.state, started, phase='precommit')
+        self.assertGreaterEqual(observed, started)
+        self.assertLess(observed, deadline)
+        self.assertFalse(self.opened)
+
+    def test_recovery_parallel_proofs_drain_and_reject_either_failure(self):
+        for failed_proof in ('isolation', 'closure'):
+            with self.subTest(failed_proof=failed_proof):
+                lease = self.recovery_lease()
+                lease.quarantine = ((), 'c' * 64, 'd' * 64, '7' * 64)
+                rendezvous = threading.Barrier(2)
+                finished = threading.Event()
+
+                def isolation(*_):
+                    rendezvous.wait(timeout=1)
+                    finished.set()
+                    return failed_proof != 'isolation'
+
+                def closure(*_):
+                    rendezvous.wait(timeout=1)
+                    if failed_proof == 'closure':
+                        raise TransitionBlocked('legacy_proof_failed')
+                    return True
+
+                lease.assert_quarantine_held = isolation
+                lease.assert_legacy_closed = closure
+                expected = ('initial_recovery_quarantine_unverified' if failed_proof == 'isolation'
+                            else 'legacy_proof_failed')
+                with self.assertRaisesRegex(TransitionBlocked, expected):
+                    lease._legacy(self.state, time.monotonic(), phase='precommit')
+                self.assertTrue(finished.is_set())
+                self.assertFalse(self.opened)
+
+    def test_recovery_parallel_proofs_keep_original_deadline(self):
+        lease = self.recovery_lease()
+        lease.quarantine = ((), 'c' * 64, 'd' * 64, '7' * 64)
+        rendezvous = threading.Barrier(2)
+        clock = [100.0]
+        finished = threading.Event()
+
+        def isolation(*_):
+            rendezvous.wait(timeout=1)
+            clock[0] = 100.0 + INITIAL_PROOF_SECONDS
+            finished.set()
+            return True
+
+        def closure(*_):
+            rendezvous.wait(timeout=1)
+            finished.wait(timeout=1)
+            return True
+
+        lease.assert_quarantine_held = isolation
+        lease.assert_legacy_closed = closure
+        with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_deadline_exceeded'):
+                lease._legacy(self.state, 100.0, phase='precommit')
+        self.assertTrue(finished.is_set())
+        self.assertFalse(self.opened)
 
     def test_quarantine_fingerprint_rejects_other_rows_and_missing_inflight_barrier(self):
         rows = [
