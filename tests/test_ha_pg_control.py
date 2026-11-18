@@ -619,6 +619,22 @@ class InitialServiceRetirementTests(unittest.TestCase):
         self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ReadPriorServiceArgs"))
         self.assertEqual(guard.call_count, 3)
 
+    def test_crash_handoff_requires_terminal_record_with_stopped_service_args(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        windows, guard = MagicMock(), MagicMock()
+        custody = SimpleNamespace(windows=windows, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+                                  binding=SimpleNamespace(plan_sha256="a"*64, attempt_id="b"*64))
+        lease = WindowsActivationLease(custody, "fixture", {
+            "first_write_proof_sha256": "e"*64, "service_instance_sha256": "c"*64,
+        })
+        reply = {"prior_args_sha256": "d"*64, "service_instance_sha256": "c"*64}
+        windows.powershell.side_effect = [reply, reply | {"terminal_state_sha256": "f"*64}]
+        deadline = time.monotonic() + 10
+        with self.assertRaisesRegex(BridgeRejected, "prior_args_unconfirmed"):
+            lease.read_prior_service_args(deadline, assert_guard=guard, require_terminal=True)
+        self.assertEqual(lease.read_prior_service_args(deadline, assert_guard=guard, require_terminal=True), "d"*64)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ReadPriorServiceArgs -RequireTerminalInitial"))
+
     def test_uncertain_retirement_requires_exact_read_only_observation(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
         guard = MagicMock()

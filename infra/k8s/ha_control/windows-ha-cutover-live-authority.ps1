@@ -9,6 +9,7 @@ param(
     [switch]$Retire,
     [switch]$ObserveRetired,
     [switch]$ReadPriorServiceArgs,
+    [switch]$RequireTerminalInitial,
     [switch]$ResumeRetire,
     [switch]$ReadClosureReceipt,
     [switch]$ReadRejoinReceipt,
@@ -324,6 +325,7 @@ function Read-RejoinReceipt {
 }
 
 try {
+    if ($RequireTerminalInitial -and -not $ReadPriorServiceArgs) { throw 'initial_service_retirement_scope' }
     if ($ReadRejoinReceipt) {
         if ($ReadPriorServiceArgs -or $ReadClosureReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
             throw 'transition_rejoin_receipt_invalid'
@@ -388,11 +390,28 @@ try {
             ('plan_sha256=' + $plan.controller_plan_sha256) -cnotin $lines -or 'mode=serve' -cnotin $lines) {
             throw 'live_authority_prior_args'
         }
+        $terminal = $null
+        if ($RequireTerminalInitial) {
+            $terminal = Read-Scope $plan.state_path ($admins + @($identity)) -Immutable
+            $record = ConvertFrom-Json -InputObject $terminal.raw
+            if ($record.kind -cne 'initial-wsl-cutover' -or $record.schema_version -ne 1 -or
+                $record.phase -cnotin @('lease_lost','local_revoke_observed') -or $record.generation -ne 1 -or
+                $record.attempt_id -cne $AttemptId -or $record.legacy_plan_sha256 -cne $LegacyPlanSha256 -or
+                $record.controller_plan_sha256 -cne $plan.controller_plan_sha256) {
+                throw 'live_authority_prior_args'
+            }
+        }
         $confirmed = Find-BoundService $plan
         if ($confirmed.State -cne 'Stopped' -or $confirmed.ProcessId -ne 0 -or
             $confirmed.StartMode -cne $service.StartMode) { throw 'live_authority_prior_args' }
-        [ordered]@{prior_args_sha256=(Get-Digest $savedArgs.raw);
-            service_instance_sha256=$ExpectedServiceInstanceSha256}|ConvertTo-Json -Compress
+        $reply = [ordered]@{prior_args_sha256=(Get-Digest $savedArgs.raw);
+            service_instance_sha256=$ExpectedServiceInstanceSha256}
+        if ($RequireTerminalInitial) {
+            $settled = Read-Scope $plan.state_path ($admins + @($identity)) -Immutable
+            if ($settled.raw -cne $terminal.raw) { throw 'live_authority_prior_args' }
+            $reply['terminal_state_sha256'] = Get-Digest $settled.raw
+        }
+        $reply | ConvertTo-Json -Compress
         return
     }
     if ($ObserveRetired) {

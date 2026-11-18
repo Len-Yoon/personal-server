@@ -195,21 +195,29 @@ class WindowsActivationLease:
         assert_guard()
         return result
 
-    def read_prior_service_args(self, deadline, *, assert_guard):
-        """Read the prior stopped service's args digest under the cutover guard."""
+    def read_prior_service_args(self, deadline, *, assert_guard, require_terminal=False):
+        """Read prior stopped args and optionally confirm its protected terminal journal."""
+        error = "native_initial_prior_args_unconfirmed"
+        bridge._need(type(require_terminal) is bool, error)
         assert_guard()
         custody = self.custody
-        source = fixed_script("windows-ha-cutover-live-authority.ps1", custody.live_sha256, {
+        parameters = {
             "BindingPath": self.binding_path, "LegacyPlanSha256": custody.binding.plan_sha256,
             "AttemptId": custody.binding.attempt_id, "PriorSha256": secrets.token_hex(32),
             "ExpectedServiceInstanceSha256": self.service_instance_sha256, "ReadPriorServiceArgs": True,
-        })
+        }
+        if require_terminal:
+            parameters["RequireTerminalInitial"] = True
+        source = fixed_script("windows-ha-cutover-live-authority.ps1", custody.live_sha256, parameters)
         bridge._remaining(deadline)
         result = custody.windows.powershell(source, deadline)
         pin = result.get("prior_args_sha256") if type(result) is dict else None
-        bridge._need(bridge._hash(pin) and bridge._matches(result, {
-            "prior_args_sha256": pin, "service_instance_sha256": self.service_instance_sha256,
-        }), "native_initial_prior_args_unconfirmed")
+        expected = {"prior_args_sha256": pin, "service_instance_sha256": self.service_instance_sha256}
+        if require_terminal:
+            terminal = result.get("terminal_state_sha256") if type(result) is dict else None
+            bridge._need(bridge._hash(terminal), error)
+            expected["terminal_state_sha256"] = terminal
+        bridge._need(bridge._hash(pin) and bridge._matches(result, expected), error)
         assert_guard()
         return pin
 
