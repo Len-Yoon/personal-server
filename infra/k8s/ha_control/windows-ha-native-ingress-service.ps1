@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('Install','StartCaddy','StartTunnel','Observe','Rollback')][string]$Mode,
+    [Parameter(Mandatory=$true)][ValidateSet('Install','StartCaddy','StartTunnel','Observe','Rollback','StartCaddyMaintenance','StartTunnelMaintenance','ObserveMaintenance')][string]$Mode,
     [Parameter(Mandatory=$true)][string]$RequestPath,
     [Parameter(Mandatory=$true)][string]$RequestSha256,
     [Parameter(Mandatory=$true)][string]$ExpectedProfileSha256,
@@ -163,6 +163,48 @@ function Assert-Origins([string]$Marker){
     }
 }
 
+# Maintenance verifies the same protected proxy route while reporting unavailable apps honestly.
+# This never exercises callback/OAuth routes and never authorizes database writes.
+function Assert-MaintenanceResponse($Response,[string]$Marker,[bool]$Car,[bool]$Health){
+    $status=[int]$Response.StatusCode
+    Require ($status -in @(200,503))
+    if($Health){
+        $header=if($Car){'X-N100-Car-Route'}else{'X-N100-Ingress-Route'}
+        Require ($Response.Headers[$header] -ceq $Marker)
+    }
+    if($Car -and $status -eq 200){
+        $stream=$Response.GetResponseStream()
+        Require ($stream.ReadByte() -eq 111 -and $stream.ReadByte() -eq 107 -and $stream.ReadByte() -eq -1)
+    }
+    return $status
+}
+
+function Assert-MaintenanceOrigins([string]$Marker){
+    $statuses=[ordered]@{}
+    foreach($hostname in @('len.pe.kr','portfolio.len.pe.kr','file.len.pe.kr','admin.len.pe.kr',
+            'books.len.pe.kr','memo.len.pe.kr','news.len.pe.kr','car.len.pe.kr')){
+        $car=$hostname -ceq 'car.len.pe.kr'
+        $port=if($car){18015}else{18080}
+        $paths=if($car){@('/health')}else{@('/ready','/health')}
+        foreach($path in $paths){
+            $request=[Net.HttpWebRequest]::Create("http://127.0.0.1:$port$path")
+            $request.Host=$hostname;$request.Proxy=$null;$request.AllowAutoRedirect=$false
+            $request.Timeout=4000;$request.ReadWriteTimeout=4000
+            $request.Headers['Cache-Control']='no-cache'
+            $response=$null
+            try{
+                try{$response=$request.GetResponse()}
+                catch [Net.WebException]{
+                    $response=$_.Exception.Response
+                    Require ($null -ne $response -and [int]$response.StatusCode -eq 503)
+                }
+                $statuses[$hostname+$path]=Assert-MaintenanceResponse $response $Marker $car ($path -ceq '/health')
+            }finally{if($null -ne $response){$response.Dispose()}}
+        }
+    }
+    return $statuses
+}
+
 function Read-LegacyAuthority([string]$Path,[string]$Pin,[long]$Limit){
     Require ($Pin -cmatch '\A[a-f0-9]{64}\z')
     [TrustedStoppedV1.Contract]::LocalPath($Path)
@@ -284,7 +326,7 @@ function Assert-TunnelReady {
 }
 
 try{
-    Require ($Mode -cin @('Install','StartCaddy','StartTunnel','Observe','Rollback') -and
+    Require ($Mode -cin @('Install','StartCaddy','StartTunnel','Observe','Rollback','StartCaddyMaintenance','StartTunnelMaintenance','ObserveMaintenance') -and
         [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and [Environment]::Is64BitProcess -and
         $PSVersionTable.PSEdition -ceq 'Desktop' -and $PSVersionTable.PSVersion.Major -eq 5 -and
         $RequestSha256 -cmatch '\A[a-f0-9]{64}\z' -and $ExpectedProfileSha256 -cmatch '\A[a-f0-9]{64}\z' -and $StageScriptSha256 -cmatch '\A[a-f0-9]{64}\z')
@@ -400,6 +442,8 @@ try{
             Require ($service.State -ceq 'Stopped')
         }
     } else {
+        $maintenance=$Mode -cin @('StartCaddyMaintenance','StartTunnelMaintenance','ObserveMaintenance')
+        $originStatuses=$null
         $null=Read-Held (Join-Path $authority 'intent.json') (Digest $intent) 4096
         $caddyState=Service-Facts $caddy $images[$caddy] ($Mode -ceq 'Rollback')
         $tunnelState=Service-Facts $tunnel $images[$tunnel] ($Mode -ceq 'Rollback')
@@ -412,7 +456,7 @@ try{
                 }
                 $null=Service-Facts $name $images[$name] $true
             }
-        } elseif($Mode -ceq 'StartCaddy'){
+        } elseif($Mode -cin @('StartCaddy','StartCaddyMaintenance')){
             Require ($tunnelState.State -ceq 'Stopped')
             if($caddyState.State -ceq 'Stopped'){
                 foreach($port in @(18080,18015)){Require (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -eq 0)}
@@ -421,10 +465,10 @@ try{
                 (Get-Service -Name $caddy).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(15))
             }
             Assert-Listeners (Service-Facts $caddy $images[$caddy]) @(18080,18015)
-            Assert-Origins $profile['route_sha256']
-        } elseif($Mode -ceq 'StartTunnel'){
+            if($maintenance){$originStatuses=Assert-MaintenanceOrigins $profile['route_sha256']}else{Assert-Origins $profile['route_sha256']}
+        } elseif($Mode -cin @('StartTunnel','StartTunnelMaintenance')){
             Assert-Listeners $caddyState @(18080,18015)
-            Assert-Origins $profile['route_sha256']
+            if($maintenance){$originStatuses=Assert-MaintenanceOrigins $profile['route_sha256']}else{Assert-Origins $profile['route_sha256']}
             Assert-LegacyConnectorExclusion $spec['legacy_exclusion'] $spec['legacy_distribution'] -RequireOnline:($tunnelState.State -ceq 'Stopped')
             if($tunnelState.State -ceq 'Stopped'){
                 Require (@(Get-NetTCPConnection -State Listen -LocalPort 19191 -ErrorAction SilentlyContinue).Count -eq 0)
@@ -436,7 +480,11 @@ try{
             Assert-TunnelReady
             Assert-LegacyConnectorExclusion $spec['legacy_exclusion'] $spec['legacy_distribution']
         } else {
-            if($caddyState.State -ceq 'Running'){Assert-Listeners $caddyState @(18080,18015);Assert-Origins $profile['route_sha256']}
+            if($caddyState.State -ceq 'Running'){
+                Assert-Listeners $caddyState @(18080,18015)
+                if($maintenance){$originStatuses=Assert-MaintenanceOrigins $profile['route_sha256']}else{Assert-Origins $profile['route_sha256']}
+            }
+            if($maintenance){Require ($caddyState.State -ceq 'Running' -and $tunnelState.State -ceq 'Running')}
             if($tunnelState.State -ceq 'Running'){
                 Require ($caddyState.State -ceq 'Running')
                 Assert-LegacyConnectorExclusion $spec['legacy_exclusion'] $spec['legacy_distribution']
@@ -450,9 +498,13 @@ try{
     $finalTunnel=Service-Facts $tunnel $images[$tunnel] ($Mode -ceq 'Rollback')
     $caddyResult=if($null -eq $finalCaddy){'Absent'}else{$finalCaddy.State}
     $tunnelResult=if($null -eq $finalTunnel){'Absent'}else{$finalTunnel.State}
-    [ordered]@{schema_version=1;status='PASS';mode=$Mode;request_sha256=$RequestSha256;
+    $result=[ordered]@{schema_version=1;status='PASS';mode=$Mode;request_sha256=$RequestSha256;
         profile_sha256=$spec['profile_sha256'];caddy_state=$caddyResult;tunnel_state=$tunnelResult;
-        production_external_verified=$false;credentials_copied=$false}|ConvertTo-Json -Compress
+        production_external_verified=$false;credentials_copied=$false}
+    if($Mode -cin @('StartCaddyMaintenance','StartTunnelMaintenance','ObserveMaintenance')){
+        $result.status='MAINTENANCE';$result.application_ready=$false;$result.origin_status_codes=$originStatuses
+    }
+    $result|ConvertTo-Json -Depth 4 -Compress
 } catch {
     [ordered]@{schema_version=1;status='BLOCKED';mode=$Mode;phase=$phase;created_services=$created.Count;
         remote_action_unconfirmed=$phase -ceq 'service';credentials_copied=$false}|ConvertTo-Json -Compress

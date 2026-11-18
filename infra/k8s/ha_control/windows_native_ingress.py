@@ -153,7 +153,8 @@ try {
 class WindowsNativeFrontend:
     """Invoke a pinned, protected Windows-local lifecycle script under the caller's guard."""
 
-    MODES = frozenset({"Install", "StartCaddy", "StartTunnel", "Observe", "Rollback"})
+    MODES = frozenset({"Install", "StartCaddy", "StartTunnel", "Observe", "Rollback",
+                       "StartCaddyMaintenance", "StartTunnelMaintenance", "ObserveMaintenance"})
 
     def __init__(self, windows, *, script_path, script_sha256, stage_script_sha256,
                  request_path, request_sha256, profile_sha256):
@@ -186,20 +187,32 @@ class WindowsNativeFrontend:
         source = re.sub(r"SCRIPT_PATH|REQUEST_PATH|SCRIPT_SHA|MODE_NAME|REQUEST_SHA|STAGE_SHA|PROFILE_SHA",
                         lambda match: parameters[match.group()], _WINDOWS_FRONTEND_ENTRY)
         result = self.windows.powershell(source, deadline)
+        maintenance = mode.endswith("Maintenance")
         expected_keys = {"schema_version", "status", "mode", "request_sha256", "profile_sha256", "caddy_state",
                          "tunnel_state", "production_external_verified", "credentials_copied"}
+        if maintenance:
+            expected_keys |= {"application_ready", "origin_status_codes"}
         if (type(result) is not dict or set(result) != expected_keys or result.get("schema_version") != 1
                 or type(result.get("schema_version")) is not int
-                or result.get("status") != "PASS" or result.get("mode") != mode
+                or result.get("status") != ("MAINTENANCE" if maintenance else "PASS") or result.get("mode") != mode
                 or result.get("request_sha256") != self.request_sha256
                 or result.get("profile_sha256") != self.profile_sha256
                 or result.get("credentials_copied") is not False or result.get("production_external_verified") is not False
                 or assert_guard() is not True):
             raise TransitionBlocked("native_frontend_result_unconfirmed")
+        if maintenance:
+            origins = result.get("origin_status_codes")
+            expected_origins = {host + path for host, upstream in PUBLIC_ROUTES.items() if upstream
+                                for path in ("/ready", "/health")} | {car_callback_ingress.PUBLIC_HOST + "/health"}
+            if (result.get("application_ready") is not False or type(origins) is not dict
+                    or set(origins) != expected_origins
+                    or any(type(code) is not int or code not in {200, 503} for code in origins.values())):
+                raise TransitionBlocked("native_frontend_result_unconfirmed")
         if any(result.get(key) not in {"Absent", "Stopped", "Running"} for key in ("caddy_state", "tunnel_state")):
             raise TransitionBlocked("native_frontend_result_unconfirmed")
         expected = {"Install": ("Stopped", "Stopped"), "StartCaddy": ("Running", "Stopped"),
-                    "StartTunnel": ("Running", "Running")}
+                    "StartTunnel": ("Running", "Running"), "StartCaddyMaintenance": ("Running", "Stopped"),
+                    "StartTunnelMaintenance": ("Running", "Running"), "ObserveMaintenance": ("Running", "Running")}
         if mode in expected and (result.get("caddy_state"), result.get("tunnel_state")) != expected[mode]:
             raise TransitionBlocked("native_frontend_result_unconfirmed")
         if mode == "Rollback" and any(result.get(key) not in {"Absent", "Stopped"} for key in ("caddy_state", "tunnel_state")):
@@ -259,7 +272,7 @@ def render_candidate(source, *, source_sha256, active_ip, generation, plan_sha25
     marker = "\n".join([
         "    @native_health {", "        method GET", "        path /health", "    }",
         "    header @native_health {", f"        {ROUTE_HEADER} {pin}",
-        "        Cache-Control no-store", "        match status 200", "    }",
+        "        Cache-Control no-store", "        match status 200 503", "    }",
     ])
     for host in sorted(PUBLIC_ROUTES):
         main = main.replace(f"\n{host} {{\n", f"\nhttp://{host}:{MAIN_ORIGIN_PORT} {{\n"
@@ -268,6 +281,7 @@ def render_candidate(source, *, source_sha256, active_ip, generation, plan_sha25
 
     car_host = car_callback_ingress.PUBLIC_HOST
     _, car = car_callback_ingress.render(active_ip, route_pin=pin).decode("ascii").split("\n\n", 1)
+    car = car.replace("        match status 200\n", "        match status 200 503\n", 1)
     car = car.replace(f":8015 {{\n", f":{CAR_ORIGIN_PORT} {{\n    bind {LOOPBACK}\n")
     config = (main + "\n" + car).replace(caddy_cutover.MOUNT, WINDOWS_TLS).encode("ascii")
 

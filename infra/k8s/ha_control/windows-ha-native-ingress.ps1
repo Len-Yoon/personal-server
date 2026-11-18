@@ -114,7 +114,7 @@ function Assert-CaddyRoutes([string]$Config,[string]$Route){
     }
     foreach($port in 18080,18015){$expected["http://:$port {"]="http://:$port {`n    bind 127.0.0.1`n    respond 404`n}"}
     $marker=@('    bind 127.0.0.1','    @native_health {','        method GET','        path /health','    }',
-        '    header @native_health {',"        X-N100-Ingress-Route $Route",'        Cache-Control no-store','        match status 200','    }')
+        '    header @native_health {',"        X-N100-Ingress-Route $Route",'        Cache-Control no-store','        match status 200 503','    }')
     foreach($hostname in $script:mainRoutes.Keys){
         $service=$script:mainRoutes[$hostname]
         $heading="http://$($hostname):18080 {"
@@ -128,7 +128,7 @@ function Assert-CaddyRoutes([string]$Config,[string]$Route){
     $carHeading='http://car.len.pe.kr:18015 {'
     $carAllowlist='        expression `(method(''GET'') && path(''/health'', ''/oauth/hyundai/callback'', ''/oauth/hyundai/data-redirect'')) || (method(''POST'') && path(''/oauth/hyundai/data-redirect''))`'
     $expected[$carHeading]=(@($carHeading,'    bind 127.0.0.1','    @health {','        method GET','        path /health','    }',
-        '    header @health {',"        X-N100-Car-Route $Route",'        Cache-Control no-store','        match status 200','    }',
+        '    header @health {',"        X-N100-Car-Route $Route",'        Cache-Control no-store','        match status 200 503','    }',
         '    @allowed {',$carAllowlist,'    }','    handle @allowed {',(Get-CaddyProxy $target 'car-care-worker' $true),
         '    }','    respond 404','}') -join "`n")
 

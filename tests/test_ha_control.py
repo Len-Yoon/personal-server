@@ -81,6 +81,122 @@ class WindowsNativeIngressTests(unittest.TestCase):
             with self.assertRaisesRegex(TransitionBlocked, "request_invalid"):
                 native.WindowsNativeFrontend(windows, **(arguments | override))
 
+    def test_maintenance_frontend_never_claims_application_readiness(self):
+        windows = MagicMock()
+        frontend = native.WindowsNativeFrontend(windows, script_path=r"C:\ProgramData\Reviewed\service.ps1",
+            script_sha256="a" * 64, stage_script_sha256="b" * 64,
+            request_path=r"C:\ProgramData\Reviewed\request.json", request_sha256="c" * 64,
+            profile_sha256="d" * 64)
+        codes = {host + path: 503 for host, upstream in native.PUBLIC_ROUTES.items() if upstream
+                 for path in ("/ready", "/health")}
+        codes[car_callback_ingress.PUBLIC_HOST + "/health"] = 200
+        base = dict(schema_version=1, status="MAINTENANCE", request_sha256="c" * 64,
+                    profile_sha256="d" * 64, production_external_verified=False, credentials_copied=False,
+                    application_ready=False, origin_status_codes=codes, caddy_state="Running", tunnel_state="Running")
+        for mode in ("StartCaddyMaintenance", "StartTunnelMaintenance", "ObserveMaintenance"):
+            result = base | dict(mode=mode, tunnel_state="Stopped" if mode == "StartCaddyMaintenance" else "Running")
+            windows.powershell.return_value = result
+            self.assertEqual(frontend.run(mode, 90, assert_guard=lambda: True), result)
+        for change in (dict(status="PASS"), dict(application_ready=True), dict(origin_status_codes={}),
+                       dict(origin_status_codes=codes | {"len.pe.kr/health": 502}),
+                       dict(origin_status_codes=codes | {"len.pe.kr/health": True}),
+                       dict(caddy_state="Stopped")):
+            windows.powershell.return_value = base | dict(mode="StartTunnelMaintenance") | change
+            with self.subTest(change=change), self.assertRaisesRegex(TransitionBlocked, "result_unconfirmed"):
+                frontend.run("StartTunnelMaintenance", 90, assert_guard=lambda: True)
+        windows.powershell.return_value = base | dict(mode="StartTunnel")
+        with self.assertRaisesRegex(TransitionBlocked, "result_unconfirmed"):
+            frontend.run("StartTunnel", 90, assert_guard=lambda: True)
+
+    def test_maintenance_response_proves_route_without_accepting_other_failures(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        source = ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"
+        command = r"""
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'maintenance_ast'}
+foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -cin @('Require','Assert-MaintenanceResponse')},$false)){. ([scriptblock]::Create($fn.Extent.Text))}
+function Response([int]$Status,[string]$Marker,[string]$Body='ok'){
+ $value=[pscustomobject]@{StatusCode=$Status;Headers=@{'X-N100-Ingress-Route'=$Marker;'X-N100-Car-Route'=$Marker};Body=$Body}
+ $value|Add-Member ScriptMethod GetResponseStream {return [IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($this.Body))}
+ return $value
+}
+foreach($status in @(200,503)){
+ foreach($car in @($true,$false)){
+  $got=Assert-MaintenanceResponse (Response $status 'route') 'route' $car $true
+  if($got -ne $status){throw 'maintenance_status'}
+ }
+}
+foreach($status in @(301,400,500,502,504)){
+ $rejected=$false;try{Assert-MaintenanceResponse (Response $status 'route') 'route' $false $true}catch{$rejected=$true}
+ if(-not $rejected){throw 'maintenance_other_error'}
+}
+foreach($bad in @('wrong','')){
+ $rejected=$false;try{Assert-MaintenanceResponse (Response 503 $bad) 'route' $false $true}catch{$rejected=$true}
+ if(-not $rejected){throw 'maintenance_unmarked_503'}
+}
+$rejected=$false;try{Assert-MaintenanceResponse (Response 200 'route' 'wrong') 'route' $true $true}catch{$rejected=$true}
+if(-not $rejected){throw 'maintenance_car_body'}
+"""
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(source)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_maintenance_http_probe_handles_real_503_without_accepting_502(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+        observed = []
+        fixture = {"status": 503, "marker": "route"}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                observed.append((self.headers["Host"], self.path))
+                self.send_response(fixture["status"])
+                self.send_header(native.ROUTE_HEADER, fixture["marker"])
+                self.send_header(car_callback_ingress.ROUTE_HEADER, fixture["marker"])
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        command = r"""
+$ErrorActionPreference='Stop'
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$tokens,[ref]$errors)
+foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -cin @('Require','Assert-MaintenanceResponse','Assert-MaintenanceOrigins')},$false)){
+ . ([scriptblock]::Create(($fn.Extent.Text -replace '18080|18015',$env:FIXTURE_PORT)))
+}
+Assert-MaintenanceOrigins 'route'|ConvertTo-Json -Compress
+"""
+        try:
+            for status, marker in ((503, "route"), (200, "route"), (502, "route"), (503, "wrong")):
+                fixture.update(status=status, marker=marker)
+                result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                    env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"),
+                                      "FIXTURE_PORT": str(server.server_port)}, capture_output=True, text=True, timeout=15)
+                with self.subTest(status=status, marker=marker):
+                    if status in (200, 503) and marker == "route":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        codes = json.loads(result.stdout)
+                        self.assertEqual(len(codes), 15)
+                        self.assertEqual(set(codes.values()), {status})
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(observed)
+            self.assertTrue(all(path in {"/health", "/ready"} for _, path in observed))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_native_frontend_lifecycle_rejects_posix_before_reading_inputs(self):
         pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
         self.assertTrue(pwsh.is_file(), "PowerShell is required for native frontend validation")
@@ -199,6 +315,8 @@ foreach($key in @('Delayed','NonCrash','Actions','Triggers','Start')){
         self.assertNotIn("/run/n100-ha", config)
         self.assertIn("    log {\n        output discard\n    }\n", config.split("\n\n", 1)[0])
         _, expected_car = car_callback_ingress.render("10.23.45.67", route_pin=result.route_pin).decode("ascii").split("\n\n", 1)
+        self.assertEqual(config.count("        match status 200 503\n"), 9)
+        expected_car = expected_car.replace("        match status 200\n", "        match status 200 503\n", 1)
         expected_car = expected_car.replace(":8015 {\n", f":{native.CAR_ORIGIN_PORT} {{\n    bind 127.0.0.1\n")
         self.assertTrue(config.endswith(expected_car.replace("/run/n100-ha/caddy-mtls", native.WINDOWS_TLS)))
 
