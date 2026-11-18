@@ -141,6 +141,79 @@ finally { $mac.Dispose() }
 
 
 class WindowsLeaseResponseBudgetTests(unittest.TestCase):
+    def test_offline_observer_checks_exact_vms_and_rechecks_wsl_before_return(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        observer = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control/windows-ha-wsl-lease-observer.ps1"
+        command = r"""
+$ErrorActionPreference='Stop'
+. $env:HA_OFFLINE_OBSERVER
+try {
+    Initialize-HaLeaseObservation ([pscustomobject]@{closure_mode=@('windows-offline-v1')}) '' '' '' ''
+    throw 'fixture_array_mode'
+} catch {
+    if ($_.Exception.Message -cne 'lease_proof_callback_scope'){throw}
+}
+$script:ClosureOffline=$true
+$script:ClosureInput=[pscustomobject]@{installation_id='a'*64;a_disk_paths_sha256='b'*64;b_disk_paths_sha256='c'*64}
+$script:ClosureMarker=@{sha256='d'*64}
+$script:ClosureBoot='e'*64
+$script:ClosureVmA=[guid]::NewGuid()
+$script:ClosureVmB=[guid]::NewGuid()
+$script:ClosurePlan=@{boot_ticks='fixture'}
+$challenge=[pscustomobject]@{nonce='1'*32;plan_sha256='f'*64;attempt_id='2'*64;generation=1;
+    windows_boot_sha256=$script:ClosureBoot;wsl_boot_sha256='3'*64;collector_sha256='4'*64}
+function Get-HaReactivationHash { return '5'*64 }
+function Assert-HaOwnedCutoverMarker($Marker,[switch]$ReadContent) {
+    if($ReadContent){return (ConvertTo-Json -InputObject $challenge -Compress)}
+}
+function Assert-HaWslOfflineReactivationClosed { $script:reads++ }
+function Assert-HaWslWorkloadsAbsent {
+    $script:reads++
+    if($script:reappeared){throw 'fixture_wsl_restarted'}
+}
+$vm=[RunspaceFactory]::CreateRunspace()
+$vm.Open()
+try {
+    $warm=[PowerShell]::Create()
+    $warm.Runspace=$vm
+    try {
+        $null=$warm.AddScript({
+            function Get-FixedVmObserverSnapshot {
+                $last=if($global:drift){'bad'}else{'c'*64}
+                return ,@(
+                    [pscustomobject]@{node='A';state='Running';disk_paths_sha256='b'*64},
+                    [pscustomobject]@{node='B';state='Running';disk_paths_sha256=$last}
+                )
+            }
+        }.ToString(),$false)
+        $null=$warm.Invoke()
+        if($warm.HadErrors){throw 'fixture_warm'}
+    } finally { $warm.Dispose() }
+    foreach($mode in @('positive','wsl','vm')){
+        $vm.SessionStateProxy.SetVariable('drift',($mode -ceq 'vm'))
+        $script:reappeared=$mode -ceq 'wsl'
+        $script:reads=0
+        $context=[pscustomobject]@{Challenge=$challenge;Progress=@{};MarkerSha256=$script:ClosureMarker.sha256;
+            ReactivationPlanSha256=$challenge.plan_sha256;VmRunspace=$vm;
+            DeadlineTimestamp=[Diagnostics.Stopwatch]::GetTimestamp()+[long]([Diagnostics.Stopwatch]::Frequency*2.5)}
+        try {
+            $reply=Get-HaLeaseProof $context
+            if($mode -cne 'positive' -or -not $reply.wsl_writers_closed -or $reply.nonce -cne $challenge.nonce){
+                throw 'fixture_accepted_invalid'
+            }
+            if($script:reads -ne 2){throw 'fixture_missing_absence'}
+        } catch {
+            if($mode -ceq 'positive' -or $_.Exception.Message -cnotin @('fixture_wsl_restarted','lease_proof_vm_scope')){throw}
+        }
+    }
+} finally { $vm.Dispose() }
+exit 0
+"""
+        result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", command),
+                                env=os.environ | {"HA_OFFLINE_OBSERVER": str(observer)},
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_offline_closure_checks_wsl_before_and_after_task_and_process_readback(self):
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
         self.assertTrue(Path(runtime).is_file(), "PowerShell required for offline closure verification")
@@ -257,7 +330,7 @@ exit 0
     def test_process_inventory_follows_task_closure_and_precedes_marker_readback(self):
         scripts = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
         callback = (scripts / "windows-ha-wsl-lease-observer.ps1").read_text()
-        proof = callback.split("function Get-HaLeaseProof", 1)[1]
+        proof = callback.split("function Get-HaLeaseProof", 1)[1].split("function Get-HaOfflineLeaseProof", 1)[0]
         steps = (
             "Assert-HaOwnedCutoverMarker $script:ClosureMarker",
             "Assert-HaReactivationInfrastructureClosed $script:ClosurePlan",

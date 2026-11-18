@@ -399,6 +399,11 @@ try {
                 $output[0].Name -cne 'Get-HaRecoveryObservation') { throw 'recovery_proof_callback' }
         } finally { $init.Dispose() }
     } else {
+        if ('closure_mode' -cin $inputConfig.PSObject.Properties.Name -and (
+            $inputConfig.closure_mode -isnot [string] -or
+            $inputConfig.closure_mode -cne 'windows-offline-v1' -or $CollectorSha256 -cne $CallbackSha256)) {
+            throw 'lease_proof_callback_pin'
+        }
         $planText = Read-ProtectedText $inputConfig.reactivation_plan_path $ReactivationPlanSha256
         $nativePlan = ConvertFrom-Json -InputObject $planText
         if ($PlanSha256 -cne $ReactivationPlanSha256 -and
