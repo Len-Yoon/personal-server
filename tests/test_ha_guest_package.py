@@ -228,6 +228,77 @@ class NativeGuestRuntimeTest(unittest.TestCase):
                 self.assertEqual((path / "postgres.pgpass").read_bytes(), passfile)
                 self.assertEqual((journal / (service + ".generation-1-config.json")).read_bytes(), old)
 
+    def test_standby_clears_only_empty_ingress_after_preserving_original_broker(self):
+        module = native_guest_runtime
+        pins = self.pins("B")
+        broker_raw = b'{"generation":1}'
+        broker_pin = module._digest(broker_raw)
+        configs = {}
+        plan_pin = "a"*64
+        proof = {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_pin, "node": "B",
+                 "generation": 2, "config_sha256": configs}
+        real_rmdir = module.os.rmdir
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            journal = root / "journal"
+            journal.mkdir()
+            (root / "broker").mkdir()
+            broker = root / "broker" / "config.json"
+            broker.write_bytes(broker_raw)
+            prepared = module._json_bytes({"broker_sha256": broker_pin})
+            (root / "runtime-prepared.json").write_bytes(prepared)
+            ingress = root / "ingress"
+            ingress.mkdir()
+            for service in module.SERVICES:
+                (ingress / service).mkdir()
+                folder = root / "apps" / service
+                folder.mkdir(parents=True)
+                config_bytes = module._json_bytes({"node": "B", "service": service, "generation": 2,
+                                                  "primary_node": "B", "primary": {"host": "ha-b"},
+                                                  "partner": {"host": "ha-a"}})
+                (folder / "config.json").write_bytes(config_bytes)
+                configs[service] = module._digest(config_bytes)
+            with (patch.object(module, "ROOT", root), patch.object(module, "RUN", root),
+                  patch.object(module, "_initial_retirement_scope"), patch.object(module, "_directory"),
+                  patch.object(module, "_initial_retired_guard", return_value=(journal, Mock())),
+                  patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+                  patch.object(module.os, "fchown"), patch.object(module, "_assert_ingress_dir",
+                      side_effect=lambda path: module._need(not any(path.iterdir()), "fixture socket not empty"))):
+                options = dict(runtime_receipt_sha256=module._digest(prepared), plan_sha256=plan_pin,
+                               rebind_receipt=proof, assert_no_activation=Mock())
+                service = min(module.SERVICES)
+                config_path = root / "apps" / service / "config.json"
+                original = config_path.read_bytes()
+                old = module._json_bytes(json.loads(original) | {"generation": 1})
+                config_path.write_bytes(old)
+                configs[service] = module._digest(old)
+                with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_paths_unconfirmed"):
+                    module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                self.assertEqual(broker.read_bytes(), broker_raw)
+                config_path.write_bytes(original)
+                configs[service] = module._digest(original)
+                leftover = ingress / service / "socket"
+                leftover.touch()
+                with self.assertRaisesRegex(TransitionBlocked, "socket not empty"):
+                    module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                self.assertEqual(broker.read_bytes(), broker_raw)
+                leftover.unlink()
+
+                def interrupt(path, *, dir_fd):
+                    if path == sorted(module.SERVICES)[1]:
+                        raise OSError("fixture removal interruption")
+                    real_rmdir(path, dir_fd=dir_fd)
+
+                with patch.object(module.os, "rmdir", side_effect=interrupt):
+                    with self.assertRaisesRegex(OSError, "removal interruption"):
+                        module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                result = module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                self.assertEqual(result, {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_pin,
+                                          "broker_backup_sha256": broker_pin, "ingress_count": 7})
+                self.assertFalse(broker.exists())
+                self.assertFalse(any(ingress.iterdir()))
+                self.assertEqual((journal / "generation-1-broker-config.json").read_bytes(), broker_raw)
+
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime
         pins = self.pins()

@@ -1,5 +1,6 @@
 """Prepare the exact VM guest app and broker containers in the stopped state."""
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 import hashlib
 import json
@@ -659,12 +660,7 @@ def _publish_standby_config(path, raw, *, uid, gid, assert_current):
         pending.unlink(missing_ok=True)
 
 
-def rebind_initial_standby_application_configs(pins, postgres, stage, *, runtime_receipt_sha256,
-                                                plan_sha256, assert_no_activation):
-    """Advance only the retired B apps to generation 2 without changing their credentials."""
-    error = "guest_initial_standby_config_unconfirmed"
-    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
-    _need(_match(SHA, plan_sha256), error)
+def _initial_retired_guard(pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error):
     journal = Path(stage) / "initial-standby-retirement"
     raw = _read(journal / "plan.json", 0, {0o400})
     _need(_digest(raw) == plan_sha256, error)
@@ -690,6 +686,18 @@ def rebind_initial_standby_application_configs(pins, postgres, stage, *, runtime
         _need(not any(_service(item) in SERVICES | {"ha-broker"} for item in objects.values())
               and inventory_sha256(objects) == pins.protected_inventory_sha256, error)
 
+    return journal, guard
+
+
+def rebind_initial_standby_application_configs(pins, postgres, stage, *, runtime_receipt_sha256,
+                                                plan_sha256, assert_no_activation):
+    """Advance only the retired B apps to generation 2 without changing their credentials."""
+    error = "guest_initial_standby_config_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256), error)
+    journal, guard = _initial_retired_guard(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
+    )
     guard()
     cert = _cert_digest(_read(ROOT / "broker" / "broker.crt", 0, {0o440, 0o444}))
     changes = {}
@@ -737,6 +745,91 @@ def rebind_initial_standby_application_configs(pins, postgres, stage, *, runtime
     guard()
     return {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_sha256, "node": "B", "generation": 2,
             "config_sha256": digests}
+
+
+def clean_initial_standby_runtime_paths(pins, postgres, stage, *, runtime_receipt_sha256,
+                                        plan_sha256, rebind_receipt, assert_no_activation):
+    """Archive the original broker file and remove only the approved empty ingress directories."""
+    error = "guest_initial_standby_paths_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256) and type(rebind_receipt) is dict, error)
+    configs = rebind_receipt.get("config_sha256")
+    _need(type(configs) is dict and set(configs) == SERVICES
+          and all(_match(SHA, pin) for pin in configs.values())
+          and rebind_receipt == {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_sha256, "node": "B",
+                                 "generation": 2, "config_sha256": configs}, error)
+    journal, guard = _initial_retired_guard(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
+    )
+    guard()
+    for service, pin in configs.items():
+        raw_config = _read(ROOT / "apps" / service / "config.json", APP_UID, {0o400})
+        app = json.loads(raw_config)
+        _need(_digest(raw_config) == pin and type(app.get("generation")) is int
+              and (app.get("node"), app.get("service"), app.get("generation"), app.get("primary_node"))
+              == ("B", service, 2, "B") and app["primary"]["host"] == "ha-b"
+              and app["partner"]["host"] == "ha-a", error)
+
+    runtime_raw = _read(Path(stage) / "runtime-prepared.json", 0, {0o600})
+    _need(_digest(runtime_raw) == runtime_receipt_sha256, error)
+    broker_pin = json.loads(runtime_raw)["broker_sha256"]
+    _need(_match(SHA, broker_pin), error)
+    broker = ROOT / "broker" / "config.json"
+    backup = journal / "generation-1-broker-config.json"
+    manifest = journal / "runtime-paths-intent.json"
+    parent = RUN / "ingress"
+    _directory(parent, 0, private=False)
+    parent_info = parent.lstat()
+
+    def assert_absent(path):
+        _need(not os.path.lexists(path), error)
+
+    with ExitStack() as stack:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, fd)
+        _need(os.path.samestat(os.fstat(fd), parent_info), error)
+        expected = {"plan_sha256": plan_sha256, "broker_sha256": broker_pin,
+                    "parent": [parent_info.st_dev, parent_info.st_ino]}
+        if os.path.lexists(manifest):
+            intent = json.loads(_read(manifest, 0, {0o400}))
+            dirs = intent["dirs"]
+            _need(intent == expected | {"dirs": dirs} and set(dirs) == SERVICES, error)
+        else:
+            _need(set(os.listdir(fd)) == SERVICES and os.path.lexists(broker), error)
+            dirs = {}
+            for service in sorted(SERVICES):
+                _assert_ingress_dir(parent / service)
+                info = os.stat(service, dir_fd=fd, follow_symlinks=False)
+                dirs[service] = [info.st_dev, info.st_ino]
+            _publish_standby_config(manifest, _json_bytes(expected | {"dirs": dirs}), uid=0,
+                                    gid=journal.lstat().st_gid, assert_current=lambda: assert_absent(manifest))
+
+        if os.path.lexists(broker):
+            guard()
+            before = broker.lstat()
+            broker_raw = _read(broker, 0, {0o444})
+            _need(_digest(broker_raw) == broker_pin, error)
+            if not os.path.lexists(backup):
+                _publish_standby_config(backup, broker_raw, uid=0, gid=journal.lstat().st_gid,
+                                        assert_current=lambda: assert_absent(backup))
+            _need(_read(backup, 0, {0o400}) == broker_raw and stamp(broker.lstat()) == stamp(before), error)
+            broker.unlink()
+            _fsync_directory(broker.parent)
+        _need(_digest(_read(backup, 0, {0o400})) == broker_pin, error)
+        for service in sorted(dirs):
+            guard()
+            _need(os.path.samestat(parent.lstat(), parent_info) and set(os.listdir(fd)) <= SERVICES, error)
+            if service in os.listdir(fd):
+                _assert_ingress_dir(parent / service)
+                info = os.stat(service, dir_fd=fd, follow_symlinks=False)
+                _need([info.st_dev, info.st_ino] == dirs[service], error)
+                os.rmdir(service, dir_fd=fd)
+                os.fsync(fd)
+        _need(os.path.samestat(parent.lstat(), parent_info) and not os.listdir(fd)
+              and not os.path.lexists(broker), error)
+    guard()
+    return {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_sha256,
+            "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES)}
 
 
 def observe_runtime_outcome(pins, stage, *, assert_settled):
