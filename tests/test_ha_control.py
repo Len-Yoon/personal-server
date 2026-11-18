@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 import json
+import os
 from email.message import Message
 from hashlib import sha256
 from pathlib import Path
@@ -40,6 +41,98 @@ class WindowsNativeIngressTests(unittest.TestCase):
             "tls_files_sha256": "c" * 64,
         }
         return native.render_candidate(source, **(inputs | options))
+
+    def test_native_frontend_adapter_requires_guard_and_bound_service_states(self):
+        windows = MagicMock()
+        arguments = dict(script_path=r"C:\ProgramData\Reviewed\windows-ha-native-ingress-service.ps1",
+                         script_sha256="a" * 64, stage_script_sha256="b" * 64,
+                         request_path=r"C:\ProgramData\Reviewed\request.json", request_sha256="c" * 64,
+                         profile_sha256="d" * 64)
+        frontend = native.WindowsNativeFrontend(windows, **arguments)
+        guard = MagicMock(return_value=True)
+        base = dict(schema_version=1, status="PASS", request_sha256=arguments["request_sha256"],
+                    profile_sha256=arguments["profile_sha256"], production_external_verified=False, credentials_copied=False)
+        for mode, states in (("Install", ("Stopped", "Stopped")), ("StartCaddy", ("Running", "Stopped")),
+                             ("StartTunnel", ("Running", "Running")), ("Observe", ("Running", "Running")),
+                             ("Rollback", ("Stopped", "Absent"))):
+            windows.powershell.return_value = base | dict(mode=mode, caddy_state=states[0], tunnel_state=states[1])
+            result = frontend.run(mode, 90, assert_guard=guard)
+            self.assertEqual(result["mode"], mode)
+            source, deadline = windows.powershell.call_args.args
+            self.assertEqual(deadline, 90)
+            self.assertIn("[IO.FileShare]::Read", source)
+            self.assertIn("[HaFrontendDirectoryLease]::Open($parent.FullName)", source)
+            self.assertIn("Hold-FrontendParents", source)
+            self.assertIn("Assert-FrontendAcl", source)
+            self.assertIn("-ExpectedProfileSha256 " + arguments["profile_sha256"], source)
+            self.assertIn(arguments["script_sha256"], source)
+            self.assertIn("-Mode " + mode, source)
+            self.assertNotIn("cloudflared service install", source)
+        windows.reset_mock()
+        with self.assertRaisesRegex(TransitionBlocked, "guard_unconfirmed"):
+            frontend.run("Install", 90, assert_guard=lambda: False)
+        windows.powershell.assert_not_called()
+        windows.powershell.return_value = base | dict(mode="StartTunnel", caddy_state="Running", tunnel_state="Stopped")
+        with self.assertRaisesRegex(TransitionBlocked, "result_unconfirmed"):
+            frontend.run("StartTunnel", 90, assert_guard=guard)
+        for override in (dict(script_path=r"C:\ProgramData\Reviewed\..\wrong.ps1"),
+                         dict(request_path=r"C:\ProgramData\Reviewed\request.json:alternate"),
+                         dict(script_path=r"C:\ProgramData\Reviewed\$script.ps1"), dict(profile_sha256="bad")):
+            with self.assertRaisesRegex(TransitionBlocked, "request_invalid"):
+                native.WindowsNativeFrontend(windows, **(arguments | override))
+
+    def test_native_frontend_lifecycle_rejects_posix_before_reading_inputs(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for native frontend validation")
+        source = ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"
+        command = r"""
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'frontend_ast'}
+$functions=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst]},$false)|ForEach-Object {$_.Name})
+foreach($name in @('Assert-Origins','Assert-Listeners','Assert-LegacyConnectorExclusion','Service-Facts')){
+ if($name -cnotin $functions){throw 'frontend_contract_missing'}
+}
+foreach($fn in $ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -cin @('Require','Assert-ServiceRecoveryDisabled','Assert-ExpectedProfile','Assert-KeysExact','Assert-LegacyConnectorExclusion')},$false)){
+ . ([scriptblock]::Create($fn.Extent.Text))
+}
+$rejected=$false
+try{Assert-LegacyConnectorExclusion $null 'Ubuntu-24.04'}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_connector_without_owner'}
+$invalid=[Collections.Generic.Dictionary[string,object]]::new()
+foreach($key in @('plan_path','plan_sha256','driver_path','driver_sha256','marker_sha256','linux_boot_sha256','original_fragment_sha256')){
+ $invalid[$key]='a'*64
+}
+$invalid['owner_uid']=[long]0
+$invalid['original_unit_backup']='/etc/n100-ha-cutover/cloudflared-original-'+('a'*64)+'.service'
+$rejected=$false
+try{Assert-LegacyConnectorExclusion $invalid 'Ubuntu-24.04'}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_connector_wrong_owner'}
+Assert-ExpectedProfile ([pscustomobject]@{profile_sha256=('a'*64);support_sha256=('b'*64)}) ('a'*64)
+$rejected=$false
+try{Assert-ExpectedProfile ([pscustomobject]@{profile_sha256=('c'*64);support_sha256=('b'*64)}) ('a'*64)}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_profile_drift'}
+$baseline=@{Delayed=$false;NonCrash=$false;Actions=0;Triggers=0;Start=3}
+Assert-ServiceRecoveryDisabled ([pscustomobject]$baseline)
+foreach($key in @('Delayed','NonCrash','Actions','Triggers','Start')){
+ $changed=$baseline.Clone()
+ $changed[$key]=if($key -cin @('Delayed','NonCrash')){$true}else{1}
+ $rejected=$false
+ try{Assert-ServiceRecoveryDisabled ([pscustomobject]$changed)}catch{$rejected=$true}
+ if(-not $rejected){throw 'frontend_recovery_policy_adopted'}
+}
+& $env:NATIVE_FRONTEND_SCRIPT -Mode Install -RequestPath 'C:\Absent\request.json' -RequestSha256 ('a'*64) -ExpectedProfileSha256 ('d'*64) -StageScriptSha256 ('b'*64)
+"""
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(source)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertIn(receipt["phase"], {"native", "request"} if sys.platform == "win32" else {"native"})
+        self.assertEqual(receipt["created_services"], 0)
+        self.assertFalse(receipt["remote_action_unconfirmed"])
+        self.assertFalse(receipt["credentials_copied"])
 
     def test_preserves_host_routes_and_isolates_callback(self):
         result = self.render()
