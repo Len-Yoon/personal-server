@@ -47,6 +47,23 @@ foreach($case in @(@('prefix_length',29),@('guest_ipv4','10.8.7.3'),@('guest_ipv
 }
 ''')
 
+    def test_ssh_loader_only_accepts_fixed_isolated_network_arguments(self):
+        from hashlib import sha256
+        from ha_control.native_stdio_bridge import BridgeRejected
+        from ha_control.native_windows_ssh import fixed_script
+
+        name = "windows-guest-network.ps1"
+        pin = sha256((ROOT / "infra/k8s/ha_control" / name).read_bytes()).hexdigest()
+        parameters = {"Manifest": "r" * 4000, "ManifestSha256": "a" * 64, "Go": True}
+        self.assertIn(" -Go", fixed_script(name, pin, parameters))
+        for invalid in (parameters | {"Go": False}, parameters | {"Manifest": True},
+                        parameters | {"Manifest": "r" * 32769},
+                        parameters | {"ManifestSha256": "invalid"}, parameters | {"Mode": "extra"}):
+            with self.assertRaisesRegex(BridgeRejected, "native_windows_ssh_argument_invalid"):
+                fixed_script(name, pin, invalid)
+        with self.assertRaisesRegex(BridgeRejected, "native_windows_ssh_script_unpinned"):
+            fixed_script(name, "0" * 64, parameters)
+
     def test_management_port_cannot_select_physical_duplicate_or_different_switch_adapter(self):
         self.run_ps(r'''
 $ErrorActionPreference='Stop'

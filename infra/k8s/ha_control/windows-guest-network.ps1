@@ -91,11 +91,12 @@ function Invoke-GuestNetwork{
     $keys=@([regex]::Matches($text,'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')|ForEach-Object{$_.Groups[1].Value})
     if($text.Contains('\') -or $keys.Count -notin @(10,11,17) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_network_duplicate_or_escaped_keys'}
     $networkSpec=$text|ConvertFrom-Json
+    if(-not $PSCommandPath -and $networkSpec.schema_version -ne 3){throw 'guest_network_in_memory_scope_rejected'}
     Assert-GuestNetworkSpec $networkSpec
     $networkManifestHash=$ManifestSha256
     $networkRoot=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) ('N100HA_'+$networkSpec.installation_id.Substring(0,24))
     $driverPath=Join-Path $networkRoot 'windows-guest-vm.ps1'
-    $ownedSupportPath=Join-Path $PSScriptRoot 'guest-owned-profile.ps1'
+    $ownedSupportPath=if($networkSpec.schema_version -eq 2){Join-Path $PSScriptRoot 'guest-owned-profile.ps1'}else{''}
     $networkScriptHash=if($networkSpec.schema_version -eq 2){Get-GuestNetworkHash ([IO.File]::ReadAllBytes($PSCommandPath))}else{''}
     # Execute only the externally pinned buffer, never reopen mutable code.
     if((Get-Item -LiteralPath $driverPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'guest_network_driver_reparse'}
