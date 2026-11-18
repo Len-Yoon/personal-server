@@ -91,8 +91,15 @@ def rejoin_stage_receipt(backend, state):
              "state": {key: value for key, value in state.items() if key != "attempts"}}
     proof = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     result = {"status": "PASS", "phase": state["phase"], "authority_opened": False, "rejoin_stage_sha256": proof}
-    if "source_fence_wal" in state:
-        result["source_fence_wal"] = f"{state['source_fence_wal']:016x}"
+    wal_keys = state.keys() & {"source_fence_wal", "replica_fence_wal"}
+    if wal_keys:
+        if len(wal_keys) != 1 or state["phase"] != "rejoining":
+            raise TransitionBlocked("transition_rejoin_wal_unconfirmed")
+        key, = wal_keys
+        wal = state[key]
+        if type(wal) is not int or not 0 < wal < 2**64:
+            raise TransitionBlocked("transition_rejoin_wal_unconfirmed")
+        result[key] = f"{wal:016x}"
     return result
 
 

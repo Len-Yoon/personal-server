@@ -95,6 +95,32 @@ class TransitionServiceStartTests(unittest.TestCase):
             with self.assertRaisesRegex(BridgeRejected, "rejoin_receipt_unconfirmed"):
                 read_transition_rejoin_receipt(*common, mode, **kwargs)
 
+    def test_rejoin_reader_keeps_replica_and_source_wal_distinct(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        windows = MagicMock()
+        common = (windows, pin, rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}", "a"*64)
+        kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+                      deadline=time.monotonic()+10)
+        state = {"phase": "rejoining", "replica_fence_wal": 0x31}
+        backend = SimpleNamespace(fence_adapter=SimpleNamespace(plan_sha256="a"*64))
+        receipt = cli.rejoin_stage_receipt(backend, state)
+        self.assertEqual(receipt["replica_fence_wal"], "0000000000000031")
+        self.assertNotIn("source_fence_wal", receipt)
+        windows.powershell.return_value = receipt
+        self.assertEqual(read_transition_rejoin_receipt(*common, "stage-rejoin", **kwargs), receipt)
+        for mode, invalid in (
+            ("stage-rejoin", receipt | {"source_fence_wal": "0000000000000031"}),
+            ("stage-rejoin", receipt | {"replica_fence_wal": "0000000000000000"}),
+            ("initialize", receipt | {"phase": "fencing"}),
+        ):
+            with self.subTest(mode=mode, receipt=invalid):
+                windows.powershell.return_value = invalid
+                with self.assertRaisesRegex(BridgeRejected, "rejoin_receipt_unconfirmed"):
+                    read_transition_rejoin_receipt(*common, mode, **kwargs)
+        with self.assertRaisesRegex(TransitionBlocked, "transition_rejoin_wal_unconfirmed"):
+            cli.rejoin_stage_receipt(backend, state | {"source_fence_wal": 0x31})
+
     def test_lost_closure_response_recovers_scm_result_without_replay(self):
         starter = MagicMock()
         starter.check_lease_closed.side_effect = OSError("lost response")
