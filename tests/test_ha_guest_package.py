@@ -1,13 +1,15 @@
 """Guest isolation and transition authority boundaries, without any deployment."""
 import copy
+from dataclasses import replace
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
@@ -51,6 +53,53 @@ class NativeGuestRuntimeTest(unittest.TestCase):
                 "runtime_mutations_excluded": True, "runtime_mutations_settled": settled,
                 "target_writes_closed": True, "target_never_opened": True,
                 "evidence_sha256": native_guest_runtime._digest(challenge.encode())}
+
+    def test_initial_standby_retirement_only_plans_exact_never_started_app_ids(self):
+        module = native_guest_runtime
+        pins = replace(self.pins("B"), boot_sha256=module._digest(b"guest-boot"))
+        shared = ("boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster", "system_id",
+                  "postgres_id", "retained_postgres_id")
+        postgres = SimpleNamespace(**{key: getattr(pins, key) for key in shared},
+                                   source_commit=pins.release["source_commit"], attempt_id=None, validate=lambda: None)
+        roles = sorted(module.SERVICES | {"ha-broker"})
+        owned = {role: {"container_id": f"{index:064x}", "image_id": "fixture-id"}
+                 for index, role in enumerate(roles, 1)}
+        zero = "0001-01-01T00:00:00Z"
+        objects = {record["container_id"]: {
+            "Id": record["container_id"], "Image": record["image_id"], "RestartCount": 0,
+            "Config": {"Labels": {"com.docker.compose.service": role, module.ATTEMPT_LABEL: pins.attempt_id}},
+            "State": {"Status": "created", "Running": False, "Pid": 0, "StartedAt": zero, "FinishedAt": zero,
+                      "ExitCode": 0, "Paused": False, "Restarting": False, "Dead": False, "OOMKilled": False},
+            "HostConfig": {"RestartPolicy": {"Name": "no"}},
+        } for role, record in owned.items()}
+        database = {"Config": {"Labels": {"com.docker.compose.service": "postgres"}}}
+        objects["a"*64] = database
+        raw = json.dumps({"containers": owned, "status": "PREPARED", "applications_started": False,
+                          "writer_authority_issued": False}).encode()
+        pin = module._digest(raw)
+        closed = ["ha_B", pins.system_id, True, pins.cluster, 1, "A", "B", 1, 1, False, False, True, "0/20"]
+        inventory_pin = lambda items: pins.protected_inventory_sha256 if items == {"a"*64: database} else "e"*64
+        with (patch.object(module.os, "geteuid", return_value=0), patch.object(module, "_read", return_value=raw),
+              patch.object(module, "_inspect_prepared", return_value=pin), patch.object(module, "_inventory", return_value=objects),
+              patch.object(module, "active_postgres"), patch.object(module, "_pg", return_value=closed) as pg,
+              patch.object(module, "inventory_sha256", side_effect=inventory_pin), patch.object(module, "_docker") as docker,
+              patch.object(module, "BOOT_ID") as boot):
+            boot.read_bytes.return_value = b"guest-boot"
+            no_activation = Mock()
+            options = dict(runtime_receipt_sha256=pin, assert_no_activation=no_activation)
+            result = module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
+            self.assertEqual(no_activation.call_count, 2)
+            self.assertEqual({record["role"] for record in result["owned"].values()}, set(roles))
+            self.assertNotIn("a"*64, result["owned"])
+            pg.return_value = closed[:]
+            pg.return_value[2] = False
+            with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_retirement_unconfirmed"):
+                module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
+            pg.return_value = closed
+            objects[owned[roles[0]]["container_id"]]["State"]["StartedAt"] = "2026-11-18T00:00:00Z"
+            with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_retirement_unconfirmed"):
+                module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
+            docker.assert_not_called()
 
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime

@@ -501,6 +501,64 @@ def _inspect_prepared(pins, stage, intent, prepared):
     return _digest(receipt)
 
 
+def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt_sha256, assert_no_activation):
+    """Observe a retirement plan while the caller holds the guest mutation lock."""
+    error = "guest_initial_standby_retirement_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == "B" and pins.primary_node == "A" and pins.generation == 1
+          and _match(SHA, runtime_receipt_sha256) and callable(assert_no_activation)
+          and pins.release["source_commit"] == postgres.source_commit
+          and all(getattr(pins, field) == getattr(postgres, field) for field in (
+              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
+              "system_id", "postgres_id", "retained_postgres_id",
+          )) and postgres.attempt_id == (pins.attempt_id if pins.retained_postgres_id else None), error)
+    stage = Path(stage)
+    prepared = stage / "runtime-prepared.json"
+    try:
+        assert_no_activation()
+        raw = _read(prepared, 0, {0o600})
+        _need(_digest(raw) == _inspect_prepared(pins, stage, stage / "runtime-intent.json", prepared)
+              == runtime_receipt_sha256, error)
+        receipt = json.loads(raw)
+        roles = SERVICES | {"ha-broker"}
+        _need(set(receipt["containers"]) == roles and receipt["status"] == "PREPARED"
+              and receipt["applications_started"] is False and receipt["writer_authority_issued"] is False, error)
+        objects = _inventory()
+        active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
+        owned = {}
+        for role, pins_for_role in receipt["containers"].items():
+            identifier = pins_for_role["container_id"]
+            item = objects[identifier]
+            state = item["State"]
+            labels = item["Config"]["Labels"]
+            _need(_match(SHA, identifier) and identifier not in owned and item["Id"] == identifier
+                  and item["Image"] == pins_for_role["image_id"] and _service(item) == role
+                  and labels.get(ATTEMPT_LABEL) == pins.attempt_id and state["Status"] == "created"
+                  and state["Running"] is False and state["Pid"] == 0 and item["RestartCount"] == 0
+                  and state["StartedAt"] == state["FinishedAt"] == "0001-01-01T00:00:00Z"
+                  and state["ExitCode"] == 0
+                  and all(state[key] is False for key in ("Paused", "Restarting", "Dead", "OOMKilled"))
+                  and item["HostConfig"]["RestartPolicy"]["Name"] == "no", error)
+            owned[identifier] = {"role": role, "inspect_sha256": inventory_sha256({identifier: item})}
+        protected = {key: value for key, value in objects.items() if key not in owned}
+        _need(not any(_service(item) in roles for item in protected.values())
+              and inventory_sha256(protected) == pins.protected_inventory_sha256, error)
+        standby = _pg(postgres, INITIAL_STANDBY_CLOSED)
+        expected = ["ha_B", pins.system_id, True, pins.cluster, 1, "A", "B", 1, 1, False, False, True]
+        _need(type(standby) is list and len(standby) == len(expected) + 1
+              and all(type(actual) is type(wanted) and actual == wanted
+                      for actual, wanted in zip(standby[:-1], expected, strict=True))
+              and _lsn(standby[-1]) > 0, error)
+        assert_no_activation()
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+        return {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                "runtime_receipt_sha256": runtime_receipt_sha256, "owned": owned,
+                "protected_inventory_sha256": pins.protected_inventory_sha256}
+    except (OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
+        raise TransitionBlocked(error) from None
+
+
 def observe_runtime_outcome(pins, stage, *, assert_settled):
     """Inspect stopped preparation while the caller excludes mutation through use of the result.
 
@@ -529,6 +587,17 @@ def observe_runtime_outcome(pins, stage, *, assert_settled):
         return {**outcome, "status": "CLEAN", "settlement_sha256": settled}
     except (TransitionBlocked, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         return outcome
+
+
+INITIAL_STANDBY_CLOSED = """
+SELECT json_build_array(current_setting('cluster_name'), system_identifier::text, pg_is_in_recovery(),
+    c.cluster, c.epoch, c.primary_node, c.partner, c.timeline,
+    (SELECT received_tli FROM pg_stat_wal_receiver WHERE status='streaming'
+        AND sender_host='ha-a' AND sender_port=5432 AND latest_end_lsn IS NOT NULL),
+    c.writes_open, c.history_safe,
+    c.expires_at <= clock_timestamp(), pg_last_wal_replay_lsn()::text)
+FROM pg_control_system(), ha.control c WHERE c.singleton=1
+"""
 
 
 GENERATION_CLOSED = """
