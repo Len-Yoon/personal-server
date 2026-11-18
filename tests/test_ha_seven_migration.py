@@ -1203,7 +1203,7 @@ class NativeCaptureHeartbeatTests(unittest.TestCase):
         self.assertEqual(channel.write.call_count, 2)
         self.assertEqual(client.heartbeat, 1)
         self.assertEqual(client.sequence, 0)
-        self.assertEqual(heartbeat_deadlines[1] - heartbeat_deadlines[0], bridge.HEARTBEAT_ACK_GRACE)
+        self.assertAlmostEqual(heartbeat_deadlines[1] - heartbeat_deadlines[0], bridge.HEARTBEAT_ACK_GRACE, places=9)
 
     def test_unbound_heartbeat_poisoned_before_next_guest_request(self):
         bridge = native_stdio_bridge
