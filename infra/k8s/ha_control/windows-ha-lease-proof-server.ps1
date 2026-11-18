@@ -309,7 +309,8 @@ function Invoke-RecoveryObservation([string]$Raw) {
     try {
         $deadline = [Diagnostics.Stopwatch]::GetTimestamp() +
             [long]((Remaining) * [Diagnostics.Stopwatch]::Frequency / 1000)
-        $null = $worker.AddCommand('Get-HaRecoveryObservation').AddArgument($Raw).AddArgument($deadline)
+        $null = $worker.AddCommand('Get-HaBoundRecoveryObservation').AddArgument($Raw).AddArgument($deadline).
+            AddArgument($recoveryPredecessor)
         $pending = $worker.BeginInvoke()
         $left = 2500 - [int][Math]::Ceiling($clock.Elapsed.TotalMilliseconds)
         if ($left -le 0 -or -not $pending.AsyncWaitHandle.WaitOne($left)) {
@@ -352,12 +353,14 @@ try {
     $callback = Read-ProtectedText $CallbackPath $CallbackSha256
     $inputConfig = ConvertFrom-Json -InputObject (Read-ProtectedText $CallbackConfigPath $CallbackConfigSha256)
     if ($recovering) {
-        $transportFields = @('guest_vm_id','guest_vsock_port')
+        $transportFields = @('guest_vm_id','guest_vsock_port','predecessor_installation_id',
+            'predecessor_service_path','predecessor_terminal_path',
+            'predecessor_scm_path','predecessor_scm_sha256')
         $configNames = @($inputConfig.PSObject.Properties.Name)
         $transportCount = @($configNames | Where-Object { $_ -cin $transportFields }).Count
         $protocolNames = @($configNames | Where-Object { $_ -cnotin $transportFields } | Sort-Object -CaseSensitive)
-        if ($transportCount -notin @(0,2) -or ($protocolNames -join ',') -cne
-                'attempt_id,broker_scope_sha256,guest_boot_sha256,hold_sha256,plan_sha256,predecessor_terminal_sha256,purpose,resource_set_sha256,service_sid,windows_boot_sha256' -or
+        if ($transportCount -ne $transportFields.Count -or ($protocolNames -join ',') -cne
+                'attempt_id,broker_scope_sha256,guest_boot_sha256,hold_sha256,plan_sha256,predecessor_service_sha256,predecessor_terminal_sha256,purpose,resource_set_sha256,service_sid,windows_boot_sha256' -or
             $inputConfig.plan_sha256 -cne $PlanSha256 -or $inputConfig.attempt_id -cne $AttemptId -or
             $inputConfig.windows_boot_sha256 -cne $WindowsBootSha256 -or $inputConfig.service_sid -cne $ServiceSid) {
             throw 'recovery_proof_config'
@@ -366,14 +369,26 @@ try {
         foreach ($name in $protocolNames) {
             $recoveryPins.Add($name, $inputConfig.$name)
         }
-        . ([scriptblock]::Create((Read-ProtectedText $RecoveryProtocolPath $RecoveryProtocolSha256)))
+        $protocol = Read-ProtectedText $RecoveryProtocolPath $RecoveryProtocolSha256
+        . ([scriptblock]::Create($protocol))
         Assert-HaRecoveryPins $recoveryPins
+        if ($inputConfig.predecessor_scm_sha256 -isnot [string] -or
+            $inputConfig.predecessor_scm_sha256 -cnotmatch $hashPattern -or
+            'TrustedStoppedV1.Native' -as [type]) { throw 'recovery_proof_config' }
+        Add-Type -TypeDefinition (Read-ProtectedText $inputConfig.predecessor_scm_path $inputConfig.predecessor_scm_sha256)
+        $oldBinding = ConvertFrom-Json -InputObject (
+            Read-ProtectedText $inputConfig.predecessor_service_path $inputConfig.predecessor_service_sha256)
+        $oldTerminal = ConvertFrom-Json -InputObject (
+            Read-ProtectedText $inputConfig.predecessor_terminal_path $inputConfig.predecessor_terminal_sha256)
+        $recoveryPredecessor = New-HaRecoveryPredecessorScope $oldBinding $oldTerminal (
+            $inputConfig.predecessor_installation_id) $recoveryPins
         $runspace = [RunspaceFactory]::CreateRunspace()
         $runspace.ThreadOptions = 'ReuseThread'
         $runspace.Open()
         $init = [PowerShell]::Create()
         $init.Runspace = $runspace
         try {
+            $null = $init.AddScript($protocol, $false).AddStatement()
             $null = $init.AddScript($callback, $false).AddStatement()
             $null = $init.AddCommand('Initialize-HaRecoveryObservation').AddArgument($inputConfig)
             $null = $init.AddStatement().AddCommand('Get-Command').

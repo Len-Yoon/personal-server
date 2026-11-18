@@ -270,7 +270,8 @@ def native_recovery_observer(backend):
         # final SCM plan pins their PIDs/keys separately under its approval.
         pins = RecoveryProofPins(handoff['legacy_plan_sha256'], recovery['attempt_id'],
                                  _pin(legacy_params['windows_boot_sha256']), _pin(params['guest_boot_sha256']),
-                                 recovery['predecessor_terminal_sha256'], _pin(params['hold_sha256']),
+                                 recovery['predecessor_service_sha256'], recovery['predecessor_terminal_sha256'],
+                                 _pin(params['hold_sha256']),
                                  _pin(params['broker_scope_sha256']), _pin(params['resource_set_sha256']),
                                  plan['windows_enforced']['service_sid'], purpose)
         connections[purpose] = (pins, endpoint.copy())

@@ -2180,7 +2180,7 @@ class InitialLeaseServiceTests(unittest.TestCase):
         from ha_control import initial_lease_service as service
 
         handoff = {"legacy_plan_sha256": "a"*64}
-        recovery = {"attempt_id": "b"*64, "predecessor_terminal_sha256": "c"*64}
+        recovery = {"attempt_id": "b"*64, "predecessor_terminal_sha256": "c"*64, "predecessor_service_sha256": "7"*64}
         legacy_config = {key: "d"*64 for key in service.OBSERVER_KEYS}
         legacy_config.update(pipe_name="legacy", server_pid=4)
         params = {"guest_boot_sha256": "e"*64, "hold_sha256": "f"*64,
@@ -2213,6 +2213,7 @@ class InitialLeaseServiceTests(unittest.TestCase):
             with service.native_recovery_observer(backend) as observer:
                 self.assertEqual([client.pins.purpose for client in clients], ["held_admission", "provider_isolation"])
                 self.assertEqual(clients[0].pins.plan_sha256, handoff["legacy_plan_sha256"])
+                self.assertEqual(clients[0].pins.predecessor_service_sha256, recovery["predecessor_service_sha256"])
                 deadline = time.monotonic() + 4
                 with observer.recovery_admission(handoff, recovery) as admission:
                     with self.assertRaisesRegex(TransitionBlocked, "initial_recovery_admission_unverified"):

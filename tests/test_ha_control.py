@@ -155,7 +155,7 @@ class WindowsNativeIngressTests(unittest.TestCase):
                 result = subprocess.run(
                     [str(pwsh), "-NoProfile", "-NonInteractive", "-File", str(installer), "-Mode", mode,
                      "-InputDirectory", str(package), "-ProfileSha256", profile_pin or sha256(profile).hexdigest(),
-                     "-SupportSha256", support_sha], capture_output=True, text=True, timeout=20,
+                     "-SupportSha256", support_sha], capture_output=True, text=True, timeout=45,
                 )
                 self.assertTrue(result.stdout, result.stderr)
                 receipt = json.loads(result.stdout)

@@ -16,6 +16,48 @@ from infra.k8s.ha_control import enforced_windows, initial_lease_service, window
 
 
 class RecoveryProofWireTests(unittest.TestCase):
+    def test_predecessor_is_checked_on_both_sides_of_recovery_observation(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        protocol = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control/windows-ha-recovery-proof-protocol.ps1"
+        source = """
+$ErrorActionPreference='Stop'
+. $env:RECOVERY_PROOF_PROTOCOL
+$name='N100HA_'+('a'*24)+'_controller'
+$image='fixture service executable'
+$sha=[Security.Cryptography.SHA256]::Create()
+try {$digest=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($image))).Replace('-','').ToLowerInvariant()}
+finally {$sha.Dispose()}
+$binding=@{service_name=$name;service_image_path_sha256=$digest;attempt_id='b'*64;legacy_plan_sha256='c'*64;
+    controller_plan_sha256='d'*64}
+$terminal=$binding.Clone()
+$terminal.kind='initial-wsl-cutover';$terminal.phase='lease_lost';$terminal.generation=1
+$scope=New-HaRecoveryPredecessorScope $binding $terminal ('a'*64) @{attempt_id='e'*64;plan_sha256='c'*64}
+$clock=[Diagnostics.Stopwatch]::GetTimestamp()+[Diagnostics.Stopwatch]::Frequency*5
+function Read-HaRecoveryPredecessorScm {
+    $script:checks++
+    $mode=if($script:checks -eq $script:drift){3}else{4}
+    [pscustomobject]@{Name=$name;Start=$mode;State=1;Pid=0;Type=16;
+        Account='NT SERVICE'+[char]92+$name;Image=$image}
+}
+function Get-HaRecoveryObservation { $script:observed++; return 'fixture_observation' }
+foreach($invalid in @(0,1,2)){
+    $script:checks=0;$script:observed=0;$script:drift=$invalid
+    try {
+        $result=Get-HaBoundRecoveryObservation 'fixture' $clock $scope
+        if($invalid -ne 0 -or $result -cne 'fixture_observation'){throw 'fixture_accepted_invalid'}
+    } catch {
+        if($invalid -eq 0 -or $_.Exception.Message -cne 'recovery_proof_predecessor'){throw}
+    }
+    if($script:observed -ne [int]($invalid -ne 1)){throw 'fixture_order'}
+    if($script:checks -ne (2-[int]($invalid -eq 1))){throw 'fixture_reads'}
+}
+exit 0
+"""
+        result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", source),
+                                env=os.environ | {"RECOVERY_PROOF_PROTOCOL": str(protocol)},
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_response_matches_python_and_rejects_unbound_observation(self):
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
         self.assertTrue(Path(runtime).is_file(), "PowerShell required for recovery wire verification")
@@ -36,7 +78,7 @@ finally { $mac.Dispose() }
         for purpose in ("held_admission", "provider_isolation"):
             with self.subTest(purpose=purpose):
                 pins = windows_lease_pipe.RecoveryProofPins(
-                    *(letter*64 for letter in "abcdef12"), "S-1-5-80-1-2-3-4-5", purpose)
+                    *(letter*64 for letter in "abcdef123"), "S-1-5-80-1-2-3-4-5", purpose)
                 challenge = pins.challenge()
                 raw = json.dumps(challenge, separators=(",", ":"), sort_keys=True)
                 env = os.environ | {"HA_RECOVERY_PROTOCOL": str(protocol), "HA_RECOVERY_CHALLENGE": raw,
@@ -55,7 +97,7 @@ finally { $mac.Dispose() }
     def test_recovery_requires_distinct_challenge_and_mac_domain(self):
         pipe = windows_lease_pipe
         sid = "S-1-5-80-1-2-3-4-5"
-        pins = pipe.RecoveryProofPins(*(letter*64 for letter in "abcdef12"), sid, "held_admission")
+        pins = pipe.RecoveryProofPins(*(letter*64 for letter in "abcdef123"), sid, "held_admission")
         challenge = pins.challenge()
         key = bytearray(b"x"*32)
 
@@ -71,6 +113,7 @@ finally { $mac.Dispose() }
             pipe.verify_response(response(challenge), challenge, 2, key=key, monotonic=lambda: 0)
         for modified in (challenge | {"purpose": "provider_isolation"},
                          challenge | {"hold_sha256": "0"*64},
+                         challenge | {"predecessor_service_sha256": "0"*64},
                          pins.challenge()):
             # A good MAC for another purpose, pin or fresh nonce still fails.
             with self.assertRaises(ValueError):
@@ -88,7 +131,7 @@ finally { $mac.Dispose() }
         pipe = windows_lease_pipe
         sid = "S-1-5-80-1-2-3-4-5"
         legacy = pipe.ProofPins("a"*64,"b"*64,1,"c"*64,sid,"d"*64,"e"*64)
-        recovery = pipe.RecoveryProofPins(*(letter*64 for letter in "abcdef12"), sid, "provider_isolation")
+        recovery = pipe.RecoveryProofPins(*(letter*64 for letter in "abcdef123"), sid, "provider_isolation")
         args = {"server_pid": 5, "key_path": None, "key_sha256": "1"*64, "powershell": None,
                 "client": None, "client_sha256": "2"*64, "compiler_root": None}
         with patch.object(pipe.sys, "platform", "win32"):

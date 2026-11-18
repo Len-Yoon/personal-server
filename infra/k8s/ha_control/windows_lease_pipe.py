@@ -24,7 +24,7 @@ SERVICE_SID = re.compile(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}")
 PIPE = re.compile(r"n100ha-lease-proof-[0-9a-f]{32}")
 RECOVERY_PIPE = re.compile(r"n100ha-recovery-proof-[0-9a-f]{32}")
 _RECOVERY_PINS = {"plan_sha256", "attempt_id", "windows_boot_sha256", "guest_boot_sha256",
-                  "predecessor_terminal_sha256", "hold_sha256", "broker_scope_sha256", "resource_set_sha256"}
+                  "predecessor_service_sha256", "predecessor_terminal_sha256", "hold_sha256", "broker_scope_sha256", "resource_set_sha256"}
 _RECOVERY_PURPOSES = {"held_admission", "provider_isolation"}
 RESPONSE_SECONDS = 2.7
 CLIENT_FAILURES = {
@@ -71,6 +71,7 @@ class RecoveryProofPins:
     attempt_id: str
     windows_boot_sha256: str
     guest_boot_sha256: str
+    predecessor_service_sha256: str
     predecessor_terminal_sha256: str
     hold_sha256: str
     broker_scope_sha256: str
