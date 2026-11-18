@@ -37,6 +37,7 @@ $hashPattern = '\A[a-f0-9]{64}\z'
 function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$ReservationSha,
                                    [string]$Name,[string]$HostPath,[string]$Parent){
     $recovery=$Plan.initial_cutover_recovery
+    $rearming='initial_recovery_rearm' -cin $Plan.PSObject.Properties.Name
     $identity='N100HA_'+$Attempt.Substring(0,24)
     $root=Join-Path $Parent $identity
     $approvalFields=@($Approval.PSObject.Properties.Name|Sort-Object -CaseSensitive)
@@ -52,11 +53,13 @@ function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$Res
         [DateTimeOffset]::Parse($Approval.installed_at,[Globalization.CultureInfo]::InvariantCulture) -ge [DateTimeOffset]::UtcNow){
         throw 'initial_service_recovery_scope'
     }
+    $expectedHost=if($rearming){Join-Path $root ('rearm-'+$Plan.initial_recovery_rearm.attempt_id+'\host\windows-service-host.exe')}else{Join-Path $root 'host\windows-service-host.exe'}
+    $expectedAction=if($rearming){'ha-rearm-initial-writer'}else{'ha-recover-initial-writer'}
     if($Parent -cne 'C:\ProgramData' -or $Plan.installation_id -cnotmatch $hashPattern -or
         $Attempt.Substring(0,24) -ceq $Plan.installation_id.Substring(0,24) -or
         $Name -cne ($identity+'_controller') -or
-        $HostPath -cne (Join-Path $root 'host\windows-service-host.exe') -or
-        $Approval.action -cne 'ha-recover-initial-writer' -or
+        $HostPath -cne $expectedHost -or
+        $Approval.action -cne $expectedAction -or
         $Plan.initial_service_start.reservation_receipt_sha256 -cne $ReservationSha -or
         (@($recovery.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
             'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
@@ -89,7 +92,133 @@ function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$Res
     }
 }
 
+function Assert-RearmEnvelope($Rearm){
+    foreach($key in @('attempt_id','closure_mode','predecessor_args_sha256','predecessor_binding_sha256','predecessor_terminal_sha256')){
+        if($Rearm.$key -isnot [string]){throw 'initial_service_rearm_scope'}
+    }
+    foreach($key in @('attempt_id','predecessor_args_sha256','predecessor_binding_sha256','predecessor_terminal_sha256')){
+        if($Rearm.$key -cnotmatch $hashPattern){throw 'initial_service_rearm_scope'}
+    }
+}
+
+function Assert-RearmSealedPredecessor($Plan,[string]$Root){
+    $r=$Plan.initial_recovery_rearm
+    Assert-RearmEnvelope $r
+    if((@($r.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne
+       'attempt_id,closure_mode,predecessor_args_sha256,predecessor_binding_sha256,predecessor_terminal_sha256,schema_version' -or
+       ($r.schema_version -isnot [int] -and $r.schema_version -isnot [long]) -or $r.schema_version -ne 1 -or
+       $r.closure_mode -cne 'windows-offline-v1' -or $r.attempt_id -cnotmatch $hashPattern -or
+       $r.attempt_id -ceq $Plan.initial_cutover_recovery.attempt_id -or
+       $r.attempt_id -ceq $Plan.initial_cutover_handoff.attempt_id){throw 'initial_service_rearm_scope'}
+    $old=Read-PinnedJson (Join-Path $Root 'rearm-predecessor-binding.json') $r.predecessor_binding_sha256
+    $terminal=Read-PinnedJson (Join-Path $Root 'rearm-predecessor-state.json') $r.predecessor_terminal_sha256
+    $argsFile=Join-Path $Root 'rearm-predecessor-args.txt'
+    if((Get-FileHash -LiteralPath $argsFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $r.predecessor_args_sha256){throw 'initial_service_rearm_scope'}
+    $sealPath=Join-Path $Root 'rearm-predecessor-seal.json'
+    $seal=Read-PinnedJson $sealPath ((Get-FileHash -LiteralPath $sealPath -Algorithm SHA256).Hash.ToLowerInvariant())
+    $planPin=(Get-FileHash -LiteralPath (Join-Path $Root 'plan.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    if($seal.plan_sha256 -cne $planPin -or $seal.schema_version -ne 1 -or
+       (ConvertTo-Json $seal.rearm -Compress) -cne (ConvertTo-Json $r -Compress) -or
+       $seal.windows_boot_sha256 -cne $Plan.windows_initial_observer.windows_boot_sha256 -or
+       $seal.service.state -cne 'Stopped' -or $seal.service.start_mode -cne 'Disabled' -or $seal.service.process_id -ne 0 -or
+       $seal.service.service_name -cne $Plan.windows_enforced.service_name -or
+       $seal.service.service_sid -cne $Plan.windows_enforced.service_sid -or
+       $seal.service.service_image_path_sha256 -cne $old.service_image_path_sha256 -or
+       $old.controller_plan_sha256 -cne $terminal.controller_plan_sha256 -or $old.controller_plan_sha256 -ceq $planPin -or
+       $terminal.kind -cne 'initial-wsl-cutover-recovery' -or $terminal.revision -ne 4 -or
+       $terminal.phase -cnotin @('lease_lost','local_revoke_observed') -or $terminal.sequence -lt 1 -or
+       (ConvertTo-Json $terminal.recovery -Compress) -cne (ConvertTo-Json $Plan.initial_cutover_recovery -Compress)){
+        throw 'initial_service_rearm_scope'
+    }
+}
+
+function Seal-HaInitialRearmPredecessor([string]$PlanPath,[string]$PlanSha256){
+    $plan=Read-PinnedJson $PlanPath $PlanSha256
+    $r=$plan.initial_recovery_rearm
+    Assert-RearmEnvelope $r
+    $root=[IO.Path]::GetDirectoryName($PlanPath)
+    $binding=Read-PinnedJson (Join-Path $root 'rearm-predecessor-binding.json') $r.predecessor_binding_sha256
+    $terminal=Read-PinnedJson (Join-Path $root 'rearm-predecessor-state.json') $r.predecessor_terminal_sha256
+    $oldArgs=Join-Path $root 'rearm-predecessor-args.txt'
+    if((Get-FileHash -LiteralPath $oldArgs -Algorithm SHA256).Hash.ToLowerInvariant() -cne $r.predecessor_args_sha256){throw 'initial_service_rearm_scope'}
+    $service=Get-CimInstance Win32_Service -Filter ("Name='"+$plan.windows_enforced.service_name+"'") -OperationTimeoutSec 5
+    if($null -eq $service -or $service.State -cne 'Stopped' -or $service.StartMode -cne 'Disabled' -or $service.ProcessId -ne 0 -or
+       $service.Name -cne $binding.service_name -or $service.StartName -ine ('NT SERVICE\'+$service.Name) -or
+       $service.ServiceType -cne 'Own Process' -or $service.DesktopInteract -or
+       $service.PathName -cnotmatch '\A"[^"\r\n]+"\z'){throw 'initial_service_rearm_scope'}
+    Assert-Executable $service.PathName.Trim('"') $plan.windows_enforced.service_image_sha256
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$image=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($service.PathName))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    if($image -cne $binding.service_image_path_sha256){throw 'initial_service_rearm_scope'}
+    $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks.ToString()
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$bootPin=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($boot))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    if($bootPin -cne $plan.windows_initial_observer.windows_boot_sha256){throw 'initial_service_rearm_scope'}
+    # Hold the configured predecessor's actual files read-only through sealing.
+    # Copies alone cannot establish which stopped incarnation is being handed over.
+    $held=[Collections.Generic.List[IDisposable]]::new()
+    try{
+        $actualArgs=Join-Path ([IO.Path]::GetDirectoryName($service.PathName.Trim('"'))) 'service.args'
+        $argsRaw=[IO.File]::ReadAllBytes($actualArgs)
+        $argsText=[Text.UTF8Encoding]::new($false,$true).GetString($argsRaw)
+        $rows=$argsText.Split([char]10)
+        $keys=@('format','service_name','service_sid','python_path','python_sha256','launcher_path','launcher_sha256',
+                'plan_path','plan_sha256','approval_path','approval_sha256','mode','host_sha256')
+        if($rows.Count -ne 14 -or $rows[-1] -cne '' -or $argsText.Contains([char]13) -or $argsText.Contains([char]0)){
+            throw 'initial_service_rearm_scope'
+        }
+        $previousArgs=@{}
+        for($i=0;$i -lt $keys.Count;$i++){
+            $prefix=$keys[$i]+'='
+            if(-not $rows[$i].StartsWith($prefix,[StringComparison]::Ordinal)) {throw 'initial_service_rearm_scope'}
+            $previousArgs[$keys[$i]]=$rows[$i].Substring($prefix.Length)
+        }
+        if($previousArgs.format -cne 'enforced-service-v1' -or $previousArgs.mode -cne 'serve' -or
+           $previousArgs.service_name -cne $service.Name -or $previousArgs.service_sid -cne $plan.windows_enforced.service_sid -or
+           $previousArgs.plan_sha256 -cne $binding.controller_plan_sha256 -or
+           $previousArgs.host_sha256 -cne $plan.windows_enforced.service_image_sha256){throw 'initial_service_rearm_scope'}
+        $oldRoot=[IO.Path]::GetDirectoryName($previousArgs.plan_path)
+        if($binding.state_path -cne (Join-Path $oldRoot 'journal\controller-state.json')){throw 'initial_service_rearm_scope'}
+        $actualBinding=Join-Path $oldRoot ('initial-recovery-service-'+$plan.initial_cutover_recovery.attempt_id+'.json')
+        $actual=@(@{path=$actualArgs;pin=$r.predecessor_args_sha256},
+                  @{path=$previousArgs.plan_path;pin=$binding.controller_plan_sha256},
+                  @{path=$binding.state_path;pin=$r.predecessor_terminal_sha256},
+                  @{path=$actualBinding;pin=$r.predecessor_binding_sha256})
+        foreach($entry in $actual){
+            $item=Get-Item -LiteralPath $entry.path -Force
+            if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'initial_service_rearm_scope'}
+            for($parent=$item.Directory;$null -ne $parent;$parent=$parent.Parent){
+                if($parent.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'initial_service_rearm_scope'}
+            }
+            $handle=[IO.File]::Open($item.FullName,'Open','Read','Read')
+            $held.Add($handle)
+            $hasher=[Security.Cryptography.SHA256]::Create()
+            try{$pin=[BitConverter]::ToString($hasher.ComputeHash($handle)).Replace('-','').ToLowerInvariant()}finally{$hasher.Dispose()}
+            if($pin -cne $entry.pin){throw 'initial_service_rearm_scope'}
+        }
+        $confirmed=Get-CimInstance Win32_Service -Filter ("Name='"+$service.Name+"'") -OperationTimeoutSec 5
+        if($confirmed.State -cne 'Stopped' -or $confirmed.StartMode -cne 'Disabled' -or $confirmed.ProcessId -ne 0 -or
+           $confirmed.PathName -cne $service.PathName -or $confirmed.StartName -cne $service.StartName -or
+           $confirmed.ServiceType -cne 'Own Process' -or $confirmed.DesktopInteract){throw 'initial_service_rearm_scope'}
+    $receipt=[ordered]@{schema_version=1;plan_sha256=$PlanSha256;rearm=$r;windows_boot_sha256=$bootPin;
+        service=[ordered]@{service_name=$service.Name;service_sid=$plan.windows_enforced.service_sid;state='Stopped';
+                          start_mode='Disabled';process_id=0;service_image_path_sha256=$image}}
+    $security=[Security.AccessControl.FileSecurity]::new()
+    $admins=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $security.SetOwner($admins);$security.SetAccessRuleProtection($true,$false)
+    foreach($sid in @('S-1-5-18','S-1-5-32-544')){$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','Allow'))}
+    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($plan.windows_enforced.service_sid),'Read','Allow'))
+    $path=Join-Path $root 'rearm-predecessor-seal.json'
+    $raw=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $receipt -Depth 8 -Compress))
+    $file=[IO.FileStream]::new($path,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]'WriteData,Synchronize',
+        [IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough,$security)
+    try{$file.Write($raw,0,$raw.Length);$file.Flush($true)}finally{$file.Dispose()}
+    Assert-RearmSealedPredecessor $plan $root
+    }finally{foreach($handle in $held){$handle.Dispose()}}
+}
+
 function Assert-RecoveryPredecessorStopped($Plan, [string]$Root) {
+    if('initial_recovery_rearm' -cin $Plan.PSObject.Properties.Name){Assert-RearmSealedPredecessor $Plan $Root}
     $recovery = $Plan.initial_cutover_recovery
     $binding = Read-PinnedJson (Join-Path $Root 'initial-predecessor-service.json') $recovery.predecessor_service_sha256
     $oldName = 'N100HA_' + $Plan.installation_id.Substring(0,24) + '_controller'
@@ -580,7 +709,9 @@ try {
     }
     $scope = $plan.windows_enforced
     $startScope = $plan.initial_service_start
-    $action = if($recovering){'ha-recover-initial-writer'}else{'ha-initial-wsl-cutover'}
+    $rearming='initial_recovery_rearm' -cin $plan.PSObject.Properties.Name
+    $expectedRevision=if($rearming){6}else{4}
+    $action = if($rearming){'ha-rearm-initial-writer'}elseif($recovering){'ha-recover-initial-writer'}else{'ha-initial-wsl-cutover'}
     if ($recovering) {
         Assert-RecoveryStartScope $plan $approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath (
             [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))
@@ -715,7 +846,7 @@ public static class HaInitialLeaseFileTime {
             } finally { $stream.Dispose() }
             if ($lease.phase -ceq 'serving') {
                 $age = ([DateTime]::UtcNow - $written).TotalMilliseconds
-                $kind=if($recovering){'initial-wsl-cutover-recovery'}else{'initial-wsl-cutover'}
+                $kind=if($rearming){'initial-wsl-cutover-rearm'}elseif($recovering){'initial-wsl-cutover-recovery'}else{'initial-wsl-cutover'}
                 if ($lease.kind -cne $kind -or $lease.schema_version -ne 1 -or $age -lt 0 -or $age -gt 2900 -or
                     $lease.attempt_id -cne $attempt -or $lease.generation -ne 1 -or $lease.sequence -lt 1 -or
                     $lease.controller_plan_sha256 -cne $PlanSha256 -or $lease.first_write_proof_sha256 -cnotmatch $hashPattern -or
@@ -724,6 +855,13 @@ public static class HaInitialLeaseFileTime {
                     $lease.legacy_plan_sha256 -cne $plan.initial_cutover_handoff.legacy_plan_sha256 -or
                     $lease.proof_elapsed_ms -lt 0 -or $lease.proof_elapsed_ms -ge 4000 -or ($age + $lease.proof_elapsed_ms) -ge 4800 -or
                     $native.PathName -cne $current.PathName) { throw 'initial_service_lease_unconfirmed' }
+                if($rearming){
+                    Assert-RearmEnvelope $lease.rearm
+                    if($lease.kind -cne 'initial-wsl-cutover-rearm' -or
+                       (ConvertTo-Json $lease.rearm -Compress) -cne (ConvertTo-Json $plan.initial_recovery_rearm -Compress)){
+                        throw 'initial_service_rearm_scope'
+                    }
+                }
                 if($recovering){
                     foreach($field in @('schema_version','generation','sequence','revision')){
                         if($lease.$field -isnot [int] -and $lease.$field -isnot [long]){
@@ -731,7 +869,7 @@ public static class HaInitialLeaseFileTime {
                         }
                     }
                     $recoveryFields=@($lease.recovery.PSObject.Properties.Name|Sort-Object -CaseSensitive)
-                    if($lease.revision -ne 4 -or $lease.lease_proof_sha256 -isnot [string] -or
+                    if($lease.revision -ne $expectedRevision -or $lease.lease_proof_sha256 -isnot [string] -or
                         $lease.lease_proof_sha256 -cnotmatch $hashPattern -or
                         ($lease.proof_elapsed_ms -isnot [int] -and $lease.proof_elapsed_ms -isnot [long] -and
                          $lease.proof_elapsed_ms -isnot [double] -and $lease.proof_elapsed_ms -isnot [decimal]) -or [double]::IsNaN([double]$lease.proof_elapsed_ms) -or

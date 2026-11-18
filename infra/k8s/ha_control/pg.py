@@ -134,7 +134,11 @@ class PgBackend:
                                    for pin in recovery.values())):
                     _deny('initial_recovery_native_scope_required')
                 expected = RECOVERY_ACTION
-            elif 'initial_effect_quarantine' in value:
+                if 'initial_recovery_rearm' in value:
+                    from .initial_pg_lease import REARM_ACTION, rearm_scope
+                    rearm_scope(value)
+                    expected = REARM_ACTION
+            elif 'initial_effect_quarantine' in value or 'initial_recovery_rearm' in value:
                 _deny('initial_recovery_native_scope_required')
             if value.get('_approval_action') != expected:
                 _deny('ha_transition_approval_required')

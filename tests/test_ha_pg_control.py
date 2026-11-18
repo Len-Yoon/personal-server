@@ -2280,6 +2280,19 @@ class InitialLeaseServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(TransitionBlocked, "initial_service_handoff_unverified"):
             observer.assert_exclusion_held(handoff, deadline)
 
+    def test_rearm_marker_stays_on_the_authenticated_broker_path(self):
+        from ha_control import initial_lease_service as service
+        handoff={'legacy_plan_sha256':'a'*64,'attempt_id':'b'*64}
+        params={key:'c'*64 for key in service.OBSERVER_KEYS}
+        params.update(pipe_name='fixture',server_pid=1)
+        backend=SimpleNamespace(plan_path=Path('/fixture/plan.json'),plan={
+            'windows_initial_observer':params,'windows_enforced':{'service_sid':'S-1-5-80-1-2-3-4-5'},'cluster':'fixture'})
+        with patch.object(service,'_handoff',return_value=handoff), \
+                patch.object(service,'PersistentLeaseProofClient'),patch.object(service,'_powershell_path'):
+            for action in (service.RECOVERY_ACTION,service.REARM_ACTION):
+                with service.native_initial_observer(backend,action=action) as observer:
+                    self.assertIs(observer.broker_marker,True)
+
     def test_recovery_native_observer_separates_proofs_and_preserves_holds(self):
         from ha_control import initial_lease_service as service
 
@@ -3436,6 +3449,152 @@ class InitialPgLeaseTests(unittest.TestCase):
             lease.open(self.state)
         self.assertFalse(self.opened)
         self.assertEqual(self.revision, 5)
+
+    def rearm_lease(self):
+        from ha_control.initial_pg_lease import InitialPgLeaseRearm, REARM_ACTION
+        recovery = self.recovery_lease()
+        self.revision = 5
+        self.backend.plan['_approval_action'] = REARM_ACTION
+        self.backend.plan['initial_recovery_rearm'] = {
+            'schema_version': 1, 'attempt_id': '9'*64, 'predecessor_terminal_sha256': '1'*64,
+            'predecessor_binding_sha256': '2'*64, 'predecessor_args_sha256': '3'*64,
+            'closure_mode': 'windows-offline-v1'}
+        return InitialPgLeaseRearm(self.backend, recovery.assert_legacy_closed)
+
+    def test_rearm_issues_exact_six_renews_owned_expiry_and_revokes_seven(self):
+        lease = self.rearm_lease()
+        self.probes.add('recovery-a:'+'e'*64+':old:lease')
+        self.assertRegex(lease.open(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(self.revision, 6)
+        self.assertTrue(any(value.startswith('rearm-a:'+'9'*64+':') for value in self.probes))
+        self.assertIn('recovery-a:'+'e'*64+':old:lease', self.probes)
+        self.now += timedelta(seconds=1)
+        lease.renew(self.state)
+        self.assertEqual(self.revision, 6)
+        self.assertTrue(lease.revoke(self.state))
+        self.assertEqual(self.revision, 7)
+        self.assertFalse(self.opened)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_identity_unverified'):
+            type(lease)(self.backend, lease.assert_legacy_closed).open(self.state)
+        self.assertEqual(self.revision, 7)
+
+    def test_rearm_never_reuses_revision_four_or_adopts_another_instance(self):
+        lease = self.rearm_lease()
+        self.revision = 3
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_identity_unverified'):
+            lease.open(self.state)
+        self.assertEqual(self.revision, 3)
+        lease = self.rearm_lease()
+        lease.open(self.state)
+        other = type(lease)(self.backend, lease.assert_legacy_closed)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_lease_reconciliation_required'):
+            other.renew(self.state)
+        self.assertFalse(other.revoke(self.state))
+        self.assertEqual(self.revision, 6)
+
+    def test_normal_lease_paths_refuse_rearm_even_if_old_action_is_supplied(self):
+        for cls, action in ((InitialPgLease, 'ha-initial-wsl-cutover'),
+                            (InitialPgLeaseRecovery, 'ha-recover-initial-writer')):
+            self.setUp()
+            lease = self.rearm_lease()
+            self.backend.plan['_approval_action'] = action
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_rearm_scope_unverified'):
+                cls(self.backend, lease.assert_legacy_closed).open(self.state)
+            self.assertFalse(self.opened)
+
+    def test_rearm_missing_offline_mode_and_changed_attempt_cannot_issue(self):
+        for field, value in (('closure_mode', 'online'), ('schema_version', True), ('attempt_id', 'e'*64),
+                             ('predecessor_args_sha256', 'broken')):
+            self.setUp()
+            lease = self.rearm_lease()
+            self.backend.plan['initial_recovery_rearm'][field] = value
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_rearm_scope_unverified'):
+                lease.open(self.state)
+            self.assertEqual(self.revision, 5)
+            self.assertFalse(self.opened)
+
+    def test_rearm_uncertain_commit_is_closed_only_at_its_own_six_stamp(self):
+        lease = self.rearm_lease()
+        self.lost_commit = True
+        with self.assertRaisesRegex(TransitionBlocked, 'fixture_commit_response_lost'):
+            lease.open(self.state)
+        self.assertEqual(self.revision, 7)
+        self.assertFalse(self.opened)
+
+class InitialRearmSealTests(unittest.TestCase):
+    def fixture(self):
+        from ha_control import initial_windows_gate as gate
+        digest=lambda value:hashlib.sha256(value).hexdigest()
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        recovery={'attempt_id':'a'*64,'predecessor_service_sha256':'b'*64,'predecessor_terminal_sha256':'c'*64}
+        handoff={'attempt_id':'d'*64,'legacy_plan_sha256':'e'*64,'restore_receipt_sha256':'1'*64,'activation_intent_sha256':'2'*64}
+        name,sid=gate.initial_service_identity(recovery['attempt_id'])
+        terminal={'schema_version':1,'kind':'initial-wsl-cutover-recovery','generation':1,**handoff,
+                  'controller_plan_sha256':'3'*64,'recovery':recovery,'revision':4,'phase':'lease_lost','sequence':1580,
+                  'failure_code':'legacy_pipe_response_timeout_refresh'}
+        binding={'attempt_id':handoff['attempt_id'],'controller_plan_sha256':'3'*64,
+                 'first_write_proof_sha256':'4'*64,'legacy_plan_sha256':handoff['legacy_plan_sha256'],
+                 'service_created_ticks':'12345','service_image_path_sha256':'5'*64,'service_name':name,
+                 'service_pid':123,'state_path':r'C:\old\journal\controller-state.json'}
+        settings=dict(zip(gate.ARGS_FIELDS,('enforced-service-v1',name,sid,r'C:\old\python.exe','6'*64,
+            r'C:\old\launcher.py','7'*64,r'C:\old\plan.json','3'*64,r'C:\old\approval.json','8'*64,'serve','9'*64)))
+        files={'rearm-predecessor-state.json':encode(terminal),'rearm-predecessor-binding.json':encode(binding),
+               'rearm-predecessor-args.txt':''.join(key+'='+settings[key]+'\n' for key in gate.ARGS_FIELDS).encode()}
+        rearm={'schema_version':1,'attempt_id':'f'*64,'predecessor_terminal_sha256':digest(files['rearm-predecessor-state.json']),
+               'predecessor_binding_sha256':digest(files['rearm-predecessor-binding.json']),
+               'predecessor_args_sha256':digest(files['rearm-predecessor-args.txt']),'closure_mode':'windows-offline-v1'}
+        plan={'initial_recovery_rearm':rearm,'initial_cutover_recovery':recovery,'initial_cutover_handoff':handoff,
+              'windows_enforced':{'service_name':name,'service_sid':sid,'service_image_sha256':'9'*64},
+              'windows_initial_observer':{'windows_boot_sha256':'0'*64}}
+        seal={'schema_version':1,'plan_sha256':'a'*64,'rearm':rearm,'windows_boot_sha256':'0'*64,
+              'service':{'service_name':name,'service_sid':sid,'state':'Stopped','start_mode':'Disabled',
+                         'process_id':0,'service_image_path_sha256':'5'*64}}
+        files['rearm-predecessor-seal.json']=encode(seal)
+        return gate,plan,files,seal
+
+    def test_sealed_same_sid_predecessor_is_bound_to_old_args_terminal_and_new_plan(self):
+        gate,plan,files,_=self.fixture()
+        self.assertEqual(gate.validate_rearm_seal(plan,'a'*64,files),plan['initial_recovery_rearm'])
+        for field in ('rearm-predecessor-state.json','rearm-predecessor-binding.json','rearm-predecessor-args.txt'):
+            changed=files|{field:files[field]+b' '}
+            with self.subTest(field=field),self.assertRaises(TransitionBlocked):
+                gate.validate_rearm_seal(plan,'a'*64,changed)
+
+    def test_native_rearm_envelope_rejects_array_coercion(self):
+        runtime=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
+        source=ROOT/'infra/k8s/ha_control/windows-ha-start-initial-service.ps1'
+        command=r"""
+$ErrorActionPreference='Stop'
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_REARM,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$definition=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-RearmEnvelope'},$true))
+if($definition.Count -ne 1){throw 'fixture_function'}
+. ([scriptblock]::Create($definition[0].Extent.Text))
+$hashPattern='\A[a-f0-9]{64}\z'
+$good=@{attempt_id=('a'*64);closure_mode='windows-offline-v1';predecessor_args_sha256=('b'*64);
+        predecessor_binding_sha256=('c'*64);predecessor_terminal_sha256=('d'*64)}
+Assert-RearmEnvelope ([pscustomobject]$good)
+foreach($key in @($good.Keys)){
+ foreach($value in @(@($good[$key],$good[$key]),123)){
+  $bad=$good.Clone();$bad[$key]=$value
+  try{Assert-RearmEnvelope ([pscustomobject]$bad);throw 'fixture_accepted_array'}
+  catch{if($_.Exception.Message -cne 'initial_service_rearm_scope'){throw}}
+ }
+}
+exit 0
+"""
+        result=subprocess.run((runtime,'-NoProfile','-NonInteractive','-Command',command),
+                              env=os.environ|{'N100_TEST_REARM':str(source)},capture_output=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_seal_rejects_different_boot_plan_or_predecessor_still_running(self):
+        for field,value in (('plan_sha256','b'*64),('windows_boot_sha256','b'*64),('schema_version',True),
+                            ('service',{'state':'Running'})):
+            gate,plan,files,seal=self.fixture();seal[field]=value
+            files['rearm-predecessor-seal.json']=json.dumps(seal).encode()
+            with self.subTest(field=field),self.assertRaises(TransitionBlocked):
+                gate.validate_rearm_seal(plan,'a'*64,files)
 
 
 class IsolatedLeaseRehearsalTests(unittest.TestCase):

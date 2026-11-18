@@ -9,6 +9,10 @@ param(
     [string]$RecoveryPredecessorServiceSha256,
     [string]$TransitionHandoffSha256,
     [string]$TransitionBoundarySha256,
+    [string]$RearmAttemptId,
+    [string]$RearmPredecessorTerminalSha256,
+    [string]$RearmPredecessorBindingSha256,
+    [string]$RearmPredecessorArgsSha256,
     [switch]$RecoveryContinuity,
     [switch]$Retire,
     [switch]$ObserveRetired,
@@ -332,6 +336,14 @@ try {
     $recovering = $PSBoundParameters.ContainsKey('RecoveryAttemptId') -or
         $PSBoundParameters.ContainsKey('RecoveryPredecessorTerminalSha256') -or
         $PSBoundParameters.ContainsKey('RecoveryPredecessorServiceSha256')
+    $rearming=$PSBoundParameters.ContainsKey('RearmAttemptId') -or
+        $PSBoundParameters.ContainsKey('RearmPredecessorTerminalSha256') -or
+        $PSBoundParameters.ContainsKey('RearmPredecessorBindingSha256') -or
+        $PSBoundParameters.ContainsKey('RearmPredecessorArgsSha256')
+    if($rearming -and (-not $recovering -or $RearmAttemptId -cnotmatch $pattern -or
+       $RearmPredecessorTerminalSha256 -cnotmatch $pattern -or $RearmPredecessorBindingSha256 -cnotmatch $pattern -or
+       $RearmPredecessorArgsSha256 -cnotmatch $pattern -or $RearmAttemptId -ceq $RecoveryAttemptId -or
+       $RearmAttemptId -ceq $AttemptId)){throw 'live_authority_rearm_scope'}
     if ($RecoveryContinuity -and -not $recovering) { throw 'live_authority_recovery_scope' }
     if ($recovering -and ($ReadRejoinReceipt -or $ReadClosureReceipt -or $ReadPriorServiceArgs -or $Retire -or
             $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256 -or
@@ -465,7 +477,7 @@ try {
         $saved = Read-Scope $plan.state_path ($admins + $identity)
         $record = ConvertFrom-Json -InputObject $saved.raw
         $age = ([DateTime]::UtcNow - $saved.write_time).TotalMilliseconds
-        $kind = if ($recovering) { 'initial-wsl-cutover-recovery' } else { 'initial-wsl-cutover' }
+        $kind = if ($rearming) {'initial-wsl-cutover-rearm'} elseif ($recovering) { 'initial-wsl-cutover-recovery' } else { 'initial-wsl-cutover' }
         if ($record.phase -cne 'serving' -or $record.kind -cne $kind -or $record.schema_version -ne 1 -or
             $record.generation -ne 1 -or $record.sequence -lt 1 -or $record.attempt_id -cne $AttemptId -or
             $record.legacy_plan_sha256 -cne $LegacyPlanSha256 -or $record.controller_plan_sha256 -cne $plan.controller_plan_sha256 -or
@@ -480,7 +492,7 @@ try {
                 }
             }
             if (($names -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
-                $record.revision -ne 4 -or ($record.proof_elapsed_ms -isnot [int] -and
+                $record.revision -ne $(if($rearming){6}else{4}) -or ($record.proof_elapsed_ms -isnot [int] -and
                     $record.proof_elapsed_ms -isnot [long] -and $record.proof_elapsed_ms -isnot [double] -and $record.proof_elapsed_ms -isnot [decimal]) -or
                 [double]::IsNaN([double]$record.proof_elapsed_ms) -or
                 $record.recovery.attempt_id -cne $RecoveryAttemptId -or
@@ -498,6 +510,19 @@ try {
                 $confirmedAge + $record.proof_elapsed_ms -ge 4800) {
                 throw 'live_authority_recovery_scope'
             }
+        }
+        if($rearming){
+            foreach($key in @('attempt_id','closure_mode','predecessor_args_sha256','predecessor_binding_sha256','predecessor_terminal_sha256')){
+                if($record.rearm.$key -isnot [string]){throw 'live_authority_rearm_scope'}
+            }
+            $rearmNames=@($record.rearm.PSObject.Properties.Name|Sort-Object -CaseSensitive)
+            if(($rearmNames -join ',') -cne 'attempt_id,closure_mode,predecessor_args_sha256,predecessor_binding_sha256,predecessor_terminal_sha256,schema_version' -or
+               ($record.rearm.schema_version -isnot [int] -and $record.rearm.schema_version -isnot [long]) -or
+               $record.rearm.schema_version -ne 1 -or $record.rearm.closure_mode -cne 'windows-offline-v1' -or
+               $record.rearm.attempt_id -cne $RearmAttemptId -or
+               $record.rearm.predecessor_terminal_sha256 -cne $RearmPredecessorTerminalSha256 -or
+               $record.rearm.predecessor_binding_sha256 -cne $RearmPredecessorBindingSha256 -or
+               $record.rearm.predecessor_args_sha256 -cne $RearmPredecessorArgsSha256){throw 'live_authority_rearm_scope'}
         }
         if ($RecoveryContinuity) {
             # The protected binding fixes the original published proof and SCM

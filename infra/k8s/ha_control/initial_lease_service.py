@@ -12,6 +12,7 @@ import time
 from .controller import Journal, TransitionBlocked, exclusive
 from .initial_pg_lease import (
     INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, RECOVERY_ACTION, RECOVERY_FIELDS, RECOVERY_OPEN_REVISION,
+    REARM_ACTION, InitialPgLeaseRearm, rearm_scope,
     InitialPgLease, InitialPgLeaseRecovery, LegacyResponseTimeout,
 )
 from .enforced_windows import _powershell_path
@@ -194,7 +195,7 @@ def native_initial_observer(backend, *, action='ha-initial-wsl-cutover'):
     with client:
         yield WindowsInitialObserver(client, backend.plan_path.with_name('initial-cutover-activation.json'),
                                      _pin(params['marker_sha256']), plan['cluster'],
-                                     broker_marker=(action == RECOVERY_ACTION))
+                                     broker_marker=(action in {RECOVERY_ACTION, REARM_ACTION}))
 
 
 def _request_recovery_proof(client, deadline, failure):
@@ -260,7 +261,13 @@ class WindowsRecoveryObserver:
 def native_recovery_observer(backend):
     """Use distinct authenticated pipes for admission and provider isolation."""
     failure = 'initial_recovery_native_observer_required'
-    handoff = _handoff(backend, action=RECOVERY_ACTION)
+    rearming = 'initial_recovery_rearm' in backend.plan
+    handoff = _handoff(backend, action=REARM_ACTION if rearming else RECOVERY_ACTION)
+    if rearming:
+        params = backend.plan.get('windows_initial_observer', {})
+        expected = hashlib.sha256(Path(__file__).with_name('windows-ha-wsl-lease-observer.ps1').read_bytes()).hexdigest()
+        if params.get('collector_sha256') != expected or backend.fence_adapter._rearm_verified != rearm_scope(backend.plan):
+            raise TransitionBlocked('initial_rearm_offline_observer_required')
     recovery = _recovery_predecessor(backend, handoff)
     plan = backend.plan
     params = plan.get('windows_recovery_observers')
@@ -294,7 +301,7 @@ def native_recovery_observer(backend):
         if any(type(value) is not (int if field == 'server_pid' else str) for value in values) or len(set(values)) != len(values):
             raise TransitionBlocked(failure)
     with ExitStack() as stack:
-        legacy = stack.enter_context(native_initial_observer(backend, action=RECOVERY_ACTION))
+        legacy = stack.enter_context(native_initial_observer(backend, action=REARM_ACTION if rearming else RECOVERY_ACTION))
         clients = {}
         for purpose, (pins, endpoint) in connections.items():
             try:
@@ -404,7 +411,8 @@ def serve_initial_recovery(backend, journal_path, observer):
     The admission context must leave application activation disabled on any
     exit before publish, including process termination or uncertain revoke.
     """
-    return _serve(backend, journal_path, observer, _handoff(backend, action=RECOVERY_ACTION), recovering=True)
+    action = REARM_ACTION if 'initial_recovery_rearm' in backend.plan else RECOVERY_ACTION
+    return _serve(backend, journal_path, observer, _handoff(backend, action=action), recovering=True)
 
 
 def _serve(backend, journal_path, observer, handoff, *, recovering=False):
@@ -421,6 +429,9 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             raise TransitionBlocked('initial_service_reconciliation_required')
         observer.assert_intent(handoff)
         stable = {'schema_version': 1, 'kind': 'initial-wsl-cutover', 'generation': 1, **handoff}
+        rearm = rearm_scope(backend.plan) if 'initial_recovery_rearm' in backend.plan else None
+        if rearm is not None and (not recovering or backend.fence_adapter._rearm_verified != rearm):
+            raise TransitionBlocked('initial_rearm_scope_unverified')
         recovery = _recovery_predecessor(backend, handoff) if recovering else None
         lease_options = {}
         if recovery is not None:
@@ -435,6 +446,8 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
                     handoff, recovery, pin, resources, deadline)
             admission_handle = admission.enter_context(observer.recovery_admission(handoff, recovery))
             stable.update(kind='initial-wsl-cutover-recovery', recovery=recovery, revision=RECOVERY_OPEN_REVISION)
+            if rearm is not None:
+                stable.update(kind='initial-wsl-cutover-rearm', rearm=rearm, revision=6)
 
         first_publication = False
 
@@ -452,7 +465,7 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             return observer.assert_exclusion_held(handoff, deadline)
 
         journal.save(stable | {'phase': 'opening', 'sequence': 0})
-        lease_type = InitialPgLeaseRecovery if recovering else InitialPgLease
+        lease_type = InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease)
         lease = lease_type(backend, closure, assert_exclusion_held=exclusion, **lease_options)
         sequence = 0
         failure_code = None

@@ -28,6 +28,9 @@ RECOVERY_CLOSED_REVISION = 3
 RECOVERY_OPEN_REVISION = 4
 RECOVERY_REVOKED_REVISION = 5
 RECOVERY_ACTION = 'ha-recover-initial-writer'
+REARM_ACTION = 'ha-rearm-initial-writer'
+REARM_FIELDS = {'schema_version', 'attempt_id', 'predecessor_terminal_sha256', 'predecessor_binding_sha256',
+                'predecessor_args_sha256', 'closure_mode'}
 RECOVERY_FIELDS = ('attempt_id', 'predecessor_terminal_sha256', 'predecessor_service_sha256')
 QUARANTINED_OPERATIONS = frozenset({'car.telegram.poll', 'car.hyundai.snapshot'})
 STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
@@ -37,6 +40,20 @@ STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
     AND (SELECT system_identifier::text FROM pg_control_system())=%s
     AND ('x'||substring(pg_walfile_name(pg_current_wal_insert_lsn()),1,8))::bit(32)::integer=1"""
 PROBE_READ = 'SELECT generation FROM ha.controller_probes WHERE nonce=%s'
+
+
+def rearm_scope(plan):
+    value = plan.get('initial_recovery_rearm')
+    recovery = plan.get('initial_cutover_recovery')
+    if (type(value) is not dict or set(value) != REARM_FIELDS
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or value['closure_mode'] != 'windows-offline-v1'
+            or not all(type(value[key]) is str and re.fullmatch(r'[a-f0-9]{64}', value[key])
+                       for key in REARM_FIELDS - {'schema_version', 'closure_mode'})
+            or type(recovery) is not dict or value['attempt_id'] in {
+                recovery.get('attempt_id'), plan.get('initial_cutover_handoff', {}).get('attempt_id')}):
+        _deny('initial_rearm_scope_unverified')
+    return value.copy()
 
 
 class LegacyResponseTimeout(TransitionBlocked):
@@ -78,6 +95,7 @@ class InitialPgLease:
     _revoked_revision = RECOVERY_CLOSED_REVISION
     _owned_renewal_only = False
     _explicit_proof_only = False
+    _allow_rearm = False
 
     def __init__(self, backend, assert_legacy_closed, *, assert_exclusion_held=None):
         if not callable(assert_legacy_closed) or (assert_exclusion_held is not None and not callable(assert_exclusion_held)):
@@ -90,11 +108,14 @@ class InitialPgLease:
         self.open_attempted = False
         self.scope = None
         self.proof_started = None
+        self.rearm = None
 
     def _bind(self, state):
         plan = self.backend.plan
         if not self.backend.depth or type(plan) is not dict:
             _deny('native_host_guard_required')
+        if 'initial_recovery_rearm' in plan and not self._allow_rearm:
+            _deny('initial_rearm_scope_unverified')
         mode = plan.get('initial_wsl_cutover')
         if (plan.get('_approval_action') != self._approval_action or plan.get('profile') != 'enforced-vm-v1'
                 or type(mode) is not dict or mode != INITIAL_CUTOVER or type(mode['schema_version']) is not int):
@@ -251,6 +272,8 @@ class InitialPgLease:
                    'system_id': self.scope[3], 'expires_at': expires.isoformat(), 'nonce': nonce}
         if self.scope[4]:
             payload['recovery'] = dict(zip(RECOVERY_FIELDS, self.scope[4]))
+        if self.rearm is not None:
+            payload['rearm'] = self.rearm
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def _commit_primary(self, primary):
@@ -640,3 +663,24 @@ class InitialPgLeaseRecovery(InitialPgLease):
 
     def _probe_prefix(self):
         return 'recovery-a:' + self.scope[4][0] + ':'
+
+
+class InitialPgLeaseRearm(InitialPgLeaseRecovery):
+    """Issue only revision six after a signed, sealed revision-four predecessor."""
+
+    _approval_action = REARM_ACTION
+    _closed_revision = 5
+    _open_revision = 6
+    _revoked_revision = 7
+    _allow_rearm = True
+
+    def _bind(self, state):
+        previous = self.rearm
+        super()._bind(state)
+        selected = rearm_scope(self.backend.plan)
+        if previous is not None and previous != selected:
+            _deny('initial_rearm_scope_unverified')
+        self.rearm = selected
+
+    def _probe_prefix(self):
+        return 'rearm-a:' + self.rearm['attempt_id'] + ':'

@@ -72,11 +72,12 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres, generation=None, *, recovery_deadline=None):
+def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False):
+    _need(not rearmed or (recovery_deadline is not None and generation is None), "guest_live_pg_binding_unconfirmed")
     _need(recovery_deadline is None or generation is None, "guest_live_pg_binding_unconfirmed")
     if generation is None:
         primary, partner, epoch, timeline = "A", "B", 1, 1
-        revision = RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2
+        revision = 6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2)
     else:
         generation.validate()
         primary, partner = generation.primary, generation.partner
@@ -134,6 +135,35 @@ def observe_recovered_a_lease(pins, postgres, *, recovery_attempt_id, challenge_
         **runtime._runtime_identity(pins), "recovery_attempt_id": recovery_attempt_id,
         "challenge_sha256": challenge_sha256, "postgres": observed,
     }))
+
+
+def observe_rearmed_a_lease(pins, postgres, *, recovery_attempt_id, rearm, rearm_plan_sha256,
+                            challenge_sha256, deadline, minimum_remaining_seconds=1):
+    """Read exact revision six after the separately authenticated native rearm proof."""
+    from .initial_pg_lease import rearm_scope
+    checked = rearm_scope({'initial_recovery_rearm': rearm,
+                           'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
+                           'initial_cutover_handoff': {'attempt_id': pins.attempt_id}})
+    error = "guest_live_rearm_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A" and type(pins.generation) is int
+          and pins.generation == 1 and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release['source_commit']
+          and all(runtime._match(runtime.SHA, value) for value in (
+              recovery_attempt_id, rearm_plan_sha256, challenge_sha256))
+          and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, rearmed=True)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
+          and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({**runtime._runtime_identity(pins), 'rearm': checked,
+        'rearm_plan_sha256': rearm_plan_sha256, 'recovery_attempt_id': recovery_attempt_id,
+        'challenge_sha256': challenge_sha256, 'postgres': observed}))
 
 
 def _authority_paths():

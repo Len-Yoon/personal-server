@@ -30,7 +30,7 @@ from .native_stdio_bridge import (
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_OBSERVE_REPLACEMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
     GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, QUIESCENCE_BOUNDARIES,
-    GUEST_TRANSITION_TARGET, GUEST_START_INITIAL_RECOVERY, RECOVERY_START_ORDER,
+    GUEST_TRANSITION_TARGET, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, RECOVERY_START_ORDER,
     GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, INITIAL_RECOVERY_HOLD, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -48,6 +48,7 @@ VERBS = {
     GUEST_OBSERVE_INITIAL_RECOVERY_HOLD,
     GUEST_OBSERVE_CAR_ISOLATION,
     GUEST_START_INITIAL_RECOVERY,
+    GUEST_START_INITIAL_REARM,
     GUEST_PREFLIGHT_REPLACEMENT,
     GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
@@ -372,12 +373,15 @@ def start_initial_recovery(request, assert_windows_current):
     """Restart the installed containers while retaining the recovery hold."""
     error = "guest_initial_recovery_start_unverified"
     _need(callable(assert_windows_current), error)
+    _args(request.verb, request.node, request.args)
+    rearming = request.verb == GUEST_START_INITIAL_REARM
     with _guest_mutation_descriptor():
         raw, hold, prepared, active = _read_initial_recovery_hold(request)
         args = request.args
         _need(_digest(raw) == args["hold_sha256"], error)
         stage = ROOT / request.binding.attempt_id
-        prefix = "recovery-" + args["recovery_attempt_id"] + "-start-"
+        prefix = (("rearm-" + args["rearm"]["attempt_id"]) if rearming
+                  else ("recovery-" + args["recovery_attempt_id"])) + "-start-"
         intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                  for name in ("intent", "progress", "done"))
         _need(not any(os.path.lexists(path) for path in (intent_path, progress_path, done_path)), error)
@@ -410,8 +414,10 @@ def start_initial_recovery(request, assert_windows_current):
         def check(boundary):
             deadline = time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS
             unchanged()
-            challenge = _digest(_bytes({"request": _scope(request), "hold_sha256": args["hold_sha256"],
-                                       "boundary": boundary}))
+            challenge_scope = {"request": _scope(request), "hold_sha256": args["hold_sha256"], "boundary": boundary}
+            if rearming:
+                challenge_scope.update(rearm=args["rearm"], rearm_plan_sha256=args["rearm_plan_sha256"])
+            challenge = _digest(_bytes(challenge_scope))
             proof = assert_windows_current(challenge, boundary)
             _need(_hash(proof) and time.monotonic() < deadline, error)
             unchanged()
@@ -419,9 +425,11 @@ def start_initial_recovery(request, assert_windows_current):
             # The sample promises >1s remaining; dispatch has strictly <0.5s
             # measured before that read, accounting for time spent sampling.
             dispatch_deadline = min(deadline, time.monotonic() + 0.5)
-            local = live.observe_recovered_a_lease(
+            observe_lease = live.observe_rearmed_a_lease if rearming else live.observe_recovered_a_lease
+            local = observe_lease(
                 pins, postgres, recovery_attempt_id=args["recovery_attempt_id"], challenge_sha256=challenge,
-                deadline=dispatch_deadline, minimum_remaining_seconds=1)
+                deadline=dispatch_deadline, minimum_remaining_seconds=1,
+                **({"rearm": args["rearm"], "rearm_plan_sha256": args["rearm_plan_sha256"]} if rearming else {}))
             _need(_hash(local) and time.monotonic() < dispatch_deadline, error)
             return {"windows_proof_sha256": proof, "guest_proof_sha256": local}, dispatch_deadline
 
@@ -1336,7 +1344,7 @@ def handle(request, assert_windows_current=None):
             return observe_initial_recovery_hold(request)
         if request.verb == GUEST_OBSERVE_CAR_ISOLATION:
             return observe_car_isolation(request)
-        if request.verb == GUEST_START_INITIAL_RECOVERY:
+        if request.verb in {GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM}:
             return start_initial_recovery(request, assert_windows_current)
         if request.verb == GUEST_QUIESCE_INITIAL_RECOVERY:
             _need(callable(assert_windows_current), "guest_worker_live_windows_required")

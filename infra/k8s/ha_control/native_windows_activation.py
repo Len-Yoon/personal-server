@@ -338,7 +338,7 @@ class WindowsActivationLease:
         return bridge._digest(bridge._bytes({"challenge_sha256": challenge_sha256, "predecessor": prior,
                                             "guest_hold_readback_sha256": readback}))
 
-    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard):
+    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None):
         """Require the same protected Windows heartbeat around the paired database read."""
         error = "native_initial_recovery_publication_unconfirmed"
         bridge._need(type(recovery) is dict and set(recovery) == {
@@ -346,10 +346,19 @@ class WindowsActivationLease:
                      and all(bridge._hash(pin) for pin in recovery.values())
                      and bridge._hash(self.service_instance_sha256)
                      and callable(powershell) and callable(observe_pair) and callable(assert_guard), error)
+        rearm_parameters = {}
+        if rearm is not None:
+            from .initial_pg_lease import rearm_scope
+            checked = rearm_scope({'initial_recovery_rearm': rearm, 'initial_cutover_recovery': recovery,
+                                   'initial_cutover_handoff': {'attempt_id': self.custody.binding.attempt_id}})
+            rearm_parameters = {'RearmAttemptId': checked['attempt_id'],
+                                'RearmPredecessorTerminalSha256': checked['predecessor_terminal_sha256'],
+                                'RearmPredecessorBindingSha256': checked['predecessor_binding_sha256'],
+                                'RearmPredecessorArgsSha256': checked['predecessor_args_sha256']}
         binding = self.custody.binding
         challenge = secrets.token_hex(32)
         source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
-            'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            **rearm_parameters, 'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
             'AttemptId': binding.attempt_id, 'PriorSha256': challenge,
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
             'RecoveryAttemptId': recovery['attempt_id'],
@@ -375,7 +384,7 @@ class WindowsActivationLease:
         bridge._remaining(deadline)
         return bridge._digest(bridge._bytes({"challenge": challenge, "windows": before, "postgres_sha256": paired}))
 
-    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard):
+    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None):
         """Bind a current paired lease to the same continuously serving recovery process.
 
         The first publication remains subject to verify_recovery_publication.
@@ -392,10 +401,19 @@ class WindowsActivationLease:
                      and callable(powershell) and callable(observe_pair) and callable(assert_guard)
                      and type(deadline) in (int, float) and math.isfinite(deadline)
                      and time.monotonic() < deadline, error)
+        rearm_parameters = {}
+        if rearm is not None:
+            from .initial_pg_lease import rearm_scope
+            checked = rearm_scope({'initial_recovery_rearm': rearm, 'initial_cutover_recovery': recovery,
+                                   'initial_cutover_handoff': {'attempt_id': self.custody.binding.attempt_id}})
+            rearm_parameters = {'RearmAttemptId': checked['attempt_id'],
+                                'RearmPredecessorTerminalSha256': checked['predecessor_terminal_sha256'],
+                                'RearmPredecessorBindingSha256': checked['predecessor_binding_sha256'],
+                                'RearmPredecessorArgsSha256': checked['predecessor_args_sha256']}
         binding = self.custody.binding
         challenge = secrets.token_hex(32)
         source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
-            'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            **rearm_parameters, 'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
             'AttemptId': binding.attempt_id, 'PriorSha256': challenge,
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
             'RecoveryAttemptId': recovery['attempt_id'],

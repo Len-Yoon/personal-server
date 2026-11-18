@@ -37,13 +37,20 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 class InitialRecoveryRestartTests(unittest.TestCase):
     def exercise_restart(self, *, failed_boundary=None, uncertain_start=None, stale_hold=False, already_started=False,
-                         delayed_inventory=False, delayed_local=False, cleanup_failure=False):
+                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False):
         from contextlib import ExitStack
         worker, wire = native_guest_worker, native_stdio_bridge
         binding = wire.Binding('1'*64, '2'*64, '3'*64, '4'*64, '5'*64)
         args = {key: '6'*64 for key in wire.INITIAL_RECOVERY_ARGS}
         args.update(recovery_attempt_id='7'*64, hold_sha256=wire._digest(b'hold'))
-        request = wire.Request(binding, 'A', wire.GUEST_START_INITIAL_RECOVERY, 1, '8'*64, args)
+        verb = wire.GUEST_START_INITIAL_RECOVERY
+        if rearming:
+            args['rearm'] = {'schema_version': 1, 'attempt_id': '9'*64, 'predecessor_terminal_sha256': '1'*64,
+                             'predecessor_binding_sha256': '2'*64, 'predecessor_args_sha256': '3'*64,
+                             'closure_mode': 'windows-offline-v1'}
+            args['rearm_plan_sha256'] = 'a'*64
+            verb = wire.GUEST_START_INITIAL_REARM
+        request = wire.Request(binding, 'A', verb, 1, '8'*64, args)
         containers = {role: {'container_id': f'{index:064x}', 'image_id': 'sha256:'+'9'*64}
                       for index, role in enumerate(wire.RECOVERY_START_ORDER, 1)}
         authority_path = Path('/test-authority')
@@ -103,7 +110,8 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             stack.enter_context(patch.object(worker, '_assert_car_route_blocked'))
             stack.enter_context(patch.object(worker, 'GuestWorker', return_value=SimpleNamespace(_prepared_pins=lambda *_: (object(), pins, {}))))
             stack.enter_context(patch.object(worker.live, '_authority_paths', return_value={'test': authority_path}))
-            stack.enter_context(patch.object(worker.live, 'observe_recovered_a_lease', side_effect=local_proof))
+            original_proof = stack.enter_context(patch.object(worker.live, 'observe_recovered_a_lease', side_effect=local_proof))
+            rearm_proof = stack.enter_context(patch.object(worker.live, 'observe_rearmed_a_lease', side_effect=local_proof))
             stack.enter_context(patch.object(worker.runtime, '_inventory', side_effect=lambda: copy.deepcopy(runtime_state)))
             stack.enter_context(patch.object(worker.runtime, '_read', side_effect=read))
             stack.enter_context(patch.object(worker.runtime, '_write', side_effect=write))
@@ -115,6 +123,8 @@ class InitialRecoveryRestartTests(unittest.TestCase):
                 stage.mkdir()
                 (stage / ('recovery-'+args['recovery_attempt_id']+'-start-intent.json')).touch()
             result = worker.start_initial_recovery(request, windows)
+            self.rearm_proof_count = rearm_proof.call_count
+            self.original_proof_count = original_proof.call_count
             self.readiness_count = readiness.call_count
             return result
 
@@ -156,6 +166,28 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             self.exercise_restart(failed_boundary="recovery_after:book-memo", cleanup_failure=True)
         self.assertTrue(any(path.name.endswith("-intent.json") for path in self.records))
         self.assertFalse(any(path.name.endswith("-done.json") for path in self.records))
+
+    def test_rearm_start_uses_only_explicit_six_proof_and_separate_intent(self):
+        result = self.exercise_restart(rearming=True)
+        self.assertEqual(result.status, 'PASS')
+        self.assertEqual(self.original_proof_count, 0)
+        self.assertEqual(self.rearm_proof_count, len(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
+        self.assertEqual(len(self.commands), 8)
+        self.assertTrue(all(path.name.startswith('rearm-'+'9'*64) for path in self.records))
+
+    def test_rearm_args_cannot_be_sent_to_old_start_or_wrong_node(self):
+        wire = native_stdio_bridge
+        args={key:'1'*64 for key in (*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256')}
+        args.update(rearm={'schema_version':1,'attempt_id':'2'*64,'predecessor_terminal_sha256':'3'*64,
+                           'predecessor_binding_sha256':'4'*64,'predecessor_args_sha256':'5'*64,
+                           'closure_mode':'windows-offline-v1'},rearm_plan_sha256='6'*64)
+        wire._args(wire.GUEST_START_INITIAL_REARM,'A',args)
+        for verb,node in ((wire.GUEST_START_INITIAL_RECOVERY,'A'),(wire.GUEST_START_INITIAL_REARM,'B')):
+            with self.subTest(verb=verb,node=node),self.assertRaises(wire.BridgeRejected):
+                wire._args(verb,node,args)
+        args['rearm']['closure_mode']='online'
+        with self.assertRaises(wire.BridgeRejected):
+            wire._args(wire.GUEST_START_INITIAL_REARM,'A',args)
 
     def test_restart_dispatch_requires_a_only_duplex_and_valid_pins(self):
         wire = native_stdio_bridge
@@ -1125,6 +1157,19 @@ class NativeGuestLiveTests(unittest.TestCase):
                     live.observe_recovered_a_lease(pins, postgres, **options, minimum_remaining_seconds=margin)
             self.assertRegex(live.observe_recovered_a_lease(pins, postgres, **options, minimum_remaining_seconds=1),
                              r"^[a-f0-9]{64}$")
+            rearm = {'schema_version':1,'attempt_id':'9'*64,'predecessor_terminal_sha256':'a'*64,
+                     'predecessor_binding_sha256':'b'*64,'predecessor_args_sha256':'c'*64,
+                     'closure_mode':'windows-offline-v1'}
+            rearm_options=options|{'rearm':rearm,'rearm_plan_sha256':'d'*64}
+            with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
+                live.observe_rearmed_a_lease(pins,postgres,**rearm_options)
+            observed['authority'][2]=6
+            self.assertRegex(live.observe_rearmed_a_lease(pins,postgres,**rearm_options),r'^[a-f0-9]{64}$')
+            with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
+                live.observe_recovered_a_lease(pins,postgres,**options)
+            observed['authority'][2]=7
+            with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
+                live.observe_rearmed_a_lease(pins,postgres,**rearm_options)
             observed["authority"][2] = 2
             with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
                 live.observe_recovered_a_lease(pins, postgres, **options)
