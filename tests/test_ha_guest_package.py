@@ -155,6 +155,79 @@ class NativeGuestRuntimeTest(unittest.TestCase):
             self.assertEqual(docker.call_count, 8)
             observe.assert_called_once()
 
+    def test_standby_rebind_recovers_after_atomic_replacement_interruption(self):
+        module = native_guest_runtime
+        pins = replace(self.pins("B"), boot_sha256=module._digest(b"guest-boot"))
+        shared = ("boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
+                  "system_id", "postgres_id", "retained_postgres_id")
+        postgres = SimpleNamespace(**{key: getattr(pins, key) for key in shared},
+                                   source_commit=pins.release["source_commit"], attempt_id=None, validate=lambda: None)
+        roles = sorted(module.SERVICES | {"ha-broker"})
+        owned = {f"{index:064x}": {"role": role} for index, role in enumerate(roles, 1)}
+        receipt = "9"*64
+        plan = {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                "runtime_receipt_sha256": receipt, "owned": owned,
+                "protected_inventory_sha256": pins.protected_inventory_sha256}
+        plan_pin = module._digest(module._json_bytes(plan))
+        cert = "e"*64
+        real_replace = module.os.replace
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            journal = root / "initial-standby-retirement"
+            journal.mkdir()
+            (journal / "plan.json").write_bytes(module._json_bytes(plan))
+            for identifier in owned:
+                (journal / (identifier + ".remove.json")).write_bytes(
+                    module._json_bytes({"plan_sha256": plan_pin, "container_id": identifier}))
+            (root / "broker").mkdir()
+            (root / "broker" / "broker.crt").write_bytes(b"certificate")
+            before = {}
+            for service in module.SERVICES:
+                path = root / "apps" / service
+                path.mkdir(parents=True)
+                old, passfile = native_guest_config.application_config(
+                    cluster=pins.cluster, release=pins.release, plan_sha256=pins.plan_sha256, node="B",
+                    installation_id=pins.installation_id, system_id=pins.system_id, service=service,
+                    password="p"*32, broker_server_sha256=cert,
+                )
+                before[service] = (module._json_bytes(old), passfile)
+                (path / "config.json").write_bytes(before[service][0])
+                (path / "postgres.pgpass").write_bytes(passfile)
+            with (patch.object(module.os, "geteuid", return_value=0), patch.object(module.os, "fchown"),
+                  patch.object(module, "ROOT", root), patch.object(module, "BOOT_ID") as boot,
+                  patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+                  patch.object(module, "_cert_digest", return_value=cert),
+                  patch.object(module, "_assert_initial_standby_closed"), patch.object(module, "active_postgres"),
+                  patch.object(module, "_inventory", return_value={}),
+                  patch.object(module, "inventory_sha256", return_value=pins.protected_inventory_sha256),
+                  patch.object(module, "_docker") as docker):
+                boot.read_bytes.return_value = b"guest-boot"
+                options = dict(runtime_receipt_sha256=receipt, plan_sha256=plan_pin, assert_no_activation=Mock())
+                writes = 0
+
+                def interrupt(src, dst):
+                    nonlocal writes
+                    if dst.name == "config.json":
+                        writes += 1
+                        if writes == 2:
+                            raise OSError("fixture interruption")
+                    return real_replace(src, dst)
+
+                with patch.object(module.os, "replace", side_effect=interrupt):
+                    with self.assertRaisesRegex(OSError, "fixture interruption"):
+                        module.rebind_initial_standby_application_configs(pins, postgres, root, **options)
+                result = module.rebind_initial_standby_application_configs(pins, postgres, root, **options)
+                docker.assert_not_called()
+            self.assertEqual(result["status"], "APP_CONFIGS_REBOUND")
+            self.assertEqual(set(result["config_sha256"]), module.SERVICES)
+            for service, (old, passfile) in before.items():
+                path = root / "apps" / service
+                current = json.loads((path / "config.json").read_bytes())
+                self.assertEqual((current["generation"], current["primary_node"], current["primary"]["host"]),
+                                 (2, "B", "ha-b"))
+                self.assertEqual((path / "postgres.pgpass").read_bytes(), passfile)
+                self.assertEqual((journal / (service + ".generation-1-config.json")).read_bytes(), old)
+
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime
         pins = self.pins()

@@ -10,6 +10,7 @@ import secrets
 import ssl
 import stat
 import subprocess
+import tempfile
 
 from ha_runtime.config import SERVICES
 from ha_runtime.seven_capture import stamp
@@ -637,6 +638,105 @@ def retire_initial_standby_containers(pins, postgres, stage, *, runtime_receipt_
         _need(removed in (None, identifier) and identifier not in inventory(),
               "guest_initial_standby_removal_unsettled")
     return {"status": "CONTAINERS_RETIRED", "plan_sha256": plan_sha256, "count": len(owned)}
+
+
+def _publish_standby_config(path, raw, *, uid, gid, assert_current):
+    fd, name = tempfile.mkstemp(prefix=".standby-config-", dir=path.parent)
+    pending = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), 0o400)
+            os.fsync(stream.fileno())
+        _need(_read(pending, uid, {0o400}) == raw and pending.lstat().st_gid == gid,
+              "guest_initial_standby_config_unconfirmed")
+        assert_current()
+        os.replace(pending, path)
+        _fsync_directory(path.parent)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def rebind_initial_standby_application_configs(pins, postgres, stage, *, runtime_receipt_sha256,
+                                                plan_sha256, assert_no_activation):
+    """Advance only the retired B apps to generation 2 without changing their credentials."""
+    error = "guest_initial_standby_config_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256), error)
+    journal = Path(stage) / "initial-standby-retirement"
+    raw = _read(journal / "plan.json", 0, {0o400})
+    _need(_digest(raw) == plan_sha256, error)
+    plan = json.loads(raw)
+    owned = plan["owned"]
+    _need(plan["node"] == "B" and plan["attempt_id"] == pins.attempt_id
+          and plan["installation_id"] == pins.installation_id
+          and plan["runtime_receipt_sha256"] == runtime_receipt_sha256
+          and plan["protected_inventory_sha256"] == pins.protected_inventory_sha256
+          and len(owned) == len(SERVICES) + 1
+          and {entry["role"] for entry in owned.values()} == SERVICES | {"ha-broker"}, error)
+    for identifier in owned:
+        _need(_match(SHA, identifier)
+              and _read(journal / (identifier + ".remove.json"), 0, {0o400})
+              == _json_bytes({"plan_sha256": plan_sha256, "container_id": identifier}), error)
+
+    def guard():
+        assert_no_activation()
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+        _assert_initial_standby_closed(pins, postgres, error)
+        objects = _inventory()
+        active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
+        _need(not any(_service(item) in SERVICES | {"ha-broker"} for item in objects.values())
+              and inventory_sha256(objects) == pins.protected_inventory_sha256, error)
+
+    guard()
+    cert = _cert_digest(_read(ROOT / "broker" / "broker.crt", 0, {0o440, 0o444}))
+    changes = {}
+    for service in sorted(SERVICES):
+        path = ROOT / "apps" / service / "config.json"
+        info = path.lstat()
+        current = _read(path, APP_UID, {0o400})
+        passfile = _read(path.with_name("postgres.pgpass"), APP_UID, {0o400})
+        password = _password(passfile, service.replace("-", "_") + "_b")
+        common = dict(cluster=pins.cluster, release=pins.release, plan_sha256=pins.plan_sha256,
+                      node="B", installation_id=pins.installation_id, system_id=pins.system_id,
+                      service=service, password=password, broker_server_sha256=cert)
+        old, old_passfile = config.application_config(**common, primary_node="A", generation=1)
+        new, new_passfile = config.application_config(**common, primary_node="B", generation=2)
+        _need(passfile == old_passfile == new_passfile, error)
+        target = _json_bytes(new).rstrip(b"\n")
+        backup = journal / (service + ".generation-1-config.json")
+        if os.path.lexists(backup):
+            prior = _read(backup, 0, {0o400})
+            _need(json.loads(prior) == old and current in (prior, target), error)
+        else:
+            _need(json.loads(current) == old, error)
+            prior = current
+        changes[service] = (path, info, current, target, backup, prior)
+
+    digests = {}
+    for service, (path, info, current, target, backup, prior) in changes.items():
+        guard()
+        _need(stamp(path.lstat()) == stamp(info) and _read(path, APP_UID, {0o400}) == current, error)
+        if not os.path.lexists(backup):
+            def assert_backup_absent():
+                _need(not os.path.lexists(backup), error)
+
+            _publish_standby_config(backup, prior, uid=0, gid=journal.lstat().st_gid,
+                                    assert_current=assert_backup_absent)
+        _need(_read(backup, 0, {0o400}) == prior, error)
+        if current != target:
+            def assert_config_current():
+                _need(stamp(path.lstat()) == stamp(info) and path.lstat().st_gid == info.st_gid, error)
+
+            _publish_standby_config(path, target, uid=info.st_uid, gid=info.st_gid,
+                                    assert_current=assert_config_current)
+        _need(_read(path, APP_UID, {0o400}) == target, error)
+        digests[service] = _digest(target)
+    guard()
+    return {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_sha256, "node": "B", "generation": 2,
+            "config_sha256": digests}
 
 
 def observe_runtime_outcome(pins, stage, *, assert_settled):
