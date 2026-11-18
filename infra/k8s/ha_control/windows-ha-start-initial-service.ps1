@@ -89,6 +89,29 @@ function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$Res
     }
 }
 
+function Assert-RecoveryPredecessorStopped($Plan, [string]$Root) {
+    $recovery = $Plan.initial_cutover_recovery
+    $binding = Read-PinnedJson (Join-Path $Root 'initial-predecessor-service.json') $recovery.predecessor_service_sha256
+    $oldName = 'N100HA_' + $Plan.installation_id.Substring(0,24) + '_controller'
+    if ($binding.service_name -cne $oldName -or $binding.attempt_id -cne $Plan.initial_cutover_handoff.attempt_id -or
+        $binding.service_image_path_sha256 -cnotmatch $hashPattern) {
+        throw 'initial_service_predecessor_unconfirmed'
+    }
+    $services = @(Get-CimInstance Win32_Service -Filter ("Name='" + $oldName + "'") -OperationTimeoutSec 5 -ErrorAction Stop)
+    if ($services.Count -ne 1) { throw 'initial_service_predecessor_unconfirmed' }
+    $old = $services[0]
+    if ($old.Name -cne $oldName -or $old.State -cne 'Stopped' -or $old.ProcessId -ne 0 -or
+        $old.StartMode -cne 'Disabled' -or $old.ServiceType -cne 'Own Process' -or
+        $old.DesktopInteract -ne $false -or $old.StartName -ine ('NT SERVICE\'+$oldName) -or
+        $old.PathName -isnot [string]) { throw 'initial_service_predecessor_unconfirmed' }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $image = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($old.PathName))).
+            Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+    if ($image -cne $binding.service_image_path_sha256) { throw 'initial_service_predecessor_unconfirmed' }
+}
+
 function Read-PinnedJson([string]$Path, [string]$Sha) {
     if ($Path -cnotmatch '\A[A-Za-z]:\\[A-Za-z0-9_.\\-]+\z' -or $Path -match '\\\.\.?(\\|$)') {
         throw 'initial_service_input_path'
@@ -613,6 +636,9 @@ try {
         $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($writer,'FullControl','Allow'))
     }
     $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'Read','Allow'))
+    if ($recovering) {
+        Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetDirectoryName($PlanPath))
+    }
     $file = [IO.FileStream]::new($argsPath,[IO.FileMode]::CreateNew,
         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
         [IO.FileOptions]::WriteThrough,$security)
@@ -668,6 +694,9 @@ public static class HaInitialLeaseFileTime {
         [TrustedStoppedV1.Contract]::Inputs($identityScope,$ServiceName,$hostPath)
         [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$current.PathName)
     } finally { $scm.Dispose() }
+    if ($recovering) {
+        Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetDirectoryName($PlanPath))
+    }
     # Once invoked, a missing response is an uncertain activation. Preserve all records.
     Start-Service -Name $ServiceName -ErrorAction Stop
     $wait = [Diagnostics.Stopwatch]::StartNew()

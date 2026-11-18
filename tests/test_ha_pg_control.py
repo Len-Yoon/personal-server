@@ -2232,6 +2232,51 @@ class InitialLeaseServiceTests(unittest.TestCase):
         for client in clients:
             client.__exit__.assert_called_once()
 
+    def test_recovery_start_rechecks_the_exact_predecessor_scm(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        command = r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_START,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Assert-RecoveryPredecessorStopped'},$false)
+. ([scriptblock]::Create($function.Extent.Text))
+$hashPattern='\A[a-f0-9]{64}\z'
+$name='N100HA_'+('a'*24)+'_controller'
+$image='"C:\ProgramData\owned\windows-service-host.exe"'
+$sha=[Security.Cryptography.SHA256]::Create()
+try {$pin=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($image))).Replace('-','').ToLowerInvariant()}
+finally {$sha.Dispose()}
+$binding=[pscustomobject]@{service_name=$name;attempt_id='b'*64;service_image_path_sha256=$pin}
+$plan=[pscustomobject]@{installation_id='a'*64;initial_cutover_handoff=@{attempt_id='b'*64};
+    initial_cutover_recovery=@{predecessor_service_sha256='c'*64}}
+function Read-PinnedJson($Path,$Sha){
+    if ((Split-Path $Path -Leaf) -cne 'initial-predecessor-service.json' -or $Sha -cne ('c'*64)){throw 'fixture_pin'}
+    return $binding
+}
+$expected=@{Name=$name;State='Stopped';ProcessId=0;StartMode='Disabled';ServiceType='Own Process';
+    DesktopInteract=$false;StartName='NT SERVICE\'+$name;PathName=$image}
+$rows=@([pscustomobject]$expected)
+function Get-CimInstance { return $rows }
+Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetTempPath())
+foreach ($drift in @(@{State='Running'},@{ProcessId=42},@{StartMode='Manual'},@{PathName='other'})) {
+    $rows=@([pscustomobject]($expected.Clone()))
+    foreach ($key in $drift.Keys) { $rows[0].$key=$drift[$key] }
+    try { Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetTempPath()); throw 'fixture_accepted_drift' }
+    catch { if ($_.Exception.Message -cne 'initial_service_predecessor_unconfirmed'){throw} }
+}
+$rows=@()
+try { Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetTempPath()); throw 'fixture_accepted_absence' }
+catch { if ($_.Exception.Message -cne 'initial_service_predecessor_unconfirmed'){throw} }
+exit 0
+"""
+        result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", command),
+                                env=os.environ | {"N100_TEST_START": str(script)},
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_recovery_start_requires_own_reservation_and_distinct_service(self):
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
         script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
