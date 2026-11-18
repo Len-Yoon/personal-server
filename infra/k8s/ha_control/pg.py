@@ -462,7 +462,7 @@ class PgBackend:
         self._promotion_intent(state)
         if value["actual_timeline"] <= state["timeline"]:
             _deny("promoted_timeline_required")
-        if state["phase"] == "promoting" and self.plan.get("source_lease_close_required", False):
+        if state["phase"] == "promoting" and self.plan.get("profile") == "enforced-vm-v1":
             self._prove_promotion_fork(value, state)
         if (state["phase"] == "promoting" and value["epoch"] < state["generation"]
                 and value["primary"] == state["old"] and value["partner"] == state["target"]
@@ -484,10 +484,12 @@ class PgBackend:
         if (not history or len(history) != 2 or history[0] != f"{timeline:08X}.history"
                 or not isinstance(history[1], str) or not 0 < len(history[1]) <= 1048576):
             _deny("promotion_fork_unconfirmed")
+        floor = (self._planned_promotion_floor(state) if self.plan.get("source_lease_close_required", False)
+                 else self._promotion_replay_floor())
         entries = [line.split() for line in history[1].splitlines() if line.strip() and not line.lstrip().startswith("#")]
         if (not entries or len(entries[-1]) < 2 or entries[-1][0] != str(state["timeline"])
                 or not re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", entries[-1][1])
-                or self._lsn(entries[-1][1]) < self._planned_promotion_floor(state)):
+                or self._lsn(entries[-1][1]) < floor):
             _deny("promotion_fork_unconfirmed")
 
     def _best_effort_revoke(self, state):

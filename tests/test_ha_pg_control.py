@@ -911,6 +911,25 @@ class PGControlTests(unittest.TestCase):
                     with self.assertRaisesRegex(TransitionBlocked, "promotion_fork_unconfirmed"):
                         self.backend._promoted_history(promoted, state)
 
+    def test_enforced_unplanned_promotion_checks_authenticated_fork_at_approved_floor(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/30")
+        state = dict(self.state, phase="promoting")
+        promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
+        connection = MagicMock()
+        with patch.object(self.backend, "_connection", return_value=nullcontext(connection)) as connect:
+            for history in ("1\t0/2F\tbelow floor\n", "3\t0/30\twrong parent\n"):
+                with self.subTest(history=history):
+                    connection.execute.return_value.fetchone.side_effect = [
+                        ("123", 2, "0/80", "ha"), ("00000002.history", history),
+                    ]
+                    with self.assertRaisesRegex(TransitionBlocked, "promotion_fork_unconfirmed"):
+                        self.backend._promoted_history(promoted, state)
+            connection.execute.return_value.fetchone.side_effect = [
+                ("123", 2, "0/80", "ha"), ("00000002.history", "1\t0/30\tvalid parent\n"),
+            ]
+            self.backend._promoted_history(promoted, state)
+            connect.assert_called_with("B", replication=True)
+
     def test_disconnected_standby_uses_replay_timeline_without_substituting_flush(self):
         self.backend.plan["required_replay_lsn"] = "0/21"
         state = dict(self.state, phase="promoting")
