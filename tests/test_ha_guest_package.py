@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -100,6 +101,59 @@ class NativeGuestRuntimeTest(unittest.TestCase):
             with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_retirement_unconfirmed"):
                 module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
             docker.assert_not_called()
+
+    def test_standby_retirement_resumes_from_absence_without_resending(self):
+        module = native_guest_runtime
+        pins = replace(self.pins("B"), boot_sha256=module._digest(b"guest-boot"))
+        shared = ("boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
+                  "system_id", "postgres_id", "retained_postgres_id")
+        postgres = SimpleNamespace(**{key: getattr(pins, key) for key in shared},
+                                   source_commit=pins.release["source_commit"], attempt_id=None, validate=lambda: None)
+        owned = {f"{index:064x}": {"role": role, "inspect_sha256": "e"*64}
+                 for index, role in enumerate(sorted(module.SERVICES | {"ha-broker"}), 1)}
+        database_id = "a"*64
+        database = {"Config": {"Labels": {"com.docker.compose.service": "postgres"}}}
+        objects = {database_id: database, **{key: {} for key in owned}}
+        plan = {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                "runtime_receipt_sha256": "9"*64, "owned": owned,
+                "protected_inventory_sha256": pins.protected_inventory_sha256}
+        approval = module._digest(module._json_bytes(plan))
+        first = min(owned)
+
+        def remove(action, identifier):
+            self.assertEqual(action, "rm")
+            self.assertIn(identifier, owned)
+            if identifier == first:
+                raise subprocess.TimeoutExpired("docker rm", 1)
+            del objects[identifier]
+            return identifier.encode()
+
+        def fingerprint(items):
+            return pins.protected_inventory_sha256 if items == {database_id: database} else "e"*64
+
+        with (tempfile.TemporaryDirectory() as root, patch.object(module.os, "geteuid", return_value=0),
+              patch.object(module, "_directory"), patch.object(module, "BOOT_ID") as boot,
+              patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+              patch.object(module, "observe_initial_standby_retirement", return_value=plan) as observe,
+              patch.object(module, "_assert_initial_standby_closed"), patch.object(module, "active_postgres"),
+              patch.object(module, "_inventory", side_effect=lambda: dict(objects)),
+              patch.object(module, "inventory_sha256", side_effect=fingerprint),
+              patch.object(module, "_docker", side_effect=remove) as docker):
+            boot.read_bytes.return_value = b"guest-boot"
+            journal = Path(root) / "initial-standby-retirement"
+            journal.mkdir(mode=0o700)  # Crash before plan publication sent no Docker command.
+            options = dict(runtime_receipt_sha256=plan["runtime_receipt_sha256"], plan_sha256=approval,
+                           assert_no_activation=Mock())
+            for _ in range(2):
+                with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_removal_unsettled"):
+                    module.retire_initial_standby_containers(pins, postgres, root, **options)
+            docker.assert_called_once_with("rm", first)
+            del objects[first]  # Delayed completion is observed without replay.
+            result = module.retire_initial_standby_containers(pins, postgres, root, **options)
+            self.assertEqual(result["count"], 8)
+            self.assertEqual(objects, {database_id: database})
+            self.assertEqual(docker.call_count, 8)
+            observe.assert_called_once()
 
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime

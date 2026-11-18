@@ -501,9 +501,16 @@ def _inspect_prepared(pins, stage, intent, prepared):
     return _digest(receipt)
 
 
-def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt_sha256, assert_no_activation):
-    """Observe a retirement plan while the caller holds the guest mutation lock."""
-    error = "guest_initial_standby_retirement_unconfirmed"
+def _assert_initial_standby_closed(pins, postgres, error):
+    standby = _pg(postgres, INITIAL_STANDBY_CLOSED)
+    expected = ["ha_B", pins.system_id, True, pins.cluster, 1, "A", "B", 1, 1, False, False, True]
+    _need(type(standby) is list and len(standby) == len(expected) + 1
+          and all(type(actual) is type(wanted) and actual == wanted
+                  for actual, wanted in zip(standby[:-1], expected, strict=True))
+          and _lsn(standby[-1]) > 0, error)
+
+
+def _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error):
     pins.validate()
     postgres.validate()
     _need(os.geteuid() == 0 and pins.node == "B" and pins.primary_node == "A" and pins.generation == 1
@@ -513,6 +520,12 @@ def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt
               "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
               "system_id", "postgres_id", "retained_postgres_id",
           )) and postgres.attempt_id == (pins.attempt_id if pins.retained_postgres_id else None), error)
+
+
+def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt_sha256, assert_no_activation):
+    """Observe a retirement plan while the caller holds the guest mutation lock."""
+    error = "guest_initial_standby_retirement_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
     stage = Path(stage)
     prepared = stage / "runtime-prepared.json"
     try:
@@ -544,12 +557,7 @@ def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt
         protected = {key: value for key, value in objects.items() if key not in owned}
         _need(not any(_service(item) in roles for item in protected.values())
               and inventory_sha256(protected) == pins.protected_inventory_sha256, error)
-        standby = _pg(postgres, INITIAL_STANDBY_CLOSED)
-        expected = ["ha_B", pins.system_id, True, pins.cluster, 1, "A", "B", 1, 1, False, False, True]
-        _need(type(standby) is list and len(standby) == len(expected) + 1
-              and all(type(actual) is type(wanted) and actual == wanted
-                      for actual, wanted in zip(standby[:-1], expected, strict=True))
-              and _lsn(standby[-1]) > 0, error)
+        _assert_initial_standby_closed(pins, postgres, error)
         assert_no_activation()
         _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
         return {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
@@ -557,6 +565,78 @@ def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt
                 "protected_inventory_sha256": pins.protected_inventory_sha256}
     except (OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         raise TransitionBlocked(error) from None
+
+
+def retire_initial_standby_containers(pins, postgres, stage, *, runtime_receipt_sha256, plan_sha256,
+                                      assert_no_activation):
+    """Remove only the approved, never-started B app containers under the guest mutation lock."""
+    error = "guest_initial_standby_retirement_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256), error)
+    stage = Path(stage)
+    _directory(stage, 0)
+    journal = stage / "initial-standby-retirement"
+    intent = journal / "plan.json"
+    roles = SERVICES | {"ha-broker"}
+    if not os.path.lexists(intent):
+        if os.path.lexists(journal):
+            _directory(journal, 0)
+            _need(not any(journal.iterdir()), error)
+        plan = observe_initial_standby_retirement(
+            pins, postgres, stage, runtime_receipt_sha256=runtime_receipt_sha256,
+            assert_no_activation=assert_no_activation,
+        )
+        raw = _json_bytes(plan)
+        _need(_digest(raw) == plan_sha256, error)
+        if not os.path.lexists(journal):
+            journal.mkdir(mode=0o700)
+            _fsync_directory(stage)
+        _write(intent, raw, 0o400)
+    raw = _read(intent, 0, {0o400})
+    _need(_digest(raw) == plan_sha256, error)
+    plan = json.loads(raw)
+    owned = plan["owned"]
+    _need(plan == {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                   "protected_inventory_sha256": pins.protected_inventory_sha256,
+                   "runtime_receipt_sha256": runtime_receipt_sha256, "owned": owned}
+          and isinstance(owned, dict) and len(owned) == len(roles)
+          and {entry["role"] for entry in owned.values()} == roles
+          and all(_match(SHA, key) and set(entry) == {"role", "inspect_sha256"}
+                  and _match(SHA, entry["inspect_sha256"]) for key, entry in owned.items()), error)
+
+    def inventory():
+        assert_no_activation()
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+        _assert_initial_standby_closed(pins, postgres, error)
+        objects = _inventory()
+        active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
+        protected = {key: value for key, value in objects.items() if key not in owned}
+        _need(not any(_service(item) in roles for item in protected.values())
+              and inventory_sha256(protected) == pins.protected_inventory_sha256, error)
+        return objects
+
+    for identifier, entry in sorted(owned.items()):
+        objects = inventory()
+        sent = journal / (identifier + ".remove.json")
+        marker = _json_bytes({"plan_sha256": plan_sha256, "container_id": identifier})
+        if os.path.lexists(sent):
+            # A durable dispatch marker with a still-present container is
+            # ambiguous. Require separate settlement evidence before retry.
+            _need(_read(sent, 0, {0o400}) == marker and identifier not in objects,
+                  "guest_initial_standby_removal_unsettled")
+            continue
+        _need(identifier in objects and inventory_sha256({identifier: objects[identifier]}) == entry["inspect_sha256"],
+              error)
+        _write(sent, marker, 0o400)
+        # The daemon must reject a running container. An unknown response is
+        # accepted only through absence readback, never by replaying removal.
+        try:
+            removed = _docker("rm", identifier).decode("ascii").strip()
+        except (TransitionBlocked, OSError, subprocess.TimeoutExpired):
+            removed = None
+        _need(removed in (None, identifier) and identifier not in inventory(),
+              "guest_initial_standby_removal_unsettled")
+    return {"status": "CONTAINERS_RETIRED", "plan_sha256": plan_sha256, "count": len(owned)}
 
 
 def observe_runtime_outcome(pins, stage, *, assert_settled):
