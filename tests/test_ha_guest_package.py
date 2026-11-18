@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
-from ha_control import native_guest_config, native_guest_runtime
+from ha_control import native_guest_config, native_guest_restore, native_guest_runtime
 from ha_control.legacy_writers import TransitionBlocked
 
 spec=importlib.util.spec_from_file_location('ha_guest_package',ROOT/'infra/k8s/ha-package/guest.py')
@@ -298,6 +298,57 @@ class NativeGuestRuntimeTest(unittest.TestCase):
                 self.assertFalse(broker.exists())
                 self.assertFalse(any(ingress.iterdir()))
                 self.assertEqual((journal / "generation-1-broker-config.json").read_bytes(), broker_raw)
+
+    def test_standby_candidate_pins_preserve_non_app_inputs_and_bind_new_attempt(self):
+        module = native_guest_runtime
+        original_config = b"fixture-old"
+        new_config = b"fixture-new"
+        cert_key = "broker/broker.crt"
+        live = {f"apps/{service}/config.json": module._digest(new_config) for service in module.SERVICES}
+        live[cert_key] = "7"*64
+        old = {key: module._digest(original_config) for key in live if key != cert_key} | {cert_key: "7"*64}
+        pins = replace(self.pins("B"), postgres_id="2"*64, inputs_sha256=module._digest(module._json_bytes(old)))
+        postgres = native_guest_restore.RestorePins(
+            boot_sha256=pins.boot_sha256, installation_id=pins.installation_id, inventory_sha256="a"*64,
+            postgres_id=pins.postgres_id, uid=999, gid=999, system_id=pins.system_id,
+            utility_digest="sha256:"+"e"*64, initializer_sha256="0"*64, source_commit=pins.release["source_commit"],
+            plan_sha256=pins.plan_sha256, config_sha256="f"*64, manifest_sha256=pins.manifest_sha256,
+            cluster=pins.cluster, peer_ipv4="192.0.2.10",
+        )
+        binding = module.Binding("a"*64, "1"*64, "b"*64, "c"*64, pins.boot_sha256)
+        backup = b"fixture-broker"
+        cleanup = {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": "c"*64,
+                   "broker_backup_sha256": module._digest(backup), "ingress_count": len(module.SERVICES)}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / pins.attempt_id
+            stage.mkdir()
+            journal = stage / "journal"
+            journal.mkdir()
+            (root / "ingress").mkdir()
+            prepared = module._json_bytes({"broker_sha256": cleanup["broker_backup_sha256"]})
+            (stage / "runtime-prepared.json").write_bytes(prepared)
+            (journal / "generation-1-broker-config.json").write_bytes(backup)
+            for service in module.SERVICES:
+                (journal / (service + ".generation-1-config.json")).write_bytes(original_config)
+            with (patch.object(module.os, "geteuid", return_value=0), patch.object(module, "RUN", root),
+                  patch.object(module, "_initial_retired_guard", return_value=(journal, Mock())),
+                  patch.object(module, "_directory"), patch.object(module, "_preflight_environment",
+                      return_value=("renderer", "spec", None, None, None, "haproxy", "ownership")),
+                  patch.object(module, "_collect_inputs", return_value=(live, None)),
+                  patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+                  patch.object(module, "_write") as write):
+                args = dict(runtime_receipt_sha256=module._digest(prepared), plan_sha256=cleanup["plan_sha256"],
+                            cleanup_receipt=cleanup, assert_no_activation=Mock())
+                candidate, db = module.plan_initial_standby_generation(pins, postgres, stage, binding, **args)
+                self.assertEqual((candidate.primary_node, candidate.generation, candidate.attempt_id), ("B", 2, binding.attempt_id))
+                self.assertEqual(candidate.plan_sha256, pins.plan_sha256)
+                self.assertEqual(candidate.inputs_sha256, module._digest(module._json_bytes(live)))
+                self.assertEqual(db, replace(postgres, attempt_id=binding.attempt_id))
+                live[cert_key] = "6"*64
+                with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_generation_unconfirmed"):
+                    module.plan_initial_standby_generation(pins, postgres, stage, binding, **args)
+                write.assert_not_called()
 
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime

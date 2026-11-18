@@ -1,7 +1,7 @@
 """Prepare the exact VM guest app and broker containers in the stopped state."""
 
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -20,6 +20,7 @@ from . import native_guest_config as config
 from .legacy_writers import TransitionBlocked, _need
 from .native_guest_restore import BOOT_ID, INSTALLATION, SHA, _directory, _docker, _fsync_directory, _inventory
 from .native_guest_restore import _json_bytes, _lsn, _pg, active_postgres, inventory_sha256
+from .native_stdio_bridge import Binding
 
 
 ROOT = Path("/etc/n100-ha")
@@ -131,7 +132,7 @@ def _traversable(path, groups):
           "guest_runtime_mount_inaccessible")
 
 
-def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False):
+def _collect_inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False):
     digests = {}
 
     def read(path, uid=0, *, private=False, gids=None):
@@ -198,8 +199,13 @@ def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False)
         if service == "homeops-executor":
             _need(read(root / "runtime-ownership.conf", gids=groups) == runtime_ownership.encode(),
                   "guest_runtime_ownership_config_mismatch")
+    return digests, (identity, clients, ingress_certificate, broker_passfile)
+
+
+def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False):
+    digests, inputs = _collect_inputs(pins, renderer, spec, haproxy, runtime_ownership, prepared=prepared)
     _need(_digest(_json_bytes(digests)) == pins.inputs_sha256, "guest_runtime_inputs_pin_mismatch")
-    return identity, clients, ingress_certificate, broker_passfile
+    return inputs
 
 
 def _environment(rows):
@@ -381,7 +387,7 @@ def _created(pins, project, layouts, images, previous=None):
     return owned
 
 
-def _preflight(pins, stage, *, prepared=False):
+def _preflight_environment(pins, stage, *, prepared=False):
     _directory(stage, 0)
     _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_runtime_boot_changed")
     identity = json.loads(_read(INSTALLATION, 0, {0o400, 0o600}))
@@ -408,7 +414,14 @@ def _preflight(pins, stage, *, prepared=False):
           "guest_runtime_engine_socket_mismatch")
     engine_id = _docker("info", "--format", "{{.ID}}").decode().strip()
     _need(_digest(engine_id.encode()) == pins.engine_id_sha256, "guest_runtime_engine_changed")
-    inputs = _inputs(pins, renderer, spec, haproxy, review["runtime_ownership_file"], prepared=prepared)
+    return renderer, spec, compose, images, engine_id, haproxy, review["runtime_ownership_file"]
+
+
+def _preflight(pins, stage, *, prepared=False):
+    renderer, spec, compose, images, engine_id, haproxy, ownership = _preflight_environment(
+        pins, stage, prepared=prepared,
+    )
+    inputs = _inputs(pins, renderer, spec, haproxy, ownership, prepared=prepared)
     return renderer, spec, compose, images, engine_id, inputs
 
 
@@ -830,6 +843,49 @@ def clean_initial_standby_runtime_paths(pins, postgres, stage, *, runtime_receip
     guard()
     return {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_sha256,
             "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES)}
+
+
+def plan_initial_standby_generation(pins, postgres, stage, binding, *, runtime_receipt_sha256,
+                                    plan_sha256, cleanup_receipt, assert_no_activation):
+    """Derive B/2 pins for a fresh attempt from validated installed inputs, without writing them."""
+    error = "guest_initial_standby_generation_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(type(binding) is Binding and _match(SHA, plan_sha256), error)
+    binding.fields()
+    stage = Path(stage)
+    _need(stage.name == pins.attempt_id and binding.attempt_id != pins.attempt_id
+          and binding.boot("B") == pins.boot_sha256
+          and not os.path.lexists(stage.parent / binding.attempt_id), error)
+    journal, guard = _initial_retired_guard(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
+    )
+    guard()
+    prepared = _read(stage / "runtime-prepared.json", 0, {0o600})
+    _need(_digest(prepared) == runtime_receipt_sha256, error)
+    broker_pin = json.loads(prepared)["broker_sha256"]
+    _need(_match(SHA, broker_pin) and cleanup_receipt == {
+        "status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_sha256,
+        "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES),
+    } and _digest(_read(journal / "generation-1-broker-config.json", 0, {0o400})) == broker_pin, error)
+    ingress = RUN / "ingress"
+    _directory(ingress, 0, private=False)
+    _need(not any(ingress.iterdir()), error)
+    candidate = replace(pins, attempt_id=binding.attempt_id, primary_node="B", generation=2)
+    candidate.validate()
+    renderer, spec, _, _, _, haproxy, ownership = _preflight_environment(candidate, stage)
+    digests, _ = _collect_inputs(candidate, renderer, spec, haproxy, ownership)
+    previous_configs = {
+        f"apps/{service}/config.json": _digest(_read(journal / (service + ".generation-1-config.json"), 0, {0o400}))
+        for service in SERVICES
+    }
+    _need(_digest(_json_bytes(digests | previous_configs)) == pins.inputs_sha256, error)
+    candidate = replace(candidate, inputs_sha256=_digest(_json_bytes(digests)))
+    candidate.validate()
+    target_db = replace(postgres, attempt_id=binding.attempt_id)
+    target_db.validate()
+    guard()
+    _need(not any(ingress.iterdir()) and not os.path.lexists(stage.parent / binding.attempt_id), error)
+    return candidate, target_db
 
 
 def observe_runtime_outcome(pins, stage, *, assert_settled):
