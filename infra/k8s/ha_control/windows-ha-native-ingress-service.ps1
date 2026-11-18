@@ -22,6 +22,19 @@ function Digest([byte[]]$Bytes){
     finally{$hash.Dispose()}
 }
 
+function Assert-TunnelCredential($Credential,[string]$TunnelId){
+    $keys=@('AccountTag','TunnelSecret','TunnelID')
+    Require ($Credential -is [Collections.Generic.Dictionary[string,object]])
+    if($Credential.ContainsKey('Endpoint')){
+        $keys+=@('Endpoint')
+        Require ($Credential['Endpoint'] -is [string])
+    }
+    Assert-KeysExact $Credential $keys
+    Require ($Credential['TunnelID'] -is [string] -and $Credential['TunnelID'] -ceq $TunnelId -and
+        $Credential['AccountTag'] -is [string] -and $Credential['AccountTag'] -cmatch '\A[0-9a-f]{32}\z' -and
+        $Credential['TunnelSecret'] -is [string] -and [Convert]::FromBase64String($Credential['TunnelSecret']).Length -eq 32)
+}
+
 function Assert-ExpectedProfile($Preliminary,[string]$Expected){
     Require ($Expected -cmatch '\A[a-f0-9]{64}\z' -and $Preliminary.profile_sha256 -is [string] -and
         $Preliminary.profile_sha256 -ceq $Expected -and $Preliminary.support_sha256 -is [string] -and
@@ -359,10 +372,7 @@ try{
         Assert-Routes ([IO.File]::ReadAllBytes((Join-Path $stageRoot 'Caddyfile'))) ($utf8.GetBytes($ingressJson)) $profile['route_sha256']
         $credentials=Read-Held $credentialPath $spec['tunnel_credentials_sha256'] 4096
         $credential=[TrustedStoppedV1.Json]::Object($utf8.GetString($credentials),4096)
-        Assert-KeysExact $credential @('AccountTag','TunnelSecret','TunnelID')
-        Require ($credential['TunnelID'] -ceq $config['tunnel'] -and $credential['AccountTag'] -is [string] -and
-            $credential['AccountTag'] -cmatch '\A[0-9a-f]{32}\z' -and $credential['TunnelSecret'] -is [string] -and
-            [Convert]::FromBase64String($credential['TunnelSecret']).Length -eq 32)
+        Assert-TunnelCredential $credential $config['tunnel']
     }
 
     $caddy='N100HA_Caddy_'+$spec['profile_sha256'].Substring(0,24)

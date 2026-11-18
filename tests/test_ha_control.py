@@ -94,9 +94,36 @@ foreach($name in @('Assert-Origins','Assert-Listeners','Assert-LegacyConnectorEx
  if($name -cnotin $functions){throw 'frontend_contract_missing'}
 }
 foreach($fn in $ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-    $node.Name -cin @('Require','Assert-ServiceRecoveryDisabled','Assert-ExpectedProfile','Assert-KeysExact','Assert-LegacyConnectorExclusion')},$false)){
+    $node.Name -cin @('Require','Assert-ServiceRecoveryDisabled','Assert-ExpectedProfile','Assert-KeysExact','Assert-LegacyConnectorExclusion','Assert-TunnelCredential')},$false)){
  . ([scriptblock]::Create($fn.Extent.Text))
 }
+$tunnel='11111111-1111-4111-8111-111111111111'
+$credential=[Collections.Generic.Dictionary[string,object]]::new()
+$credential['AccountTag']='a'*32
+$credential['TunnelSecret']=[Convert]::ToBase64String([byte[]]::new(32))
+$credential['TunnelID']=$tunnel
+Assert-TunnelCredential $credential $tunnel
+foreach($endpoint in @('','us')){
+ $credential['Endpoint']=$endpoint
+ Assert-TunnelCredential $credential $tunnel
+ if($credential['Endpoint'] -cne $endpoint){throw 'frontend_credential_rewritten'}
+}
+foreach($bad in @($null,42,@('us'),@{region='us'})){
+ $credential['Endpoint']=$bad
+ $rejected=$false
+ try{Assert-TunnelCredential $credential $tunnel}catch{$rejected=$true}
+ if(-not $rejected){throw 'frontend_credential_bad_endpoint'}
+}
+$credential.Remove('Endpoint')|Out-Null
+$credential['Unexpected']='fixture'
+$rejected=$false
+try{Assert-TunnelCredential $credential $tunnel}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_credential_unknown_key'}
+$credential.Remove('Unexpected')|Out-Null
+$credential['TunnelSecret']='malformed-base64'
+$rejected=$false
+try{Assert-TunnelCredential $credential $tunnel}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_credential_bad_secret'}
 $rejected=$false
 try{Assert-LegacyConnectorExclusion $null 'Ubuntu-24.04'}catch{$rejected=$true}
 if(-not $rejected){throw 'frontend_connector_without_owner'}
