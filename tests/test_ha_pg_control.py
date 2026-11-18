@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
+from ha_control import native_stdio_bridge
 from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, InitialPgLease, InitialPgLeaseRecovery
 from ha_control.native_guest_activation import ServingGeneration
@@ -2176,6 +2177,85 @@ class InitialLeaseServiceTests(unittest.TestCase):
             windows.side_effect = [heartbeat, heartbeat | {'windows_generation_sha256': 'd'*64}]
             with self.assertRaisesRegex(native.bridge.BridgeRejected, 'native_initial_recovery_publication_unconfirmed'):
                 lease.verify_recovery_publication(windows, recovery, deadline, observe_pair=paired, assert_guard=guard)
+
+    def continuity_fixture(self, *, change=None):
+        from ha_control import native_windows_activation as native
+        custody = SimpleNamespace(binding=SimpleNamespace(plan_sha256='1'*64, attempt_id='2'*64),
+                                  live_sha256='3'*64)
+        lease = native.WindowsActivationLease(custody, r'C:\fixture\binding.json',
+                                              dict(first_write_proof_sha256='4'*64, service_instance_sha256='5'*64))
+        recovery = dict(attempt_id='6'*64, predecessor_terminal_sha256='7'*64, predecessor_service_sha256='8'*64)
+        before = dict(windows_generation=1, service_incarnation_sha256='a'*64, heartbeat_sequence=10,
+                      live_lease_sha256='b'*64)
+        after = before | {'heartbeat_sequence': 11, 'live_lease_sha256': 'd'*64}
+        pair = dict(proof_sha256='c'*64, lease_sha256='e'*64, valid_until_monotonic=3.0)
+        clock = [0.0]
+        calls = []
+        if callable(change):
+            change(before, after, pair)
+
+        def windows(source, deadline):
+            calls.append(source)
+            if len(calls) == 2:
+                if change == 'late_after':
+                    clock[0] = 2.1
+                return after
+            return before
+
+        def paired(**values):
+            self.assertEqual(values, {'challenge': 'f'*64, 'service_incarnation_sha256': before['service_incarnation_sha256'],
+                                      'deadline': 10.0})
+            if change == 'late_pair':
+                clock[0] = 2.1
+            return pair
+
+        return native, lease, recovery, windows, paired, clock
+
+    def run_continuity_fixture(self, *, change=None, deadline=10.0):
+        native, lease, recovery, windows, paired, clock = self.continuity_fixture(change=change)
+        with patch.object(native, 'fixed_script', return_value='fixture-continuity') as source, \
+                patch.object(native.secrets, 'token_hex', return_value='f'*64), \
+                patch.object(native.time, 'monotonic', side_effect=lambda: clock[0]):
+            result = lease.verify_recovery_continuity(windows, recovery, deadline,
+                                                      observe_pair=paired, assert_guard=lambda: None)
+        self.assertIs(source.call_args.args[2]['RecoveryContinuity'], True)
+        return result
+
+    def test_continuity_accepts_advanced_heartbeat_and_new_current_paired_lease(self):
+        self.assertRegex(self.run_continuity_fixture(), r'^[a-f0-9]{64}$')
+
+    def test_continuity_rejects_changed_incarnation_backward_sequence_and_bad_native_fields(self):
+        for field, value in (('service_incarnation_sha256', '0'*64), ('heartbeat_sequence', 9),
+                             ('heartbeat_sequence', True), ('windows_generation', True),
+                             ('live_lease_sha256', None)):
+            def change(before, after, pair):
+                after[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(change=change)
+
+    def test_continuity_rejects_bad_pair_proof_and_unbounded_or_expired_validity(self):
+        for field, value in (('proof_sha256', None), ('lease_sha256', 'invalid'),
+                             ('valid_until_monotonic', True), ('valid_until_monotonic', float('nan')),
+                             ('valid_until_monotonic', float('inf')), ('valid_until_monotonic', 6),
+                             ('valid_until_monotonic', 1)):
+            def change(before, after, pair):
+                pair[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(change=change)
+
+    def test_continuity_rejects_pair_aging_during_callback_or_native_after(self):
+        for mode in ('late_pair', 'late_after'):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(change=mode)
+
+    def test_continuity_rejects_invalid_caller_deadlines(self):
+        for deadline in (None, True, float('nan'), float('inf'), 0):
+            with self.subTest(deadline=deadline), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(deadline=deadline)
 
     def test_recovery_marker_uses_broker_without_opening_the_marker_file(self):
         from ha_control import initial_lease_service as service

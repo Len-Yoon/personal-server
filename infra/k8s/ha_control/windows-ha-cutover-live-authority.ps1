@@ -9,6 +9,7 @@ param(
     [string]$RecoveryPredecessorServiceSha256,
     [string]$TransitionHandoffSha256,
     [string]$TransitionBoundarySha256,
+    [switch]$RecoveryContinuity,
     [switch]$Retire,
     [switch]$ObserveRetired,
     [switch]$ReadPriorServiceArgs,
@@ -331,6 +332,7 @@ try {
     $recovering = $PSBoundParameters.ContainsKey('RecoveryAttemptId') -or
         $PSBoundParameters.ContainsKey('RecoveryPredecessorTerminalSha256') -or
         $PSBoundParameters.ContainsKey('RecoveryPredecessorServiceSha256')
+    if ($RecoveryContinuity -and -not $recovering) { throw 'live_authority_recovery_scope' }
     if ($recovering -and ($ReadRejoinReceipt -or $ReadClosureReceipt -or $ReadPriorServiceArgs -or $Retire -or
             $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256 -or
             $ExpectedServiceInstanceSha256 -cnotmatch $pattern -or $RecoveryAttemptId -cnotmatch $pattern -or
@@ -496,6 +498,14 @@ try {
                 $confirmedAge + $record.proof_elapsed_ms -ge 4800) {
                 throw 'live_authority_recovery_scope'
             }
+        }
+        if ($RecoveryContinuity) {
+            # The protected binding fixes the original published proof and SCM
+            # incarnation. Fresh validated heartbeats may advance around a DB read.
+            [ordered]@{windows_generation=1;
+                service_incarnation_sha256=(Get-Digest ($inputFile.raw + ':continuity:' + $PriorSha256));
+                heartbeat_sequence=$record.sequence;live_lease_sha256=$record.lease_proof_sha256}|ConvertTo-Json -Compress
+            return
         }
         [ordered]@{windows_generation=1;windows_generation_sha256=(Get-Digest ($inputFile.raw + ':' + $saved.raw + ':' + $PriorSha256));
             live_lease_sha256=$record.lease_proof_sha256}|ConvertTo-Json -Compress

@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
@@ -373,6 +374,74 @@ class WindowsActivationLease:
         assert_guard()
         bridge._remaining(deadline)
         return bridge._digest(bridge._bytes({"challenge": challenge, "windows": before, "postgres_sha256": paired}))
+
+    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard):
+        """Bind a current paired lease to the same continuously serving recovery process.
+
+        The first publication remains subject to verify_recovery_publication.
+        observe_pair must independently verify both current database stamps and
+        bind its proof to this challenge, incarnation and current lease hash.
+        Its validity deadline uses this caller's monotonic clock, anchored at or
+        before the first actual DB sample, including all transport elapsed time.
+        """
+        error = "native_initial_recovery_continuity_unconfirmed"
+        bridge._need(type(recovery) is dict and set(recovery) == {
+                         "attempt_id", "predecessor_terminal_sha256", "predecessor_service_sha256"}
+                     and all(bridge._hash(pin) for pin in recovery.values())
+                     and bridge._hash(self.service_instance_sha256)
+                     and callable(powershell) and callable(observe_pair) and callable(assert_guard)
+                     and type(deadline) in (int, float) and math.isfinite(deadline)
+                     and time.monotonic() < deadline, error)
+        binding = self.custody.binding
+        challenge = secrets.token_hex(32)
+        source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
+            'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            'AttemptId': binding.attempt_id, 'PriorSha256': challenge,
+            'ExpectedServiceInstanceSha256': self.service_instance_sha256,
+            'RecoveryAttemptId': recovery['attempt_id'],
+            'RecoveryPredecessorTerminalSha256': recovery['predecessor_terminal_sha256'],
+            'RecoveryPredecessorServiceSha256': recovery['predecessor_service_sha256'],
+            'RecoveryContinuity': True,
+        })
+
+        def read():
+            assert_guard()
+            bridge._remaining(deadline)
+            value = powershell(source, deadline)
+            bridge._need(type(value) is dict and set(value) == {
+                             'windows_generation', 'service_incarnation_sha256', 'heartbeat_sequence',
+                             'live_lease_sha256'}
+                         and type(value['windows_generation']) is int and value['windows_generation'] == 1
+                         and type(value['heartbeat_sequence']) is int and value['heartbeat_sequence'] > 0
+                         and bridge._hash(value['service_incarnation_sha256'])
+                         and bridge._hash(value['live_lease_sha256']), error)
+            bridge._remaining(deadline)
+            return value.copy()
+
+        before = read()
+        pair_started = time.monotonic()
+        paired = observe_pair(challenge=challenge, service_incarnation_sha256=before['service_incarnation_sha256'],
+                              deadline=deadline)
+        bridge._need(type(paired) is dict and set(paired) == {
+                         'proof_sha256', 'lease_sha256', 'valid_until_monotonic'}
+                     and bridge._hash(paired['proof_sha256']) and bridge._hash(paired['lease_sha256'])
+                     and type(paired['valid_until_monotonic']) in (int, float)
+                     and math.isfinite(paired['valid_until_monotonic'])
+                     and paired['valid_until_monotonic'] <= pair_started + 5, error)
+
+        def fresh():
+            now = time.monotonic()
+            bridge._need(now < deadline and paired['valid_until_monotonic'] - now > 1, error)
+
+        fresh()
+        after = read()
+        bridge._need(after['service_incarnation_sha256'] == before['service_incarnation_sha256']
+                     and after['heartbeat_sequence'] >= before['heartbeat_sequence'], error)
+        fresh()
+        assert_guard()
+        fresh()
+        return bridge._digest(bridge._bytes({'challenge': challenge, 'before': before, 'after': after,
+                                            'postgres': paired}))
 
     def run_recovery_quiescence_once(self, guests, issued, observation, deadline, *, directory, store_sha256,
                                      recovery_plan_sha256, predecessor, assert_guard, read_database_closed):
