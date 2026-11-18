@@ -13,6 +13,7 @@ SOURCES = tuple("infra/k8s/ha_control/" + name for name in (
     "initial_windows_gate.py", "windows-ha-start-initial-service.ps1", "windows-ha-start-lease-observer.ps1",
     "windows-ha-stage-initial-activation.ps1",
     "windows_lease_pipe.py", "windows-ha-lease-proof-client.ps1", "windows-ha-lease-proof-server.ps1",
+    "windows-ha-recovery-proof-protocol.ps1",
     "windows-ha-wsl-lease-observer.ps1",
     "cli.py", "prepare.py", "windows-fence.ps1",
     "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py", "legacy_cutover.py", "legacy_writers.py", "launcher.py",

@@ -53,6 +53,44 @@ if($s -cne 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'){thr
 'portable-only'
 '''),'portable-only')
 
+    def test_recovery_runtime_requires_separate_identity_and_exact_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)
+            fixture(folder)
+            self.ps(r'''
+$path=Join-Path $env:FIXTURE 'manifest.json'
+$value=ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -AsHashtable
+$legacy=$value.service_name
+$attempt='c'*64
+$value.schema_version=2
+$value.recovery_attempt_id=$attempt
+$value.reservation_receipt_sha256='d'*64
+$value.service_name=[HaRuntimeStageV1.Rules]::ServiceName($attempt)
+$value.service_sid=[HaRuntimeStageV1.Rules]::ServiceSid($value.service_name)
+$spec=[HaRuntimeStageV1.Rules]::Manifest((ConvertTo-Json $value -Depth 10 -Compress))
+if($spec.RecoveryAttempt -cne $attempt -or $spec.InstallationId -cne $value.installation_id -or
+   $spec.ServiceName -ceq $legacy -or $spec.HostStaged){throw 'recovery_identity_mismatch'}
+$receipt=[HaRuntimeStageV1.Json]::Object((ConvertTo-Json @{
+ format='fresh-recovery-service-reservation-receipt-v1';installation_id=$value.installation_id;recovery_attempt_id=$attempt;
+ ready_to_start=$false;args_present=$false;runtime_authority_issued=$false;service_started=$false;namespace_changed=$false
+} -Compress),32768)
+Assert-RecoveryRuntimeReceipt $receipt $spec
+$receipt['service_started']=$true
+try{Assert-RecoveryRuntimeReceipt $receipt $spec;throw 'running_receipt_accepted'}catch{
+ if($_.Exception.Message -cne 'runtime_stage_recovery_receipt'){throw}
+}
+function Reject-Manifest {
+ $ok=$false
+ try{$null=[HaRuntimeStageV1.Rules]::Manifest((ConvertTo-Json $value -Depth 10 -Compress))}catch{$ok=$true}
+ if(-not $ok){throw 'unsafe_recovery_manifest'}
+}
+$value.service_name=$legacy
+$value.service_sid=[HaRuntimeStageV1.Rules]::ServiceSid($legacy)
+Reject-Manifest
+$value.recovery_attempt_id=$value.installation_id.Substring(0,24)+('e'*40)
+Reject-Manifest
+''', folder)
+
     def test_clr_parent_walk_uses_real_filesystem_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp);(folder/'leaf').write_text('fixture')
