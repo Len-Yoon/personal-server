@@ -124,6 +124,12 @@ finally { $mac.Dispose() }
                                  key=key, monotonic=lambda: 2)
         legacy = pipe.ProofPins("a"*64,"b"*64,1,"c"*64,sid,"d"*64,"e"*64).challenge()
         self.assertEqual(pipe.verify_response(response(legacy), legacy, 2, key=key, monotonic=lambda: 0), "1"*64)
+        marker = legacy | {"marker_sha256": "f" * 64}
+        self.assertEqual(pipe.verify_response(response(marker), marker, 2, key=key, monotonic=lambda: 0), "1"*64)
+        with self.assertRaises(ValueError):
+            pipe.verify_response(response(marker), legacy, 2, key=key, monotonic=lambda: 0)
+        with self.assertRaises(ValueError):
+            pipe.verify_response(response(legacy), marker, 2, key=key, monotonic=lambda: 0)
         with self.assertRaises(ValueError):
             pipe.verify_response(response(legacy), challenge, 2, key=key, monotonic=lambda: 0)
 
@@ -159,18 +165,39 @@ $script:ClosureMarker=@{sha256='d'*64}
 $script:ClosureBoot='e'*64
 $script:ClosureVmA=[guid]::NewGuid()
 $script:ClosureVmB=[guid]::NewGuid()
-$script:ClosurePlan=@{boot_ticks='fixture'}
+$script:ClosurePlan=@{boot_ticks='fixture';authority_cluster='fixture';authority_source_commit='9'*40}
 $challenge=[pscustomobject]@{nonce='1'*32;plan_sha256='f'*64;attempt_id='2'*64;generation=1;
     windows_boot_sha256=$script:ClosureBoot;wsl_boot_sha256='3'*64;collector_sha256='4'*64}
 function Get-HaReactivationHash { return '5'*64 }
+$markerPayload=@{cluster='fixture';source_commit='9'*40;plan_sha256=$challenge.plan_sha256;
+    attempt_id=$challenge.attempt_id;generation=1}
 function Assert-HaOwnedCutoverMarker($Marker,[switch]$ReadContent) {
-    if($ReadContent){return (ConvertTo-Json -InputObject $challenge -Compress)}
+    if($ReadContent){return (ConvertTo-Json -InputObject $markerPayload -Compress)}
 }
 function Assert-HaWslOfflineReactivationClosed { $script:reads++ }
 function Assert-HaWslWorkloadsAbsent {
     $script:reads++
     if($script:reappeared){throw 'fixture_wsl_restarted'}
 }
+$markerCommand = [pscustomobject]@{Challenge=[pscustomobject]@{
+    marker_sha256=$script:ClosureMarker.sha256;nonce=$challenge.nonce;plan_sha256=$challenge.plan_sha256;
+    attempt_id=$challenge.attempt_id;generation=1;windows_boot_sha256=$challenge.windows_boot_sha256
+};Progress=@{};MarkerSha256=$script:ClosureMarker.sha256;ReactivationPlanSha256=$challenge.plan_sha256;
+    DeadlineTimestamp=[Diagnostics.Stopwatch]::GetTimestamp()+[long]([Diagnostics.Stopwatch]::Frequency*2.5)}
+$script:ClosureMarkerAttempt=$null
+try { $null=Get-HaLeaseProof $markerCommand; throw 'fixture_legacy_marker' }
+catch { if ($_.Exception.Message -cne 'lease_proof_callback_scope'){throw} }
+$script:ClosureMarkerAttempt='6'*64
+$markerOnly=Get-HaLeaseProof $markerCommand
+if($markerOnly.marker_sha256 -cne $script:ClosureMarker.sha256 -or 'wsl_writers_closed' -cin $markerOnly.PSObject.Properties.Name){throw 'fixture_marker_only'}
+$markerPayload.cluster='another'
+try { $null=Get-HaLeaseProof $markerCommand; throw 'fixture_bad_marker' }
+catch { if ($_.Exception.Message -cne 'lease_proof_callback_scope'){throw} }
+$markerPayload.cluster='fixture'
+$markerPayload.plan_sha256=@($challenge.plan_sha256)
+try { $null=Get-HaLeaseProof $markerCommand; throw 'fixture_array_pin' }
+catch { if ($_.Exception.Message -cne 'lease_proof_callback_scope'){throw} }
+$markerPayload.plan_sha256=$challenge.plan_sha256
 $vm=[RunspaceFactory]::CreateRunspace()
 $vm.Open()
 try {
@@ -332,7 +359,7 @@ exit 0
         callback = (scripts / "windows-ha-wsl-lease-observer.ps1").read_text()
         proof = callback.split("function Get-HaLeaseProof", 1)[1].split("function Get-HaOfflineLeaseProof", 1)[0]
         steps = (
-            "Assert-HaOwnedCutoverMarker $script:ClosureMarker",
+            "Assert-HaLeaseMarkerScope $request",
             "Assert-HaReactivationInfrastructureClosed $script:ClosurePlan",
             "$processPending = $processObserver.BeginInvoke()",
             "Assert-HaReactivationHost $script:ClosurePlan",
@@ -344,7 +371,8 @@ exit 0
         )
         positions = [proof.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
-        self.assertEqual(proof.count("Assert-HaOwnedCutoverMarker $script:ClosureMarker"), 2)
+        self.assertEqual(proof.count("Assert-HaLeaseMarkerScope $request"), 2)
+        self.assertEqual(proof.count("Assert-HaOwnedCutoverMarker $script:ClosureMarker"), 1)
         self.assertIn("[Math]::Min(1800, (Get-HaClosureRemaining $Context) - 125)", proof)
 
     def test_response_has_bounded_transport_time_and_checks_before_writing(self):

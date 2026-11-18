@@ -34,6 +34,7 @@ $clock = $null
 $mac = $null
 $outcome = @{ recorded = $false }
 $scope = 'n100ha-legacy-closure-v1'
+$markerProofEnabled = $false
 $recovering = $PSBoundParameters.ContainsKey('RecoveryProtocolPath') -or
     $PSBoundParameters.ContainsKey('RecoveryProtocolSha256')
 if ($recovering) { $scope = 'n100ha-initial-recovery-v1' }
@@ -255,6 +256,13 @@ function New-Challenge([string]$Raw) {
         nonce=$fields.nonce; plan_sha256=$PlanSha256; scope=$scope; service_sid=$ServiceSid
         windows_boot_sha256=$WindowsBootSha256; wsl_boot_sha256=$WslBootSha256
     }
+    if ('marker_sha256' -cin $fields.PSObject.Properties.Name) {
+        if (-not $markerProofEnabled -or $fields.marker_sha256 -isnot [string] -or
+            $fields.marker_sha256 -cne $MarkerSha256) {
+            throw 'lease_proof_binding'
+        }
+        $expected.Insert(3, 'marker_sha256', $MarkerSha256)
+    }
     if ((ConvertTo-Json -InputObject $expected -Compress) -cne $Raw) { throw 'lease_proof_binding' }
     return $expected
 }
@@ -284,6 +292,14 @@ function Invoke-ObservedClosure($Challenge, $Progress) {
         if ($worker.HadErrors -or $rows.Count -ne 1) { throw 'lease_proof_observation' }
         $fact = $rows[0]
         $names = @($fact.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+        if ($Challenge.Contains('marker_sha256')) {
+            if (($names -join ',') -cne 'marker_sha256,nonce,observation_sha256' -or
+                $fact.nonce -cne $Challenge.nonce -or $fact.marker_sha256 -cne $MarkerSha256 -or
+                $fact.observation_sha256 -isnot [string] -or $fact.observation_sha256 -cnotmatch $hashPattern) {
+                throw 'lease_proof_observation'
+            }
+            return $fact.observation_sha256
+        }
         $expectedNames = @('collector_sha256','generation','marker_sha256','nonce','observation_sha256',
             'reactivation_plan_sha256','recovery_commands_settled','windows_boot_sha256','windows_reactivation_closed',
             'wsl_boot_sha256','wsl_writers_closed')
@@ -399,6 +415,16 @@ try {
                 $output[0].Name -cne 'Get-HaRecoveryObservation') { throw 'recovery_proof_callback' }
         } finally { $init.Dispose() }
     } else {
+        if ('recovery_marker_attempt_id' -cin $inputConfig.PSObject.Properties.Name) {
+            $markerAttempt = $inputConfig.recovery_marker_attempt_id
+            if ($markerAttempt -isnot [string] -or $markerAttempt -cnotmatch $hashPattern -or
+                $markerAttempt -ceq $AttemptId) { throw 'lease_proof_binding' }
+            $markerService = 'N100HA_' + $markerAttempt.Substring(0,24) + '_controller'
+            $markerSid = [Security.Principal.NTAccount]::new('NT SERVICE',$markerService).
+                Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($markerSid -cne $ServiceSid) { throw 'lease_proof_binding' }
+            $markerProofEnabled = $true
+        }
         if ('closure_mode' -cin $inputConfig.PSObject.Properties.Name -and (
             $inputConfig.closure_mode -isnot [string] -or
             $inputConfig.closure_mode -cne 'windows-offline-v1' -or $CollectorSha256 -cne $CallbackSha256)) {

@@ -228,6 +228,14 @@ class PersistentLeaseProofClient:
 
     def request(self, deadline):
         """Return the fresh observation SHA using the original caller monotonic deadline."""
+        return self._request(deadline)
+
+    def request_marker(self, deadline, marker_sha256):
+        """Read the protected marker through the legacy-closure broker."""
+        _require(type(self.pins) is ProofPins and type(marker_sha256) is str and SHA.fullmatch(marker_sha256))
+        return self._request(deadline, marker_sha256=marker_sha256)
+
+    def _request(self, deadline, *, marker_sha256=None):
         _require(self._lock.acquire(blocking=False))
         stage = "legacy_pipe_client_unavailable"
         try:
@@ -235,6 +243,8 @@ class PersistentLeaseProofClient:
             deadline = min(deadline, self.monotonic() + RESPONSE_SECONDS)
             stage = "legacy_pipe_request_rejected"
             challenge = self.pins.challenge()
+            if marker_sha256 is not None:
+                challenge['marker_sha256'] = marker_sha256
             raw = json.dumps(challenge, separators=(",", ":"), sort_keys=True).encode("ascii")
             budget = int((deadline - self.monotonic()) * 1000)
             _require(budget > 0)

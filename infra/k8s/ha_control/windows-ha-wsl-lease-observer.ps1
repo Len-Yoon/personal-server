@@ -4,6 +4,14 @@ $ErrorActionPreference = 'Stop'
 
 function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha, [string]$CollectorSha) {
     $fields = @($InputConfig.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    $markerAttempt = $null
+    if ('recovery_marker_attempt_id' -cin $fields) {
+        $markerAttempt = $InputConfig.recovery_marker_attempt_id
+        if ($markerAttempt -isnot [string] -or $markerAttempt -cnotmatch '\A[a-f0-9]{64}\z') {
+            throw 'lease_proof_callback_scope'
+        }
+        $fields = @($fields | Where-Object { $_ -cne 'recovery_marker_attempt_id' })
+    }
     $offline = 'closure_mode' -cin $fields
     if ($offline) {
         if ($InputConfig.closure_mode -isnot [string] -or
@@ -53,6 +61,13 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
     if ((Get-HaReactivationHash ([string]$boot)) -cne $WindowsBootSha) { throw 'lease_proof_host_boot_changed' }
     $plan = (ConvertFrom-Json -InputObject $PlanText).windows_reactivation
     $authority = Get-HaCutoverAuthority $plan
+    if ($null -ne $markerAttempt) {
+        $recoveryName = 'N100HA_' + $markerAttempt.Substring(0,24) + '_controller'
+        $recoverySid = [Security.Principal.NTAccount]::new('NT SERVICE',$recoveryName).
+            Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($recoverySid -ceq $authority.controller.Value) { throw 'lease_proof_callback_scope' }
+    }
+    $script:ClosureMarkerAttempt = $markerAttempt
     $path = Join-Path $authority.directory 'ha-controller-owner.json'
     $security = [Security.AccessControl.FileSecurity]::new()
     $security.SetOwner($authority.admins)
@@ -121,6 +136,23 @@ function Get-HaClosureRemaining($Context) {
     return $remaining
 }
 
+function Assert-HaLeaseMarkerScope($Request, [switch]$StrictRecord) {
+    $markerText = Assert-HaOwnedCutoverMarker $script:ClosureMarker -ReadContent
+    $marker = ConvertFrom-Json -InputObject $markerText
+    if ($StrictRecord -and (
+        (@($marker.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+            'attempt_id,cluster,generation,plan_sha256,source_commit' -or
+        $marker.attempt_id -isnot [string] -or $marker.plan_sha256 -isnot [string] -or
+        $marker.cluster -isnot [string] -or $marker.cluster -cne $script:ClosurePlan.authority_cluster -or
+        $marker.source_commit -isnot [string] -or $marker.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+        $marker.source_commit -cne $script:ClosurePlan.authority_source_commit -or
+        ($marker.generation -isnot [int] -and $marker.generation -isnot [long]))) {
+        throw 'lease_proof_callback_scope'
+    }
+    if ($marker.plan_sha256 -cne $Request.plan_sha256 -or $marker.attempt_id -cne $Request.attempt_id -or
+        $marker.generation -ne $Request.generation) { throw 'lease_proof_callback_scope' }
+}
+
 function Get-HaLeaseProof($Context) {
     $Context.Progress.step = 'request'
     $request = $Context.Challenge
@@ -131,6 +163,17 @@ function Get-HaLeaseProof($Context) {
     if ($request.windows_boot_sha256 -cne $script:ClosureBoot -or
         $Context.MarkerSha256 -cne $script:ClosureMarker.sha256 -or $Context.ReactivationPlanSha256 -cne $nativePin) {
         throw 'lease_proof_callback_scope'
+    }
+    if ('marker_sha256' -cin $request.PSObject.Properties.Name) {
+        if ($null -eq $script:ClosureMarkerAttempt -or $request.marker_sha256 -cne $script:ClosureMarker.sha256) {
+            throw 'lease_proof_callback_scope'
+        }
+        Assert-HaLeaseMarkerScope $request -StrictRecord
+        $null = Get-HaClosureRemaining $Context
+        return [pscustomobject]@{
+            nonce=$request.nonce; marker_sha256=$request.marker_sha256
+            observation_sha256=Get-HaReactivationHash ('marker:' + $request.nonce + ':' + $request.marker_sha256)
+        }
     }
     if ($script:ClosureOffline) { return (Get-HaOfflineLeaseProof $Context) }
     $challenge = Get-HaReactivationHash ($request.nonce + ':' + $request.plan_sha256 + ':' + $request.attempt_id)
@@ -168,10 +211,7 @@ function Get-HaLeaseProof($Context) {
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.
         $Context.Progress.step = 'marker_before'
-        $markerText = Assert-HaOwnedCutoverMarker $script:ClosureMarker -ReadContent
-        $marker = ConvertFrom-Json -InputObject $markerText
-        if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
-            $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
+        Assert-HaLeaseMarkerScope $request
         $Context.Progress.step = 'wsl_running'
         $start = [Diagnostics.ProcessStartInfo]::new($script:ClosureWsl, '--list --running --quiet')
         $start.UseShellExecute = $false
@@ -270,9 +310,7 @@ function Get-HaOfflineLeaseProof($Context) {
         }
         $pending = $vmObserver.BeginInvoke()
         $Context.Progress.step = 'offline_marker_before'
-        $marker = ConvertFrom-Json -InputObject (Assert-HaOwnedCutoverMarker $script:ClosureMarker -ReadContent)
-        if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
-            $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
+        Assert-HaLeaseMarkerScope $request
         $Context.Progress.step = 'offline_windows_closed'
         Assert-HaWslOfflineReactivationClosed $script:ClosurePlan
         $Context.Progress.step = 'offline_hyperv'

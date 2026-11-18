@@ -113,14 +113,26 @@ def _read_pinned(path, digest):
 
 
 class WindowsInitialObserver:
-    def __init__(self, client, intent_path, marker_sha256, cluster):
+    def __init__(self, client, intent_path, marker_sha256, cluster, *, broker_marker=False):
         self.client = client
         self.intent_path = intent_path
         self.marker_sha256 = marker_sha256
         self.cluster = cluster
         self.marker_identity = None
+        self.broker_marker = broker_marker
 
-    def _marker(self, handoff):
+    def _marker(self, handoff, deadline):
+        if self.broker_marker:
+            pins = self.client.pins
+            if pins.attempt_id != handoff['attempt_id'] or pins.plan_sha256 != handoff['legacy_plan_sha256']:
+                raise TransitionBlocked('initial_service_handoff_unverified')
+            try:
+                _pin(self.client.request_marker(deadline, self.marker_sha256))
+            except (ValueError, OSError, TransitionBlocked):
+                raise TransitionBlocked('initial_service_handoff_unverified') from None
+            if time.monotonic() >= deadline:
+                raise TransitionBlocked('initial_service_handoff_unverified')
+            return
         value, identity = _read_pinned(MARKER, self.marker_sha256)
         if (type(value) is not dict or set(value) != {'cluster', 'generation', 'source_commit', 'plan_sha256', 'attempt_id'}
                 or value['cluster'] != self.cluster or type(value['generation']) is not int or value['generation'] != 1
@@ -139,7 +151,7 @@ class WindowsInitialObserver:
         expected.update({key: _pin(actual.get(key)) for key in ('fence_sha256', 'activation_check_sha256', 'settlement_sha256')})
         if type(actual) is not dict or actual != expected or type(actual.get('schema_version')) is not int:
             raise TransitionBlocked('initial_service_handoff_unverified')
-        self._marker(handoff)
+        self._marker(handoff, time.monotonic() + INITIAL_PROOF_SECONDS)
 
     def assert_legacy_closed(self, handoff, deadline):
         try:
@@ -154,7 +166,7 @@ class WindowsInitialObserver:
     def assert_exclusion_held(self, handoff, deadline):
         # Keep the same protected admission marker pinned across the commit.
         # A renewal may reuse only its own still-fresh full writer observation.
-        self._marker(handoff)
+        self._marker(handoff, deadline)
         return time.monotonic() < deadline
 
 
@@ -181,7 +193,8 @@ def native_initial_observer(backend, *, action='ha-initial-wsl-cutover'):
         raise TransitionBlocked('initial_service_live_closure_unverified') from None
     with client:
         yield WindowsInitialObserver(client, backend.plan_path.with_name('initial-cutover-activation.json'),
-                                     _pin(params['marker_sha256']), plan['cluster'])
+                                     _pin(params['marker_sha256']), plan['cluster'],
+                                     broker_marker=(action == RECOVERY_ACTION))
 
 
 def _request_recovery_proof(client, deadline, failure):

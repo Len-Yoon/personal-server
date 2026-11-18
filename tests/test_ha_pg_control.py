@@ -2176,6 +2176,29 @@ class InitialLeaseServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(native.bridge.BridgeRejected, 'native_initial_recovery_publication_unconfirmed'):
                 lease.verify_recovery_publication(windows, recovery, deadline, observe_pair=paired, assert_guard=guard)
 
+    def test_recovery_marker_uses_broker_without_opening_the_marker_file(self):
+        from ha_control import initial_lease_service as service
+        handoff = dict(attempt_id="a"*64, legacy_plan_sha256="b"*64,
+                       restore_receipt_sha256="c"*64, activation_intent_sha256="d"*64)
+        intent = {key: value for key, value in handoff.items() if key != "activation_intent_sha256"}
+        intent.update(schema_version=1, phase="activate_vm_intent", fence_sha256="e"*64,
+                      activation_check_sha256="f"*64, settlement_sha256="1"*64)
+        client = MagicMock(pins=SimpleNamespace(attempt_id=handoff["attempt_id"],
+                                                plan_sha256=handoff["legacy_plan_sha256"]))
+        client.request_marker.return_value = "2"*64
+        path = Path("/fixture/intent")
+        observer = service.WindowsInitialObserver(client, path, "3"*64, "fixture", broker_marker=True)
+        with patch.object(service, "_read_pinned", return_value=(intent, (1, 2))) as read:
+            observer.assert_intent(handoff)
+            deadline = time.monotonic() + 1
+            self.assertTrue(observer.assert_exclusion_held(handoff, deadline))
+            read.assert_called_once_with(path, handoff["activation_intent_sha256"])
+        client.request_marker.assert_called_with(deadline, "3"*64)
+        client.request.assert_not_called()
+        client.request_marker.side_effect = ValueError()
+        with self.assertRaisesRegex(TransitionBlocked, "initial_service_handoff_unverified"):
+            observer.assert_exclusion_held(handoff, deadline)
+
     def test_recovery_native_observer_separates_proofs_and_preserves_holds(self):
         from ha_control import initial_lease_service as service
 
