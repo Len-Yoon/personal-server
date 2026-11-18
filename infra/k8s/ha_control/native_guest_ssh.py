@@ -506,6 +506,9 @@ class GuestSshDispatcher:
             'status': 'PASS', 'phase': 'rejoining', 'authority_opened': False, 'standby_rejoined': True,
             'rejoin_stage_sha256': request.args['rejoin_stage_sha256'],
         }
+        revision = result.get('revision') if type(result) is dict else None
+        bridge._need(type(revision) is int and 0 < revision < 2**63, 'guest_ssh_replacement_replication_unconfirmed')
+        expected['revision'] = revision
         if type(result) is dict and 'source_fence_wal' in result:
             bridge._need(bridge._wal_pin(result['source_fence_wal']), 'guest_ssh_replacement_replication_unconfirmed')
             expected['source_fence_wal'] = result['source_fence_wal']

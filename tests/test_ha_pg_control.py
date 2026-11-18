@@ -80,8 +80,9 @@ class TransitionServiceStartTests(unittest.TestCase):
         pin = hashlib.sha256(script.read_bytes()).hexdigest()
         windows = MagicMock()
         receipt = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
-                   "rejoin_stage_sha256": "b"*64, "standby_rejoined": True}
-        windows.powershell.side_effect = [receipt, receipt | {"authority_opened": True}, receipt]
+                   "rejoin_stage_sha256": "b"*64, "standby_rejoined": True, "revision": 5}
+        windows.powershell.side_effect = [receipt, receipt | {"authority_opened": True}, receipt,
+                                         receipt | {"revision": True}]
         root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
         common = (windows, pin, root, "a"*64)
         kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
@@ -90,7 +91,7 @@ class TransitionServiceStartTests(unittest.TestCase):
         command = windows.powershell.call_args.args[0]
         self.assertIn(" -ReadRejoinReceipt ", command)
         self.assertIn(" -RejoinMode 'check-rejoin' ", command)
-        for mode in ("check-rejoin", "observe-rejoin-stage"):
+        for mode in ("check-rejoin", "observe-rejoin-stage", "check-rejoin"):
             with self.assertRaisesRegex(BridgeRejected, "rejoin_receipt_unconfirmed"):
                 read_transition_rejoin_receipt(*common, mode, **kwargs)
 
@@ -976,7 +977,7 @@ class PGControlTests(unittest.TestCase):
                 with self.assertRaisesRegex(TransitionBlocked, reason):
                     self.backend.assert_rejoin_synchronized(state)
         with patch.object(self.backend, "_read", side_effect=[primary, peer]) as read:
-            self.backend.assert_rejoin_synchronized(state)
+            self.assertEqual(self.backend.assert_rejoin_synchronized(state), primary["revision"])
             self.assertEqual([call.args[0] for call in read.call_args_list], ["B", "A"])
 
     def test_pair_rejects_async_wrong_timeline_role_revision_and_wrong_node(self):

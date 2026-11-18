@@ -283,7 +283,9 @@ function Read-RejoinReceipt {
     $result = ConvertFrom-Json -InputObject (Read-Scope $path $owners -Immutable).raw
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $keys = 'authority_opened,mode,observed_at_ms,phase,plan_sha256,probe,python_pid,rejoin_stage_sha256,schema_version,status'
-    if ($RejoinMode -ceq 'check-rejoin') { $keys = $keys.Replace(',status',',standby_rejoined,status') }
+    if ($RejoinMode -ceq 'check-rejoin') {
+        $keys = $keys.Replace(',schema_version,status',',revision,schema_version,standby_rejoined,status')
+    }
     $hasWal = $null -ne $result.PSObject.Properties['source_fence_wal']
     if ($hasWal) {
         if ($RejoinMode -ceq 'initialize' -or $result.source_fence_wal -isnot [string] -or
@@ -309,8 +311,12 @@ function Read-RejoinReceipt {
     $reply = [ordered]@{status='PASS';phase=$expectedPhase;authority_opened=$false;rejoin_stage_sha256=$result.rejoin_stage_sha256}
     if ($hasWal) { $reply["source_fence_wal"] = $result.source_fence_wal }
     if ($RejoinMode -ceq 'check-rejoin') {
-        if ($result.standby_rejoined -isnot [bool] -or -not $result.standby_rejoined) { throw 'transition_rejoin_receipt_invalid' }
+        if ($result.standby_rejoined -isnot [bool] -or -not $result.standby_rejoined -or
+            ($result.revision -isnot [int] -and $result.revision -isnot [long]) -or $result.revision -lt 1) {
+            throw 'transition_rejoin_receipt_invalid'
+        }
         $reply['standby_rejoined'] = $true
+        $reply['revision'] = $result.revision
     }
     $reply | ConvertTo-Json -Compress
 }

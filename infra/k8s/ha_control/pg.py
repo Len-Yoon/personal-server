@@ -717,6 +717,10 @@ class PgBackend:
             _deny("replacement_standby_replay_not_current")
         if not self.fenced(state):
             _deny("positive_fence_required")
+        revision = primary["revision"]
+        if type(revision) is not int or not state["generation"] <= revision < 2**63:
+            _deny("rejoin_revision_unconfirmed")
+        return revision
 
     def rejoined(self, state):
         self.bind(state)

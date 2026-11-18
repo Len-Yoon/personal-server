@@ -862,7 +862,9 @@ def read_transition_rejoin_receipt(windows, live_sha256, root, plan_sha256, mode
         bridge._need(mode != "initialize" and bridge._wal_pin(wal), error)
         expected["source_fence_wal"] = wal
     if mode == "check-rejoin":
-        expected["standby_rejoined"] = True
+        revision = result.get("revision") if type(result) is dict else None
+        bridge._need(type(revision) is int and 0 < revision < 2**63, error)
+        expected |= {"standby_rejoined": True, "revision": revision}
     bridge._need(bridge._hash(stage) and bridge._matches(result, expected), error)
     return result
 

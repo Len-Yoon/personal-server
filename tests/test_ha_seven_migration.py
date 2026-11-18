@@ -101,7 +101,7 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
         dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
         receipt = bridge.Receipt("PASS", "5"*64)
         proof = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
-                 "standby_rejoined": True, "rejoin_stage_sha256": stage}
+                 "standby_rejoined": True, "rejoin_stage_sha256": stage, "revision": 5}
         guard = MagicMock(return_value=stage)
         with patch.object(dispatcher, "observe_replacement_standby", return_value=receipt) as observe:
             for result in (proof | {"rejoin_stage_sha256": "4"*64}, proof | {"standby_rejoined": False}):

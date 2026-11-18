@@ -222,8 +222,8 @@ def run(args):
                         backend.assert_rejoin_pending(state)
                         result = rejoin_stage_receipt(backend, state)
                     else:
-                        backend.assert_rejoin_synchronized(state)
-                        result = rejoin_stage_receipt(backend, state) | {"standby_rejoined": True}
+                        revision = backend.assert_rejoin_synchronized(state)
+                        result = rejoin_stage_receipt(backend, state) | {"standby_rejoined": True, "revision": revision}
                     if probe is not None:
                         write_rejoin_receipt(journal, backend.fence_adapter.plan_sha256, args.command, result, probe)
             return result
