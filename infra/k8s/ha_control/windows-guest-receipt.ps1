@@ -401,6 +401,13 @@ function Read-GuestComRequest{
     if($version -in @(2,3,4)){$keys+=@('pipe_profile','host_profile_sha256','host_evidence_sha256')}
     elseif($version -ne 1){throw 'guest_com_request_version_rejected'}
     if($version -eq 4){. (Import-GuestOwnedSupport);$keys+=@(Get-GuestOwnedFields);Assert-GuestOwnedDeclaration ([pscustomobject]$value) '';if($value['executor_source_commit'] -cne $value['collector_source_commit']){throw 'guest_com_executor_source_changed'}}
+    if($value.ContainsKey('replacement_topology')){
+        $keys+=@('replacement_topology')
+        if($version -notin @(1,3) -or $value['node'] -cne 'B' -or
+            [HaGuestComV1.Rules]::Text($value,'replacement_topology') -cne 'standalone-isolated-b-v1'){
+            throw 'guest_com_replacement_topology_rejected'
+        }
+    }
     [HaGuestComV1.Rules]::Keys($value,$keys)
     if($version -in @(2,3,4)){
         if([HaGuestComV1.Rules]::Text($value,'pipe_profile') -cne 'registered-host-compute-v1'){throw 'guest_com_host_profile_rejected'}
@@ -410,7 +417,7 @@ function Read-GuestComRequest{
     foreach($key in @('installation_id','prepared_receipt_sha256','seed_id','bootstrap_manifest_sha256','switch_owner_manifest_sha256')){if(-not [HaGuestComV1.Rules]::Match([HaGuestComV1.Rules]::Text($value,$key),'[0-9a-f]{64}')){throw 'guest_com_identity_pin_rejected'}}
     if([HaGuestComV1.Rules]::Text($value,'node') -cnotin @('A','B') -or -not [HaGuestComV1.Rules]::Match([HaGuestComV1.Rules]::Text($value,'vm_id'),'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')){throw 'guest_com_vm_pin_rejected'}
     $egress=[HaGuestComV1.Rules]::Text($value,'egress_mac_address');$peer=[HaGuestComV1.Rules]::Text($value,'peer_prepared_receipt_sha256')
-    if(($egress -cne '' -and $egress -cnotmatch '^[0-9A-F]{12}$') -or ($value['node'] -ceq 'A' -and $peer -cne '') -or ($value['node'] -ceq 'B' -and $peer -cnotmatch '^[0-9a-f]{64}$')){throw 'guest_com_topology_pin_rejected'}
+    if(($egress -cne '' -and $egress -cnotmatch '^[0-9A-F]{12}$') -or ($value.ContainsKey('replacement_topology') -and $egress -cne '') -or (($value['node'] -ceq 'A' -or $value.ContainsKey('replacement_topology')) -and $peer -cne '') -or ($value['node'] -ceq 'B' -and -not $value.ContainsKey('replacement_topology') -and $peer -cnotmatch '^[0-9a-f]{64}$')){throw 'guest_com_topology_pin_rejected'}
     if([HaGuestComV1.Rules]::Text($value,'expected_kernel_release') -cne '6.8.0-149-generic' -or -not [HaGuestComV1.Rules]::Match([HaGuestComV1.Rules]::Text($value,'expected_pg_image'),'sha256:[0-9a-f]{64}') -or [HaGuestComV1.Rules]::Integer($value,'expected_package_count') -ne 73){throw 'guest_com_runtime_pin_rejected'}
     if([HaGuestComV1.Rules]::Integer($value,'timeout_seconds') -lt 10 -or [HaGuestComV1.Rules]::Integer($value,'timeout_seconds') -gt 3600){throw 'guest_com_timeout_rejected'}
     return ,$value
@@ -453,7 +460,7 @@ function Read-GuestComPrepared($Lease,$Spec,[string]$Root){
     foreach($key in @('installation_id','node','vm_id','stage_source_commit','seed_source_commit')){if($pins[$key] -cne $Spec[$key]){throw 'guest_com_prepared_identity_mismatch'}}
     if($pins['source_commit'] -cne $Spec['vm_source_commit']){throw 'guest_com_prepared_source_mismatch'}
     foreach($key in @('manifest_sha256','stage_manifest_sha256','disk_sha256','seed_sha256')){if($pins[$key] -isnot [string] -or $pins[$key] -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_com_prepared_hash_rejected'}}
-    if($Spec['node'] -ceq 'A' -and $pins['switch_owner_manifest_sha256'] -cne $pins['manifest_sha256']){throw 'guest_com_prepared_switch_owner_rejected'}
+    if(($Spec['node'] -ceq 'A' -or $Spec.ContainsKey('replacement_topology')) -and $pins['switch_owner_manifest_sha256'] -cne $pins['manifest_sha256']){throw 'guest_com_prepared_switch_owner_rejected'}
     $expected='\\.\pipe\N100HA_'+$Spec['installation_id'].Substring(0,16)+'_'+$Spec['node']+'_com1'
     if($pins['com1_pipe'] -cne $expected){throw 'guest_com_prepared_pipe_rejected'}
     return ,$pins
@@ -468,6 +475,12 @@ function Get-GuestComVm($Spec,$Pins){
         $ports[0].Path -cne $Pins['com1_pipe'] -or $otherPorts[0].Path -notin @($null,'')){throw 'guest_com_current_com_path_changed'}
     $switch=Get-VMSwitch -Id ([Guid]$Pins['switch_id'])
     if($switch.Id.Guid -ine $Pins['switch_id'] -or $switch.Name -cne $Pins['switch_name'] -or [string]$switch.SwitchType -cne 'Internal' -or $switch.Notes -cne ('ha-owned-guest-v1:'+$Spec['installation_id']+':'+$Pins['switch_owner_manifest_sha256'])){throw 'guest_com_current_switch_mismatch'}
+    if($Spec.ContainsKey('replacement_topology')){
+        $members=@(Get-VMNetworkAdapter -VMName '*' | Where-Object {$_.SwitchId -eq $switch.Id})
+        if($members.Count -ne 1 -or $members[0].VMId -ne $vm.Id -or $Pins['optional_egress_nic'] -ne $false){
+            throw 'guest_com_replacement_switch_not_isolated'
+        }
+    }
     $nics=@(Get-VMNetworkAdapter -VM $vm);$ha=@($nics|Where-Object{$_.Name -ceq 'ha-data'})
     if($ha.Count -ne 1 -or $ha[0].MacAddress -cne $Pins['mac_address'] -or $ha[0].DynamicMacAddressEnabled -ne $false -or [string]$ha[0].MacAddressSpoofing -cne 'Off' -or $ha[0].SwitchId -ine $Pins['switch_id']){throw 'guest_com_current_ha_nic_mismatch'}
     if($Pins['optional_egress_nic']){
