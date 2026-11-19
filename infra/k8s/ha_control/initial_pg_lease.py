@@ -97,6 +97,7 @@ class InitialPgLease:
     _explicit_proof_only = False
     _allow_rearm = False
     _allow_postboot = False
+    _allow_unpublished = False
 
     def __init__(self, backend, assert_legacy_closed, *, assert_exclusion_held=None):
         if not callable(assert_legacy_closed) or (assert_exclusion_held is not None and not callable(assert_exclusion_held)):
@@ -111,11 +112,14 @@ class InitialPgLease:
         self.proof_started = None
         self.rearm = None
         self.postboot = None
+        self.unpublished = None
 
     def _bind(self, state):
         plan = self.backend.plan
         if not self.backend.depth or type(plan) is not dict:
             _deny('native_host_guard_required')
+        if 'initial_unpublished_recovery' in plan and not self._allow_unpublished:
+            _deny('initial_unpublished_scope_unverified')
         if 'initial_recovery_postboot' in plan and not self._allow_postboot:
             _deny('initial_postboot_scope_unverified')
         if 'initial_recovery_rearm' in plan and not self._allow_rearm:
@@ -280,6 +284,8 @@ class InitialPgLease:
             payload['rearm'] = self.rearm
         if self.postboot is not None:
             payload['postboot'] = self.postboot
+        if self.unpublished is not None:
+            payload['unpublished'] = self.unpublished
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def _commit_primary(self, primary):
@@ -705,9 +711,40 @@ class InitialPgLeasePostboot(InitialPgLeaseRecovery):
         previous = self.postboot
         super()._bind(state)
         selected = scope(self.backend.plan)
+        from .initial_postboot import after_unpublished
+        if after_unpublished(selected) != (self._open_revision == 10):
+            _deny('initial_postboot_scope_unverified')
         if previous is not None and previous != selected:
             _deny('initial_postboot_scope_unverified')
         self.postboot = selected
 
     def _probe_prefix(self):
         return 'postboot-a:' + self.postboot['attempt_id'] + ':'
+
+
+class InitialPgLeaseUnpublishedRecovery(InitialPgLeaseRecovery):
+    """The sole failed 7cdb first publication: exact closed 7, open 8, revoke 9."""
+    from .initial_unpublished import ACTION as _approval_action
+    _closed_revision = 7
+    _open_revision = 8
+    _revoked_revision = 9
+    _allow_unpublished = True
+
+    def _bind(self,state):
+        from .initial_unpublished import scope
+        previous=self.unpublished
+        super()._bind(state)
+        selected=scope(self.backend.plan)
+        if previous is not None and previous!=selected:
+            _deny('initial_unpublished_scope_unverified')
+        self.unpublished=selected
+
+    def _probe_prefix(self):
+        return 'unpublished-a:'+self.unpublished['attempt_id']+':'
+
+
+class InitialPgLeasePostbootAfterUnpublished(InitialPgLeasePostboot):
+    """Only published retry-eight may cross the Windows reboot: 9 -> 10 -> 11."""
+    _closed_revision = 9
+    _open_revision = 10
+    _revoked_revision = 11

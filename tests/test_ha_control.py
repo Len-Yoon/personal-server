@@ -1900,3 +1900,70 @@ class ControlTests(unittest.TestCase):
             self.assertIn(text, source)
         self.assertNotIn("Restart-Computer", source)
         self.assertNotIn("wsl --shutdown", source)
+
+class WindowsUnpublishedRecoveryTests(unittest.TestCase):
+    """Actual pure PowerShell predicates; no Windows/guest mutation."""
+    def powershell(self, body):
+        runtime = shutil.which('pwsh')
+        self.assertIsNotNone(runtime)
+        script = r'''
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$hashPattern='\A[a-f0-9]{64}\z'
+$e=$null;$t=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:START_SOURCE,[ref]$t,[ref]$e)
+if($e.Count){throw 'parser'}
+foreach($f in $ast.EndBlock.Statements){if($f -is [Management.Automation.Language.FunctionDefinitionAst] -and $f.Name -in @('Assert-UnpublishedEnvelope','Assert-UnpublishedPrior','Assert-UnpublishedPreSeal','Assert-PostbootEnvelope')){. ([scriptblock]::Create($f.Extent.Text))}}
+function Rejected([scriptblock]$Check){try{&$Check;throw 'accepted_negative'}catch{if($_.Exception.Message -eq 'accepted_negative'){throw}}}
+''' + body
+        result = subprocess.run([runtime, '-NoProfile', '-NonInteractive', '-Command', script],
+            env=os.environ | {'START_SOURCE': str(ROOT / 'infra/k8s/ha_control/windows-ha-start-initial-service.ps1')},
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_unpublished_and_typed_postboot_envelopes(self):
+        self.powershell(r'''
+$r=[pscustomobject]@{schema_version=1;attempt_id=('a'*64);predecessor_terminal_sha256=('b'*64);predecessor_args_sha256=('c'*64);predecessor_plan_sha256=('d'*64);predecessor_seal_sha256=('e'*64);closure_mode='windows-offline-v1'}
+Assert-UnpublishedEnvelope $r
+Rejected {Assert-UnpublishedEnvelope ([pscustomobject]@{schema_version=1})}
+$r|Add-Member bogus 'x';Rejected {Assert-UnpublishedEnvelope $r};$r.PSObject.Properties.Remove('bogus')
+$r.closure_mode=@('windows-offline-v1');Rejected {Assert-UnpublishedEnvelope $r};$r.closure_mode='windows-offline-v1'
+$r.predecessor_plan_sha256='';Rejected {Assert-UnpublishedEnvelope $r};$r.predecessor_plan_sha256='d'*64
+$identity=[pscustomobject]@{service_name='owned';service_sid='S-1-5-80-1-2-3-4-5'}
+$plan=[pscustomobject]@{windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('f'*64)};windows_recovery_observers=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64)};windows_enforced=$identity}
+$old=[pscustomobject]@{initial_service_start=[pscustomobject]@{binding_path='C:\old\binding.json';service_image_path_sha256=('c'*64)}}
+$pre=[pscustomobject]@{schema_version=1;windows_boot_sha256=('f'*64);predecessor_terminal_sha256=$r.predecessor_terminal_sha256;predecessor_args_sha256=$r.predecessor_args_sha256;predecessor_plan_sha256=$r.predecessor_plan_sha256;binding_path=$old.initial_service_start.binding_path;binding_absent=$true;guest=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64);app_start_intent_absent=$true};service=[pscustomobject]@{service_name='owned';service_sid=$identity.service_sid;state='Stopped';start_mode='Disabled';process_id=0;service_image_path_sha256=('c'*64)}}
+Assert-UnpublishedPreSeal $plan $old $pre $r
+$pre.guest.hold_sha256=@('b'*64);Rejected {Assert-UnpublishedPreSeal $plan $old $pre $r};$pre.guest.hold_sha256='b'*64
+$pre.service.service_image_path_sha256=@('c'*64);Rejected {Assert-UnpublishedPreSeal $plan $old $pre $r}
+$p=[pscustomobject]@{schema_version=1;attempt_id=('a'*64);predecessor_terminal_sha256=('b'*64);predecessor_binding_sha256=('c'*64);predecessor_args_sha256=('d'*64);predecessor_seal_sha256=('e'*64);previous_windows_boot_sha256=('f'*64);closure_mode='windows-offline-v1'}
+Assert-PostbootEnvelope $p
+$p|Add-Member predecessor_kind 'published-unpublished-recovery-v1';Assert-PostbootEnvelope $p
+$p.predecessor_kind='unknown';Rejected {Assert-PostbootEnvelope $p}
+''')
+
+    def test_only_exact_failed_first_publication_and_same_boot_are_adoptable(self):
+        self.powershell(r'''
+$handoff=[pscustomobject]@{attempt_id=('1'*64);legacy_plan_sha256=('2'*64);restore_receipt_sha256=('3'*64);activation_intent_sha256=('4'*64)}
+$recovery=[pscustomobject]@{attempt_id=('5'*64);predecessor_service_sha256=('6'*64);predecessor_terminal_sha256=('7'*64)}
+$old=[pscustomobject]@{source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115';initial_recovery_rearm=[pscustomobject]@{attempt_id=('8'*64)};initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('9'*64)};windows_recovery_observers=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64)}}
+$plan=[pscustomobject]@{initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=$old.windows_initial_observer;windows_recovery_observers=$old.windows_recovery_observers}
+$r=[pscustomobject]@{attempt_id=('c'*64);predecessor_plan_sha256=('d'*64)}
+$terminal=[pscustomobject]@{schema_version=1;generation=1;kind='initial-wsl-cutover-rearm';revision=6;sequence=1;phase='local_revoke_observed';failure_code='controller_journal_not_durable';controller_plan_sha256=('d'*64);rearm=$old.initial_recovery_rearm;recovery=$recovery;attempt_id=$handoff.attempt_id;legacy_plan_sha256=$handoff.legacy_plan_sha256;restore_receipt_sha256=$handoff.restore_receipt_sha256;activation_intent_sha256=$handoff.activation_intent_sha256}
+Assert-UnpublishedPrior $plan $old $terminal $r
+foreach($pair in @(@('revision',8),@('sequence',2),@('phase','lease_lost'),@('failure_code','other'))){$key=$pair[0];$prior=$terminal.$key;$terminal.$key=$pair[1];Rejected {Assert-UnpublishedPrior $plan $old $terminal $r};$terminal.$key=$prior}
+$old.source_commit='0'*40;Rejected {Assert-UnpublishedPrior $plan $old $terminal $r};$old.source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115'
+$plan.windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('0'*64)};Rejected {Assert-UnpublishedPrior $plan $old $terminal $r}
+''')
+
+    def test_windows_gate_sources_parse_and_use_fixed_typed_branches(self):
+        runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)
+        for name in ('windows-ha-start-initial-service.ps1','windows-ha-cutover-live-authority.ps1'):
+            path=ROOT/'infra/k8s/ha_control'/name
+            result=subprocess.run([runtime,'-NoProfile','-NonInteractive','-Command',
+                "$e=$null;$t=$null;$null=[Management.Automation.Language.Parser]::ParseFile($env:SOURCE,[ref]$t,[ref]$e);if($e.Count){exit 1}"],
+                env=os.environ|{'SOURCE':str(path)},capture_output=True,text=True,timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr)
+            text=path.read_text()
+            self.assertIn('initial-wsl-cutover-unpublished',text)
+            self.assertIn('initial-wsl-cutover-postboot-unpublished',text)
+            self.assertNotIn('[int]$ExpectedRevision',text)

@@ -30,8 +30,9 @@ def stop(request, assert_closed):
     A digest of the control row alone does not satisfy this callback contract.
     Save-VM additionally requires another full paired read after this receipt.
     """
-    worker._need(request.verb==wire.GUEST_QUIESCE_INITIAL_POSTBOOT and callable(assert_closed),ERROR)
+    worker._need(request.verb in {wire.GUEST_QUIESCE_INITIAL_POSTBOOT,wire.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED} and callable(assert_closed),ERROR)
     args=request.args
+    closed_revision=9 if request.verb==wire.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED else 7
     with worker._guest_mutation_descriptor():
         raw,hold,initial,protected=current(request)
         intent_path,done_path=paths(request,args['postboot_attempt_id'])
@@ -39,7 +40,7 @@ def stop(request, assert_closed):
         def check(boundary):
             deadline=time.monotonic()+wire.ACTIVATION_GUEST_CHECK_SECONDS
             current(request)
-            challenge=wire._digest(wire._bytes(worker._scope(request)|{'args':args,'boundary':boundary,'closed_revision':7}))
+            challenge=wire._digest(wire._bytes(worker._scope(request)|{'args':args,'boundary':boundary,'closed_revision':closed_revision}))
             proof=assert_closed(challenge,boundary)
             worker._need(wire._hash(proof) and time.monotonic()<deadline,ERROR)
             current(request)
@@ -58,7 +59,7 @@ def stop(request, assert_closed):
         worker._need(all(record['running'] is False for record in contracts.values()),ERROR)
         receipt=wire._bytes({'schema_version':1,'binding':request.binding.fields(),'args':args,
             'hold_sha256':wire._digest(raw),'containers':hold['containers'],'container_contracts':contracts,
-            'protected_inventory_sha256':protected,'closed_revision':7,'closed_proof_sha256':proof})
+            'protected_inventory_sha256':protected,'closed_revision':closed_revision,'closed_proof_sha256':proof})
         worker.runtime._write(done_path,receipt)
         observe(request,args['postboot_attempt_id'],wire._digest(receipt))
         return wire.Receipt('PASS',wire._digest(receipt))
@@ -77,7 +78,7 @@ def observe(request, attempt, expected, *, require_stopped=True):
         and all(record['args'].get(key)==request.args[key] for key in (*wire.INITIAL_RECOVERY_ARGS,'hold_sha256'))
         and record['hold_sha256']==wire._digest(holdraw) and record['containers']==hold['containers']
         and record['protected_inventory_sha256']==protected and type(record['closed_revision']) is int
-        and record['closed_revision']==7 and wire._hash(record['closed_proof_sha256'])
+        and record['closed_revision']==(9 if 'predecessor_unpublished_attempt_id' in record['args'] else 7) and wire._hash(record['closed_proof_sha256'])
         and type(record['container_contracts']) is dict
         and set(record['container_contracts'])==set(hold['containers']),ERROR)
     if require_stopped:

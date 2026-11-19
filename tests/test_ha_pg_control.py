@@ -2073,6 +2073,63 @@ class PGControlTests(unittest.TestCase):
 
 
 class InitialLeaseServiceTests(unittest.TestCase):
+    def test_windows_first_save_budget_includes_slow_fsync_and_native_age_includes_io(self):
+        from ha_control import controller
+        clock=[1.0];anchor=1_800_000_000_000_000_000
+        original_fsync=controller.os.fsync
+        original_replace=controller.os.replace
+        fsync_calls=[];observed={}
+        def slow_fsync(fd):
+            original_fsync(fd);fsync_calls.append(fd)
+            clock[0]+=0.2
+        def replace(temporary,path,deadline):
+            self.assertLess(clock[0],deadline)
+            self.assertGreater(clock[0]-1.0,0.15)
+            observed.update(json.loads(Path(temporary).read_text()))
+            written=controller.os.stat(temporary).st_mtime_ns
+            self.assertEqual(written,anchor)
+            native_age_ms=(clock[0]-1.0)*1000
+            self.assertAlmostEqual(native_age_ms+observed['proof_elapsed_ms'],400,places=3)
+            original_replace(temporary,path)
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'controller-state.json'
+            with patch.object(controller.sys,'platform','win32'), \
+                 patch.object(controller.time,'time_ns',return_value=anchor), \
+                 patch.object(controller.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(controller.os,'fsync',side_effect=slow_fsync), \
+                 patch.object(controller.Journal,'_replace_windows',side_effect=replace):
+                controller.Journal(path).save({'phase':'serving','proof_elapsed_ms':0},
+                    windows_retry_until=6.0,proof_started_monotonic=1.0)
+            self.assertEqual(len(fsync_calls),2)
+            self.assertEqual(json.loads(path.read_text())['phase'],'serving')
+
+    def test_save_that_consumes_the_full_proof_budget_never_publishes_admission(self):
+        from contextlib import contextmanager
+        from ha_control import initial_lease_service as service
+        clock=[0.0]
+        admission=SimpleNamespace(publish=MagicMock())
+        @contextmanager
+        def admitted(*args):yield admission
+        observer=SimpleNamespace(assert_intent=MagicMock(),recovery_admission=admitted,
+            assert_legacy_closed=MagicMock(),assert_exclusion_held=MagicMock())
+        lease=SimpleNamespace(proof_started=0.0,open=MagicMock(return_value='f'*64),
+            renew=MagicMock(),revoke=MagicMock(return_value=True))
+        original_save=service.Journal.save
+        def delayed_save(journal,value,**options):
+            original_save(journal,value,**options)
+            if value.get('phase')=='serving':clock[0]=service.INITIAL_PROOF_SECONDS+0.01
+        with tempfile.TemporaryDirectory() as folder:
+            backend=SimpleNamespace(plan={'cluster':'synthetic'},plan_path=Path(folder)/'plan.json')
+            journal=Path(folder)/'journal/controller-state.json';journal.parent.mkdir()
+            with patch.object(service,'_recovery_predecessor',return_value={'attempt_id':'1'*64}), \
+                 patch.object(service,'InitialPgLeaseRecovery',return_value=lease), \
+                 patch.object(service.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(service.Journal,'save',new=delayed_save):
+                with self.assertRaisesRegex(TransitionBlocked,'initial_service_proof_deadline_exceeded'):
+                    service._serve(backend,journal,observer,{},recovering=True)
+            admission.publish.assert_not_called();lease.renew.assert_not_called();lease.revoke.assert_called_once()
+            self.assertEqual(json.loads(journal.read_text())['phase'],'local_revoke_observed')
+
     def test_windows_heartbeat_replace_retries_transient_open_reader(self):
         from ha_control import controller
 

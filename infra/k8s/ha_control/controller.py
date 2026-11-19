@@ -7,6 +7,7 @@ retained across restart; ambiguous actions are reconciled before another call.
 from contextlib import contextmanager
 import ctypes
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -134,10 +135,20 @@ class Journal:
                 raise OSError(error, "windows_journal_replace")
             time.sleep(min(remaining, 0.01))
 
-    def save(self, value, *, windows_retry_until=None):
+    def save(self, value, *, windows_retry_until=None, proof_started_monotonic=None):
         if self.path.is_symlink() or not self.path.parent.is_dir():
             raise TransitionBlocked("controller_journal_invalid")
         temporary = None
+        anchor = None
+        if proof_started_monotonic is not None:
+            # Sample UTC before monotonic: native age + elapsed includes all
+            # subsequent serialization/fsync/replace time, conservatively.
+            anchor = time.time_ns() // 100 * 100
+            sampled = time.monotonic()
+            if (type(proof_started_monotonic) not in (int, float) or not math.isfinite(proof_started_monotonic)
+                    or sampled < proof_started_monotonic):
+                raise TransitionBlocked('controller_journal_not_durable')
+            value = value | {'proof_elapsed_ms': math.ceil((sampled-proof_started_monotonic)*1_000_000)/1000}
         try:
             fd, temporary = tempfile.mkstemp(prefix=".ha-journal-", dir=self.path.parent)
             with os.fdopen(fd, "w") as stream:
@@ -145,6 +156,18 @@ class Journal:
                 stream.flush()
                 os.fsync(stream.fileno())
             if sys.platform == "win32":
+                if anchor is not None:
+                    # Close the data writer first so its final last-write time
+                    # cannot overwrite the explicit pre-I/O anchor. Flush the
+                    # metadata through a fresh handle before write-through move.
+                    os.utime(temporary, ns=(anchor, anchor))
+                    metadata = os.open(temporary, os.O_RDWR | getattr(os, 'O_BINARY', 0))
+                    try:
+                        os.fsync(metadata)
+                    finally:
+                        os.close(metadata)
+                    if os.stat(temporary).st_mtime_ns != anchor:
+                        raise OSError('windows_journal_time_anchor')
                 self._replace_windows(temporary, self.path, windows_retry_until)
             else:
                 os.replace(temporary, self.path)

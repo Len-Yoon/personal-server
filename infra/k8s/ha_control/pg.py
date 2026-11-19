@@ -142,7 +142,11 @@ class PgBackend:
                     from .initial_postboot import ACTION, scope
                     scope(value)
                     expected = ACTION
-            elif 'initial_effect_quarantine' in value or 'initial_recovery_rearm' in value or 'initial_recovery_postboot' in value:
+                if 'initial_unpublished_recovery' in value:
+                    from .initial_unpublished import ACTION,scope
+                    scope(value)
+                    expected=ACTION
+            elif 'initial_effect_quarantine' in value or 'initial_unpublished_recovery' in value or 'initial_recovery_rearm' in value or 'initial_recovery_postboot' in value:
                 _deny('initial_recovery_native_scope_required')
             if value.get('_approval_action') != expected:
                 _deny('ha_transition_approval_required')

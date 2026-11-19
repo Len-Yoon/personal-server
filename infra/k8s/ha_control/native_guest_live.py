@@ -72,13 +72,15 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False):
+def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False, unpublished=False, postboot_after_unpublished=False):
+    _need(sum(bool(v) for v in (rearmed,postboot,unpublished,postboot_after_unpublished))<=1
+          and (not (unpublished or postboot_after_unpublished) or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
     _need(not (rearmed and postboot) and (not postboot or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
     _need(not rearmed or (recovery_deadline is not None and generation is None), "guest_live_pg_binding_unconfirmed")
     _need(recovery_deadline is None or generation is None, "guest_live_pg_binding_unconfirmed")
     if generation is None:
         primary, partner, epoch, timeline = "A", "B", 1, 1
-        revision = 8 if postboot else (6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2))
+        revision = 10 if postboot_after_unpublished else (8 if postboot or unpublished else (6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2)))
     else:
         generation.validate()
         primary, partner = generation.primary, generation.partner
@@ -167,6 +169,35 @@ def observe_rearmed_a_lease(pins, postgres, *, recovery_attempt_id, rearm, rearm
         'challenge_sha256': challenge_sha256, 'postgres': observed}))
 
 
+def observe_unpublished_a_lease(pins, postgres, *, recovery_attempt_id, unpublished, unpublished_plan_sha256,
+                            challenge_sha256, deadline, minimum_remaining_seconds=1):
+    """Read exact revision eight after the separately authenticated native unpublished proof."""
+    from .initial_unpublished import scope as unpublished_scope
+    checked = unpublished_scope({'initial_unpublished_recovery': unpublished,
+                           'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
+                           'initial_cutover_handoff': {'attempt_id': pins.attempt_id}})
+    error = "guest_live_unpublished_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A" and type(pins.generation) is int
+          and pins.generation == 1 and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release['source_commit']
+          and all(runtime._match(runtime.SHA, value) for value in (
+              recovery_attempt_id, unpublished_plan_sha256, challenge_sha256))
+          and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, unpublished=True)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
+          and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({**runtime._runtime_identity(pins), 'unpublished': checked,
+        'unpublished_plan_sha256': unpublished_plan_sha256, 'recovery_attempt_id': recovery_attempt_id,
+        'challenge_sha256': challenge_sha256, 'postgres': observed}))
+
+
 def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, postboot_plan_sha256,
                             challenge_sha256, deadline, minimum_remaining_seconds=1):
     """Read exact revision eight after the separately authenticated native postboot proof."""
@@ -187,7 +218,10 @@ def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, p
           and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
           and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
-    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, postboot=True)
+    from .initial_postboot import after_unpublished
+    retry_predecessor=after_unpublished(checked)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline,
+        postboot=not retry_predecessor,postboot_after_unpublished=retry_predecessor)
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
           and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
           and time.monotonic() < deadline, error)

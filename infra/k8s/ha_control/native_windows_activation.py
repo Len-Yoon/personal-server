@@ -338,7 +338,7 @@ class WindowsActivationLease:
         return bridge._digest(bridge._bytes({"challenge_sha256": challenge_sha256, "predecessor": prior,
                                             "guest_hold_readback_sha256": readback}))
 
-    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None):
+    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None, unpublished=None):
         """Require the same protected Windows heartbeat around the paired database read."""
         error = "native_initial_recovery_publication_unconfirmed"
         bridge._need(type(recovery) is dict and set(recovery) == {
@@ -346,7 +346,17 @@ class WindowsActivationLease:
                      and all(bridge._hash(pin) for pin in recovery.values())
                      and bridge._hash(self.service_instance_sha256)
                      and callable(powershell) and callable(observe_pair) and callable(assert_guard), error)
-        bridge._need(rearm is None or postboot is None, error)
+        bridge._need(sum(value is not None for value in (rearm,postboot,unpublished))<=1,error)
+        unpublished_parameters={}
+        if unpublished is not None:
+            from .initial_unpublished import scope as unpublished_scope
+            checked_unpublished=unpublished_scope({'initial_unpublished_recovery':unpublished,
+                'initial_cutover_recovery':recovery,'initial_cutover_handoff':{'attempt_id':self.custody.binding.attempt_id}})
+            unpublished_parameters={'UnpublishedAttemptId':checked_unpublished['attempt_id'],
+                'UnpublishedPredecessorTerminalSha256':checked_unpublished['predecessor_terminal_sha256'],
+                'UnpublishedPredecessorArgsSha256':checked_unpublished['predecessor_args_sha256'],
+                'UnpublishedPredecessorPlanSha256':checked_unpublished['predecessor_plan_sha256'],
+                'UnpublishedPredecessorSealSha256':checked_unpublished['predecessor_seal_sha256']}
         postboot_parameters = {}
         if postboot is not None:
             from .initial_postboot import scope
@@ -358,6 +368,8 @@ class WindowsActivationLease:
                 'PostbootPredecessorArgsSha256': checked_postboot['predecessor_args_sha256'],
                 'PostbootPredecessorSealSha256': checked_postboot['predecessor_seal_sha256'],
                 'PostbootPreviousWindowsBootSha256': checked_postboot['previous_windows_boot_sha256']}
+            if 'predecessor_kind' in checked_postboot:
+                postboot_parameters['PostbootPredecessorKind']=checked_postboot['predecessor_kind']
         rearm_parameters = {}
         if rearm is not None:
             from .initial_pg_lease import rearm_scope
@@ -370,7 +382,7 @@ class WindowsActivationLease:
         binding = self.custody.binding
         challenge = secrets.token_hex(32)
         source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
-            **postboot_parameters, **rearm_parameters, 'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            **unpublished_parameters, **postboot_parameters, **rearm_parameters, 'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
             'AttemptId': binding.attempt_id, 'PriorSha256': challenge,
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
             'RecoveryAttemptId': recovery['attempt_id'],
@@ -396,7 +408,7 @@ class WindowsActivationLease:
         bridge._remaining(deadline)
         return bridge._digest(bridge._bytes({"challenge": challenge, "windows": before, "postgres_sha256": paired}))
 
-    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None):
+    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None, unpublished=None):
         """Bind a current paired lease to the same continuously serving recovery process.
 
         The first publication remains subject to verify_recovery_publication.
@@ -413,7 +425,17 @@ class WindowsActivationLease:
                      and callable(powershell) and callable(observe_pair) and callable(assert_guard)
                      and type(deadline) in (int, float) and math.isfinite(deadline)
                      and time.monotonic() < deadline, error)
-        bridge._need(rearm is None or postboot is None, error)
+        bridge._need(sum(value is not None for value in (rearm,postboot,unpublished))<=1,error)
+        unpublished_parameters={}
+        if unpublished is not None:
+            from .initial_unpublished import scope as unpublished_scope
+            checked_unpublished=unpublished_scope({'initial_unpublished_recovery':unpublished,
+                'initial_cutover_recovery':recovery,'initial_cutover_handoff':{'attempt_id':self.custody.binding.attempt_id}})
+            unpublished_parameters={'UnpublishedAttemptId':checked_unpublished['attempt_id'],
+                'UnpublishedPredecessorTerminalSha256':checked_unpublished['predecessor_terminal_sha256'],
+                'UnpublishedPredecessorArgsSha256':checked_unpublished['predecessor_args_sha256'],
+                'UnpublishedPredecessorPlanSha256':checked_unpublished['predecessor_plan_sha256'],
+                'UnpublishedPredecessorSealSha256':checked_unpublished['predecessor_seal_sha256']}
         postboot_parameters = {}
         if postboot is not None:
             from .initial_postboot import scope
@@ -425,6 +447,8 @@ class WindowsActivationLease:
                 'PostbootPredecessorArgsSha256': checked_postboot['predecessor_args_sha256'],
                 'PostbootPredecessorSealSha256': checked_postboot['predecessor_seal_sha256'],
                 'PostbootPreviousWindowsBootSha256': checked_postboot['previous_windows_boot_sha256']}
+            if 'predecessor_kind' in checked_postboot:
+                postboot_parameters['PostbootPredecessorKind']=checked_postboot['predecessor_kind']
         rearm_parameters = {}
         if rearm is not None:
             from .initial_pg_lease import rearm_scope
@@ -437,7 +461,7 @@ class WindowsActivationLease:
         binding = self.custody.binding
         challenge = secrets.token_hex(32)
         source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
-            **postboot_parameters, **rearm_parameters, 'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
+            **unpublished_parameters, **postboot_parameters, **rearm_parameters, 'BindingPath': self.binding_path, 'LegacyPlanSha256': binding.plan_sha256,
             'AttemptId': binding.attempt_id, 'PriorSha256': challenge,
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
             'RecoveryAttemptId': recovery['attempt_id'],

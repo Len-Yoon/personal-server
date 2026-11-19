@@ -354,5 +354,180 @@ class PostbootStoppedInventoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(TransitionBlocked,'initial_postboot_stopped_unverified'):
                     admission.assert_held(time.monotonic()+1)
 
-if __name__=='__main__':unittest.main()
 
+class UnpublishedSealTests(unittest.TestCase):
+    def fixture(self):
+        from ha_control import initial_windows_gate as gate
+        from ha_control import initial_unpublished as unpub
+        _,old,oldfiles,_=fixtures.InitialRearmSealTests().fixture()
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        digest=lambda raw:hashlib.sha256(raw).hexdigest()
+        old.update(source_commit=unpub.PRIOR_COMMIT,installation_id='c'*64,
+            windows_recovery_observers={'guest_boot_sha256':'4'*64,'hold_sha256':'6'*64},
+            initial_service_start={'binding_path':r'C:\old\initial-recovery-service.json','service_image_path_sha256':'5'*64})
+        old_raw=encode(old);old_pin=digest(old_raw)
+        settings=gate._args(oldfiles['rearm-predecessor-args.txt']);settings['plan_sha256']=old_pin
+        args=''.join(key+'='+settings[key]+'\n' for key in gate.ARGS_FIELDS).encode()
+        terminal=json.loads(oldfiles['rearm-predecessor-state.json'])
+        terminal.update(kind='initial-wsl-cutover-rearm',revision=6,phase='local_revoke_observed',sequence=1,
+            failure_code='controller_journal_not_durable',rearm=old['initial_recovery_rearm'],controller_plan_sha256=old_pin)
+        files={unpub.FILES[0]:encode(terminal),unpub.FILES[1]:args,unpub.FILES[2]:old_raw}
+        value=dict(schema_version=1,attempt_id='0'*64,closure_mode='windows-offline-v1',
+            predecessor_terminal_sha256=digest(files[unpub.FILES[0]]),predecessor_args_sha256=digest(args),
+            predecessor_plan_sha256=old_pin)
+        service={'service_name':old['windows_enforced']['service_name'],'service_sid':old['windows_enforced']['service_sid'],
+            'state':'Stopped','start_mode':'Disabled','process_id':0,'service_image_path_sha256':'5'*64}
+        seal=dict(schema_version=1,windows_boot_sha256='0'*64,service=service,
+            binding_path=old['initial_service_start']['binding_path'],binding_absent=True,
+            guest=dict(guest_boot_sha256='4'*64,hold_sha256='6'*64,app_start_intent_absent=True),
+            **{key:value[key] for key in ('predecessor_terminal_sha256','predecessor_args_sha256','predecessor_plan_sha256')})
+        files[unpub.FILES[3]]=encode(seal);value['predecessor_seal_sha256']=digest(files[unpub.FILES[3]])
+        plan=deepcopy(old);plan.pop('initial_recovery_rearm');plan['initial_unpublished_recovery']=value
+        plan['source_commit']='a'*40
+        files[unpub.FILES[4]]=encode(dict(schema_version=1,plan_sha256='a'*64,unpublished=value,windows_boot_sha256='0'*64,service=service))
+        return plan,files
+
+    def rehash(self,plan,files):
+        from ha_control import initial_unpublished as unpub
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        value=plan['initial_unpublished_recovery']
+        for name,key in zip(unpub.FILES[:3],('predecessor_terminal_sha256','predecessor_args_sha256','predecessor_plan_sha256')):
+            value[key]=hashlib.sha256(files[name]).hexdigest()
+        seal=json.loads(files[unpub.FILES[3]])
+        for key in ('predecessor_terminal_sha256','predecessor_args_sha256','predecessor_plan_sha256'):seal[key]=value[key]
+        files[unpub.FILES[3]]=encode(seal)
+        value['predecessor_seal_sha256']=hashlib.sha256(files[unpub.FILES[3]]).hexdigest()
+        acceptance=json.loads(files[unpub.FILES[4]]);acceptance['unpublished']=value
+        files[unpub.FILES[4]]=encode(acceptance)
+
+    def test_only_exact_failed_first_save_no_binding_sameboot_seal_accepts(self):
+        from ha_control import initial_unpublished as unpub
+        plan,files=self.fixture()
+        self.assertEqual(unpub.validate_seal(plan,'a'*64,files),plan['initial_unpublished_recovery'])
+        for change in (('sequence',2),('failure_code','legacy_pipe_response_timeout_refresh'),('phase','lease_lost'),('revision',8)):
+            changed_plan,changed_files=deepcopy(plan),dict(files)
+            terminal=json.loads(files[unpub.FILES[0]]);terminal[change[0]]=change[1]
+            changed_files[unpub.FILES[0]]=json.dumps(terminal).encode();self.rehash(changed_plan,changed_files)
+            with self.subTest(change=change),self.assertRaises(TransitionBlocked):unpub.validate_seal(changed_plan,'a'*64,changed_files)
+
+    def test_fabricated_binding_or_started_apps_and_new_boot_cannot_be_adopted(self):
+        from ha_control import initial_unpublished as unpub
+        for change in ('binding','app','boot','pid','oldsource'):
+            plan,files=self.fixture();seal=json.loads(files[unpub.FILES[3]])
+            if change=='binding':seal['binding_absent']=False
+            elif change=='app':seal['guest']['app_start_intent_absent']=False
+            elif change=='boot':plan['windows_initial_observer']['windows_boot_sha256']='f'*64
+            elif change=='pid':seal['service']['process_id']=1
+            else:
+                old=json.loads(files[unpub.FILES[2]]);old['source_commit']='f'*40
+                files[unpub.FILES[2]]=json.dumps(old).encode()
+            files[unpub.FILES[3]]=json.dumps(seal).encode();self.rehash(plan,files)
+            with self.subTest(change=change),self.assertRaises(TransitionBlocked):unpub.validate_seal(plan,'a'*64,files)
+
+
+class UnpublishedPgTests(unittest.TestCase):
+    setUp=fixtures.InitialPgLeaseTests.setUp
+    legacy_closed=fixtures.InitialPgLeaseTests.legacy_closed
+    connection=fixtures.InitialPgLeaseTests.connection
+    observe=fixtures.InitialPgLeaseTests.observe
+    execute=fixtures.InitialPgLeaseTests.execute
+    commit=fixtures.InitialPgLeaseTests.commit
+    recovery_lease=fixtures.InitialPgLeaseTests.recovery_lease
+
+    def unpublished_lease(self):
+        from ha_control.initial_unpublished import ACTION
+        from ha_control.initial_pg_lease import InitialPgLeaseUnpublishedRecovery
+        callback=self.recovery_lease().assert_legacy_closed
+        self.revision=7
+        value=UnpublishedSealTests().fixture()[0]['initial_unpublished_recovery']
+        self.backend.plan.update(_approval_action=ACTION,initial_unpublished_recovery=value)
+        return InitialPgLeaseUnpublishedRecovery(self.backend,callback)
+
+    def test_exact_eight_nine_and_foreign_incarnation_never_adopted(self):
+        lease=self.unpublished_lease();old={'rearm-a:old:lease','postboot-a:old:lease'};self.probes.update(old)
+        lease.open(self.state);self.assertEqual(self.revision,8);self.assertTrue(old<=self.probes)
+        self.assertTrue(any(pin.startswith('unpublished-a:') for pin in self.probes))
+        foreign=type(lease)(self.backend,lease.assert_legacy_closed)
+        self.assertFalse(foreign.revoke(self.state))
+        with self.assertRaises(TransitionBlocked):foreign.renew(self.state)
+        self.now+=timedelta(seconds=1);lease.renew(self.state);self.assertTrue(lease.revoke(self.state));self.assertEqual(self.revision,9)
+        with self.assertRaises(TransitionBlocked):type(lease)(self.backend,lease.assert_legacy_closed).open(self.state)
+
+    def test_old_modes_and_wrong_closed_revision_refuse_unpublished_field(self):
+        for cls in (InitialPgLease,InitialPgLeaseRecovery,InitialPgLeaseRearm,InitialPgLeasePostboot):
+            self.setUp();lease=self.unpublished_lease()
+            with self.subTest(cls=cls),self.assertRaises(TransitionBlocked):cls(self.backend,lease.assert_legacy_closed).open(self.state)
+        for revision in (5,6,8,9):
+            self.setUp();lease=self.unpublished_lease();self.revision=revision
+            with self.subTest(revision=revision),self.assertRaises(TransitionBlocked):lease.open(self.state)
+
+    def test_typed_postboot_after_unpublished_is_only_nine_ten_eleven(self):
+        from ha_control.initial_pg_lease import InitialPgLeasePostbootAfterUnpublished
+        callback=self.recovery_lease().assert_legacy_closed;self.revision=9
+        self.backend.plan['_approval_action']=ACTION
+        value=envelope();value['predecessor_kind']='published-unpublished-recovery-v1'
+        self.backend.plan['initial_recovery_postboot']=value
+        lease=InitialPgLeasePostbootAfterUnpublished(self.backend,callback)
+        lease.open(self.state);self.assertEqual(self.revision,10)
+        self.assertTrue(lease.revoke(self.state));self.assertEqual(self.revision,11)
+        self.setUp();callback=self.recovery_lease().assert_legacy_closed;self.revision=7
+        self.backend.plan['_approval_action']=ACTION;self.backend.plan['initial_recovery_postboot']=value
+        with self.assertRaisesRegex(TransitionBlocked,'initial_postboot_scope_unverified'):
+            InitialPgLeasePostboot(self.backend,callback).open(self.state)
+
+
+class PostbootAfterUnpublishedSealTests(unittest.TestCase):
+    def test_only_published_retry_eight_and_closed_nine_choose_postboot_ten(self):
+        plan,files=PostbootSealTests().fixture()
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        digest=lambda value:hashlib.sha256(value).hexdigest()
+        prior=json.loads(files[FILES[0]]);prior.pop('rearm')
+        unpublished=UnpublishedSealTests().fixture()[0]['initial_unpublished_recovery']
+        unpublished['attempt_id']='8'*64
+        prior.update(kind='initial-wsl-cutover-unpublished',revision=8,unpublished=unpublished)
+        files[FILES[0]]=encode(prior)
+        value=plan['initial_recovery_postboot'];value['predecessor_kind']='published-unpublished-recovery-v1'
+        value['predecessor_terminal_sha256']=digest(files[FILES[0]])
+        stopped=json.loads(files[FILES[6]]);stopped['closed_revision']=9
+        stopped['args'].pop('predecessor_rearm_attempt_id')
+        stopped['args']['predecessor_unpublished_attempt_id']=unpublished['attempt_id']
+        files[FILES[6]]=encode(stopped);stopsha=digest(files[FILES[6]])
+        pre=json.loads(files[FILES[3]]);pre.update(closed_revision=9,postboot_stopped_receipt_sha256=stopsha,
+            predecessor_terminal_sha256=value['predecessor_terminal_sha256'])
+        pre['guests']['A']['container_inventory_sha256']=stopsha
+        files[FILES[3]]=encode(pre);value['predecessor_seal_sha256']=digest(files[FILES[3]])
+        resumed=json.loads(files[FILES[4]]);resumed.update(closed_revision=9,postboot_stopped_receipt_sha256=stopsha,
+            guests=pre['guests'],predecessor_seal_sha256=value['predecessor_seal_sha256'])
+        files[FILES[4]]=encode(resumed)
+        acceptance=json.loads(files[FILES[5]]);acceptance.update(postboot=value,resume_evidence_sha256=digest(files[FILES[4]]))
+        files[FILES[5]]=encode(acceptance)
+        self.assertEqual(validate_seal(plan,'a'*64,files),value)
+        changed=deepcopy(plan);changed['initial_recovery_postboot'].pop('predecessor_kind')
+        with self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
+        changed=deepcopy(plan);changed['initial_recovery_postboot']['predecessor_kind']='arbitrary-revision'
+        with self.assertRaises(TransitionBlocked):scope(changed)
+
+
+class UnpublishedGuestObservationTests(unittest.TestCase):
+    def test_only_fresh_unchanged_stopped_hold_without_old_attempt_intent_accepts(self):
+        from contextlib import nullcontext
+        from tempfile import TemporaryDirectory
+        from ha_control import native_guest_worker as worker,native_guest_postboot as postboot,native_stdio_bridge as wire
+        binding=wire.Binding('1'*64,'2'*64,'3'*64,'4'*64,'5'*64)
+        args={key:'6'*64 for key in wire.INITIAL_RECOVERY_ARGS}
+        args.update(hold_sha256=wire._digest(b'hold'),predecessor_rearm_attempt_id='7'*64,
+                    predecessor_plan_sha256='8'*64,unpublished_attempt_id='9'*64)
+        request=wire.Request(binding,'A',wire.GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR,1,'a'*64,args)
+        contracts={role:{'layout_sha256':'b'*64,'running':False,'started_at':'original'} for role in wire.RECOVERY_START_ORDER}
+        hold={'container_contracts':deepcopy(contracts)}
+        with TemporaryDirectory() as folder,patch.object(worker,'ROOT',Path(folder)), \
+             patch.object(worker,'_guest_mutation_descriptor',return_value=nullcontext()), \
+             patch.object(postboot,'current',return_value=(b'hold',hold,contracts,'6'*64)):
+            stage=Path(folder)/binding.attempt_id;stage.mkdir()
+            self.assertEqual(worker.handle(request).status,'PASS')
+            intent=stage/('rearm-'+'7'*64+'-start-intent.json');intent.touch()
+            self.assertEqual(worker.handle(request).status,'UNKNOWN')
+            intent.unlink();contracts['book-memo']['started_at']='changed'
+            self.assertEqual(worker.handle(request).status,'UNKNOWN')
+
+if __name__=='__main__':unittest.main()

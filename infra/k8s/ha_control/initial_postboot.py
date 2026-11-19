@@ -8,6 +8,11 @@ FIELDS = {'schema_version', 'attempt_id', 'predecessor_terminal_sha256', 'predec
 FILES = ('postboot-predecessor-state.json', 'postboot-predecessor-binding.json',
          'postboot-predecessor-args.txt', 'postboot-predecessor-seal.json', 'postboot-resume-evidence.json',
          'postboot-acceptance-seal.json', 'postboot-stopped-inventory.json')
+PREDECESSOR_KIND='published-unpublished-recovery-v1'
+
+def after_unpublished(value):
+    return type(value) is dict and value.get('predecessor_kind')==PREDECESSOR_KIND
+
 SHA = re.compile(r'[a-f0-9]{64}')
 
 def need(value):
@@ -16,7 +21,8 @@ def need(value):
 
 def scope(plan):
     value = plan.get('initial_recovery_postboot')
-    need('initial_recovery_rearm' not in plan and type(value) is dict and set(value) == FIELDS
+    need(not {'initial_recovery_rearm','initial_unpublished_recovery'} & plan.keys() and type(value) is dict
+         and (set(value)==FIELDS or (set(value)==FIELDS|{'predecessor_kind'} and after_unpublished(value)))
          and type(value['schema_version']) is int and value['schema_version'] == 1
          and value['closure_mode'] == 'windows-offline-v1'
          and all(type(value[key]) is str and SHA.fullmatch(value[key]) for key in FIELDS - {'schema_version', 'closure_mode'})
@@ -36,6 +42,11 @@ def validate_seal(plan, plan_pin, files):
     from .initial_windows_gate import _decode, _digest, _args, _path
     from .initial_pg_lease import rearm_scope
     value = scope(plan)
+    recovered=after_unpublished(value)
+    closed_revision=9 if recovered else 7
+    prior_revision=8 if recovered else 6
+    prior_kind='initial-wsl-cutover-unpublished' if recovered else 'initial-wsl-cutover-rearm'
+    prior_field='unpublished' if recovered else 'rearm'
     need(set(files) == set(FILES))
     for name, key in zip(FILES[:4], ('predecessor_terminal_sha256', 'predecessor_binding_sha256',
                                    'predecessor_args_sha256', 'predecessor_seal_sha256')):
@@ -43,19 +54,25 @@ def validate_seal(plan, plan_pin, files):
     prior, binding, settings, seal, resumed = (_decode(files[FILES[0]]), _decode(files[FILES[1]]),
         _args(files[FILES[2]]), _decode(files[FILES[3]]), _decode(files[FILES[4]]))
     stable = {'schema_version', 'kind', 'generation', 'attempt_id', 'legacy_plan_sha256', 'restore_receipt_sha256',
-              'activation_intent_sha256', 'controller_plan_sha256', 'recovery', 'rearm', 'revision', 'phase', 'sequence'}
+              'activation_intent_sha256', 'controller_plan_sha256', 'recovery', prior_field, 'revision', 'phase', 'sequence'}
     need(type(prior) is dict and set(prior) in (stable, stable | {'failure_code'})
          and type(prior['schema_version']) is int and prior['schema_version'] == 1
          and type(prior['generation']) is int and prior['generation'] == 1
-         and type(prior['revision']) is int and prior['revision'] == 6
-         and prior['kind'] == 'initial-wsl-cutover-rearm' and prior['phase'] in ('lease_lost', 'local_revoke_observed')
+         and type(prior['revision']) is int and prior['revision'] == prior_revision
+         and prior['kind'] == prior_kind and prior['phase'] in ('lease_lost', 'local_revoke_observed')
          and type(prior['sequence']) is int and prior['sequence'] > 0
          and prior['recovery'] == plan['initial_cutover_recovery']
          and all(prior[key] == plan['initial_cutover_handoff'][key] for key in (
              'attempt_id', 'legacy_plan_sha256', 'restore_receipt_sha256', 'activation_intent_sha256')))
-    previous_rearm = rearm_scope({'initial_recovery_rearm': prior['rearm'],
-                                 'initial_cutover_recovery': plan['initial_cutover_recovery'],
-                                 'initial_cutover_handoff': plan['initial_cutover_handoff']})
+    if recovered:
+        from .initial_unpublished import scope as unpublished_scope
+        previous_rearm=unpublished_scope({'initial_unpublished_recovery':prior['unpublished'],
+            'initial_cutover_recovery':plan['initial_cutover_recovery'],
+            'initial_cutover_handoff':plan['initial_cutover_handoff']})
+    else:
+        previous_rearm = rearm_scope({'initial_recovery_rearm': prior['rearm'],
+                                     'initial_cutover_recovery': plan['initial_cutover_recovery'],
+                                     'initial_cutover_handoff': plan['initial_cutover_handoff']})
     need(value['attempt_id'] != previous_rearm['attempt_id'])
     identity = plan['windows_enforced']
     keys = {'attempt_id', 'controller_plan_sha256', 'first_write_proof_sha256', 'legacy_plan_sha256',
@@ -79,7 +96,7 @@ def validate_seal(plan, plan_pin, files):
     seal_keys = {'schema_version', 'windows_boot_sha256', 'predecessor_terminal_sha256', 'predecessor_binding_sha256',
                  'predecessor_args_sha256', 'service', 'guests', 'hold_sha256', 'closed_revision', 'closed_pair_sha256', 'postboot_stopped_receipt_sha256'}
     need(type(seal) is dict and set(seal) == seal_keys and type(seal['schema_version']) is int and seal['schema_version'] == 1
-         and type(seal['closed_revision']) is int and seal['closed_revision'] == 7
+         and type(seal['closed_revision']) is int and seal['closed_revision'] == closed_revision
          and type(seal['closed_pair_sha256']) is str and SHA.fullmatch(seal['closed_pair_sha256'])
          and type(seal['postboot_stopped_receipt_sha256']) is str and SHA.fullmatch(seal['postboot_stopped_receipt_sha256'])
          and seal['hold_sha256'] == plan['windows_recovery_observers']['hold_sha256']
@@ -108,7 +125,7 @@ def validate_seal(plan, plan_pin, files):
          and resumed['fresh_vsock'] == {'A': True, 'B': True}
          and all(type(v) is bool for v in (*resumed['clock_ca_validated'].values(), *resumed['fresh_vsock'].values()))
          and resumed['hold_sha256'] == plan['windows_recovery_observers']['hold_sha256']
-         and type(resumed['closed_revision']) is int and resumed['closed_revision'] == 7
+         and type(resumed['closed_revision']) is int and resumed['closed_revision'] == closed_revision
          and type(resumed['guest_observation_sha256']) is dict and set(resumed['guest_observation_sha256']) == {'A', 'B'}
          and all(type(pin) is str and SHA.fullmatch(pin) for pin in (*resumed['guest_observation_sha256'].values(), resumed['closed_pair_sha256'])))
     # Carry the actual immutable guest receipt, not an untyped assertion of
@@ -122,7 +139,7 @@ def validate_seal(plan, plan_pin, files):
     need(_digest(files[FILES[6]]) == seal['postboot_stopped_receipt_sha256']
          and type(stopped) is dict and set(stopped) == stopped_keys
          and type(stopped['schema_version']) is int and stopped['schema_version'] == 1
-         and type(stopped['closed_revision']) is int and stopped['closed_revision'] == 7
+         and type(stopped['closed_revision']) is int and stopped['closed_revision'] == closed_revision
          and stopped['hold_sha256'] == seal['hold_sha256']
          and type(stopped['closed_proof_sha256']) is str and SHA.fullmatch(stopped['closed_proof_sha256'])
          and type(stopped['binding']) is dict and set(stopped['binding']) == {
@@ -133,12 +150,13 @@ def validate_seal(plan, plan_pin, files):
          and stopped['binding']['boot_a_sha256'] == guests['A']['guest_boot_sha256']
          and stopped['binding']['boot_b_sha256'] == guests['B']['guest_boot_sha256'])
     args = stopped['args']
+    predecessor_arg='predecessor_unpublished_attempt_id' if recovered else 'predecessor_rearm_attempt_id'
     need(type(args) is dict and set(args) == set(INITIAL_RECOVERY_ARGS) | {
-        'hold_sha256','postboot_attempt_id','predecessor_plan_sha256','predecessor_rearm_attempt_id'}
+        'hold_sha256','postboot_attempt_id','predecessor_plan_sha256',predecessor_arg}
          and all(type(pin) is str and SHA.fullmatch(pin) for pin in args.values())
          and args['postboot_attempt_id'] == value['attempt_id']
          and args['predecessor_plan_sha256'] == prior['controller_plan_sha256']
-         and args['predecessor_rearm_attempt_id'] == previous_rearm['attempt_id']
+         and args[predecessor_arg] == previous_rearm['attempt_id']
          and args['recovery_attempt_id'] == plan['initial_cutover_recovery']['attempt_id']
          and args['installation_id'] == plan['installation_id']
          and args['hold_sha256'] == stopped['hold_sha256']

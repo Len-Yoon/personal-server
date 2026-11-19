@@ -37,7 +37,7 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 class InitialRecoveryRestartTests(unittest.TestCase):
     def exercise_restart(self, *, failed_boundary=None, uncertain_start=None, stale_hold=False, already_started=False,
-                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False, postboot=False):
+                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False, postboot=False, unpublished=False):
         from contextlib import ExitStack
         worker, wire = native_guest_worker, native_stdio_bridge
         binding = wire.Binding('1'*64, '2'*64, '3'*64, '4'*64, '5'*64)
@@ -54,6 +54,10 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             from tests.test_ha_postboot import envelope
             args.update(postboot=envelope(),postboot_plan_sha256='a'*64,postboot_stopped_receipt_sha256='b'*64)
             verb=wire.GUEST_START_INITIAL_POSTBOOT
+        if unpublished:
+            from tests.test_ha_postboot import UnpublishedSealTests
+            args.update(unpublished=UnpublishedSealTests().fixture()[0]['initial_unpublished_recovery'],unpublished_plan_sha256='a'*64)
+            verb=wire.GUEST_START_INITIAL_UNPUBLISHED
         request = wire.Request(binding, 'A', verb, 1, '8'*64, args)
         containers = {role: {'container_id': f'{index:064x}', 'image_id': 'sha256:'+'9'*64}
                       for index, role in enumerate(wire.RECOVERY_START_ORDER, 1)}
@@ -117,6 +121,7 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             original_proof = stack.enter_context(patch.object(worker.live, 'observe_recovered_a_lease', side_effect=local_proof))
             rearm_proof = stack.enter_context(patch.object(worker.live, 'observe_rearmed_a_lease', side_effect=local_proof))
             postboot_proof = stack.enter_context(patch.object(worker.live, 'observe_postboot_a_lease', side_effect=local_proof))
+            unpublished_proof=stack.enter_context(patch.object(worker.live,'observe_unpublished_a_lease',side_effect=local_proof))
             from ha_control import native_guest_postboot
             stack.enter_context(patch.object(native_guest_postboot,'observe',return_value={'container_contracts':hold['container_contracts']}))
             stack.enter_context(patch.object(worker.runtime, '_inventory', side_effect=lambda: copy.deepcopy(runtime_state)))
@@ -130,6 +135,7 @@ class InitialRecoveryRestartTests(unittest.TestCase):
                 stage.mkdir()
                 (stage / ('recovery-'+args['recovery_attempt_id']+'-start-intent.json')).touch()
             result = worker.start_initial_recovery(request, windows)
+            self.unpublished_proof_count=unpublished_proof.call_count
             self.postboot_proof_count = postboot_proof.call_count
             self.rearm_proof_count = rearm_proof.call_count
             self.original_proof_count = original_proof.call_count
@@ -197,6 +203,14 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             with self.subTest(option=option),self.assertRaises(TransitionBlocked):
                 self.exercise_restart(postboot=True,**{option:True})
             self.assertFalse(self.commands)
+
+    def test_unpublished_start_uses_dedicated_eight_proof_and_original_eight_ids(self):
+        result=self.exercise_restart(unpublished=True)
+        self.assertEqual(result.status,'PASS')
+        self.assertEqual(self.commands,[('start',f'{index:064x}') for index in range(1,9)])
+        self.assertEqual(self.original_proof_count,0);self.assertEqual(self.rearm_proof_count,0);self.assertEqual(self.postboot_proof_count,0)
+        self.assertEqual(self.unpublished_proof_count,len(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
+        self.assertTrue(all(path.name.startswith('unpublished-'+'0'*64) for path in self.records))
 
     def test_rearm_args_cannot_be_sent_to_old_start_or_wrong_node(self):
         wire = native_stdio_bridge
