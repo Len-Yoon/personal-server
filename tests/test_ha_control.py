@@ -197,6 +197,47 @@ Assert-MaintenanceOrigins 'route'|ConvertTo-Json -Compress
             server.server_close()
             thread.join(timeout=5)
 
+    def test_derived_native_plan_binds_original_deployment_marker_and_driver(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        code = r"""
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition ([IO.File]::ReadAllText($env:STRICT_JSON_SOURCE))
+$e=$null;$t=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$t,[ref]$e)
+if($e.Count){throw 'derived_parse'}
+foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -cin @('Require','Assert-KeysExact','Get-LegacyDeploymentBinding','Assert-LegacyMarkerBinding')},$false)){
+ . ([scriptblock]::Create($fn.Extent.Text))
+}
+function Object([string]$Json){return [TrustedStoppedV1.Json]::Object($Json,8192)}
+$ex=@{plan_sha256=('e'*64);driver_sha256=('a'*64)}
+$direct=Object '{"windows_reactivation":{},"cluster":"fixture"}'
+$binding=Get-LegacyDeploymentBinding $direct $ex
+if($binding.plan_sha256 -cne $ex.plan_sha256 -or $null -ne $binding.attempt_id){throw 'direct_contract_changed'}
+$valid='{"deployment_plan_sha256":"PLAN","deployment_attempt_id":"ATTEMPT","windows_driver_sha256":"DRIVER","windows_reactivation":{}}'.Replace('PLAN',('b'*64)).Replace('ATTEMPT',('c'*64)).Replace('DRIVER',('a'*64))
+$binding=Get-LegacyDeploymentBinding (Object $valid) $ex
+$approved=[pscustomobject]@{authority_cluster='fixture';authority_source_commit=('d'*40);authority_generation=1}
+$marker=Object ('{"cluster":"fixture","generation":1,"source_commit":"SOURCE","plan_sha256":"PLAN","attempt_id":"ATTEMPT"}'.Replace('SOURCE',('d'*40)).Replace('PLAN',('b'*64)).Replace('ATTEMPT',('c'*64)))
+Assert-LegacyMarkerBinding $marker $approved $binding
+foreach($bad in @($valid.Replace(('a'*64),('f'*64)),$valid.Replace(('b'*64),'invalid'),
+    $valid.Replace(('c'*64),'invalid'),$valid.Replace(('"'+('b'*64)+'"'),'42'),
+    $valid.Replace('"windows_reactivation":{}','"windows_reactivation":{},"extra":true'),
+    $valid.Replace(('"deployment_attempt_id":"'+('c'*64)+'",'),''))){
+ $blocked=$false;try{Get-LegacyDeploymentBinding (Object $bad) $ex}catch{$blocked=$true}
+ if(-not $blocked){throw 'derived_bad_binding_accepted'}
+}
+foreach($key in @('plan_sha256','attempt_id','cluster','generation','source_commit')){
+ $prior=$marker[$key];$marker[$key]=if($key -ceq 'generation'){[long]2}else{'f'*64}
+ $blocked=$false;try{Assert-LegacyMarkerBinding $marker $approved $binding}catch{$blocked=$true}
+ $marker[$key]=$prior
+ if(-not $blocked){throw 'derived_marker_mismatch_accepted'}
+}
+"""
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", code],
+            env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"),
+                              "STRICT_JSON_SOURCE": str(ROOT / "infra/k8s/ha_control/stopped_service_installer/StrictJson.cs")},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_frontend_lifecycle_rejects_posix_before_reading_inputs(self):
         pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
         self.assertTrue(pwsh.is_file(), "PowerShell is required for native frontend validation")

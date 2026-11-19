@@ -221,6 +221,31 @@ function Read-LegacyAuthority([string]$Path,[string]$Pin,[long]$Limit){
     return ,$file.Bytes
 }
 
+function Get-LegacyDeploymentBinding($Plan,$Exclusion){
+    Require ($Plan.ContainsKey('windows_reactivation'))
+    if($Plan.ContainsKey('deployment_plan_sha256') -or $Plan.ContainsKey('deployment_attempt_id')){
+        Assert-KeysExact $Plan @('deployment_plan_sha256','deployment_attempt_id','windows_driver_sha256','windows_reactivation')
+        foreach($key in @('deployment_plan_sha256','deployment_attempt_id','windows_driver_sha256')){
+            Require ($Plan[$key] -is [string] -and $Plan[$key] -cmatch '\A[a-f0-9]{64}\z')
+        }
+        Require ($Plan['windows_driver_sha256'] -ceq $Exclusion['driver_sha256'])
+        return @{plan_sha256=$Plan['deployment_plan_sha256'];attempt_id=$Plan['deployment_attempt_id']}
+    }
+    # A direct original plan remains bound to its own exact file digest.
+    return @{plan_sha256=$Exclusion['plan_sha256'];attempt_id=$null}
+}
+
+function Assert-LegacyMarkerBinding($Marker,$Approved,$Binding){
+    Assert-KeysExact $Marker @('cluster','generation','source_commit','plan_sha256','attempt_id')
+    Require ($Marker['cluster'] -is [string] -and $Marker['cluster'] -ceq $Approved.authority_cluster -and
+        $Marker['source_commit'] -is [string] -and $Marker['source_commit'] -ceq $Approved.authority_source_commit -and
+        $Marker['plan_sha256'] -is [string] -and $Marker['plan_sha256'] -ceq $Binding.plan_sha256 -and
+        $Marker['generation'] -is [long] -and $Marker['generation'] -eq $Approved.authority_generation -and
+        $Marker['generation'] -ge 1 -and $Marker['attempt_id'] -is [string] -and
+        $Marker['attempt_id'] -cmatch '\A[a-f0-9]{64}\z' -and
+        ($null -eq $Binding.attempt_id -or $Marker['attempt_id'] -ceq $Binding.attempt_id))
+}
+
 function Assert-LegacyConnectorExclusion($Exclusion,[string]$Distribution,[switch]$RequireOnline){
     Assert-KeysExact $Exclusion @('plan_path','plan_sha256','driver_path','driver_sha256','marker_sha256',
         'linux_boot_sha256','owner_uid','original_fragment_sha256','original_unit_backup')
@@ -235,7 +260,7 @@ function Assert-LegacyConnectorExclusion($Exclusion,[string]$Distribution,[switc
     $planRaw=Read-LegacyAuthority $Exclusion['plan_path'] $Exclusion['plan_sha256'] 1MB
     $driverRaw=Read-LegacyAuthority $Exclusion['driver_path'] $Exclusion['driver_sha256'] 1MB
     $plan=[TrustedStoppedV1.Json]::Object($utf8.GetString($planRaw),1MB)
-    Require ($plan.ContainsKey('windows_reactivation'))
+    $deploymentBinding=Get-LegacyDeploymentBinding $plan $Exclusion
     $approved=(ConvertFrom-Json $utf8.GetString($planRaw)).windows_reactivation
     Require ($approved.distribution -is [string] -and $approved.distribution -ceq $Distribution)
     $errors=$null;$tokens=$null
@@ -250,13 +275,7 @@ function Assert-LegacyConnectorExclusion($Exclusion,[string]$Distribution,[switc
     $markerPath='C:\ProgramData\N100HA-Cutover\ha-controller-owner.json'
     $markerRaw=Read-LegacyAuthority $markerPath $Exclusion['marker_sha256'] 4096
     $marker=[TrustedStoppedV1.Json]::Object($utf8.GetString($markerRaw),4096)
-    Assert-KeysExact $marker @('cluster','generation','source_commit','plan_sha256','attempt_id')
-    Require ($marker['cluster'] -is [string] -and $marker['cluster'] -ceq $approved.authority_cluster -and
-        $marker['source_commit'] -is [string] -and $marker['source_commit'] -ceq $approved.authority_source_commit -and
-        $marker['plan_sha256'] -is [string] -and $marker['plan_sha256'] -ceq $Exclusion['plan_sha256'] -and
-        $marker['generation'] -is [long] -and $marker['generation'] -eq $approved.authority_generation -and
-        $marker['generation'] -ge 1 -and $marker['attempt_id'] -is [string] -and
-        $marker['attempt_id'] -cmatch '\A[a-f0-9]{64}\z')
+    Assert-LegacyMarkerBinding $marker $approved $deploymentBinding
     Require ((Read-HaCutoverMarker $markerPath).Sha256 -ceq $Exclusion['marker_sha256'])
     $wsl=Join-Path ([Environment]::SystemDirectory) 'wsl.exe'
     $running=@(& $wsl --list --running --quiet | ForEach-Object {($_ -replace '\x00','').Trim()} | Where-Object {$_})
