@@ -49,10 +49,52 @@ function Invoke-Sc([string[]]$Arguments){
 
 function New-NativeFrontendService([string]$Name,[string]$Image){
     $result=Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
-        Name=$Name;DisplayName=$Name;PathName=$Image;ServiceType=16;ErrorControl=1;
+        Name=$Name;DisplayName=$Name;PathName=$Image;ServiceType=[byte]16;ErrorControl=[byte]1;
         StartMode='Manual';StartName='LocalSystem'
     } -ErrorAction Stop
     Require ($result.ReturnValue -eq 0)
+}
+
+function Set-NativeFrontendServiceOwner([string]$Name){
+    if(-not ('HaNativeFrontendOwnerV1' -as [type])){
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text.RegularExpressions;
+public static class HaNativeFrontendOwnerV1 {
+    [DllImport("advapi32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+    static extern IntPtr OpenSCManagerW(string machine,string database,uint access);
+    [DllImport("advapi32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+    static extern IntPtr OpenServiceW(IntPtr manager,string name,uint access);
+    [DllImport("advapi32.dll",ExactSpelling=true)]
+    static extern uint SetSecurityInfo(IntPtr handle,uint objectType,uint information,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
+    [DllImport("advapi32.dll",ExactSpelling=true)]
+    static extern bool CloseServiceHandle(IntPtr handle);
+    public static void SetAdminsOwner(string name){
+        if(!Regex.IsMatch(name??"",@"\A(?:N100HA_Caddy_[a-f0-9]{24}|Cloudflared)\z"))
+            throw new ArgumentException("native_frontend_owner_scope");
+        IntPtr manager=OpenSCManagerW(null,null,1);
+        if(manager==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+        try{
+            IntPtr service=OpenServiceW(manager,name,0x80000); // WRITE_OWNER only.
+            if(service==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+            try{
+                var sid=new SecurityIdentifier("S-1-5-32-544");
+                byte[] bytes=new byte[sid.BinaryLength];sid.GetBinaryForm(bytes,0);
+                var pin=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+                try{
+                    uint error=SetSecurityInfo(service,2,1,pin.AddrOfPinnedObject(),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+                    if(error!=0)throw new Win32Exception((int)error);
+                }finally{pin.Free();}
+            }finally{CloseServiceHandle(service);}
+        }finally{CloseServiceHandle(manager);}
+    }
+}
+'@
+    }
+    [HaNativeFrontendOwnerV1]::SetAdminsOwner($Name)
 }
 
 function Assert-PrivatePath([string]$Path){
@@ -474,6 +516,7 @@ try{
         foreach($name in $images.Keys){
             New-NativeFrontendService $name $images[$name]
             $created+=@($name)
+            Set-NativeFrontendServiceOwner $name
             $null=Invoke-Sc -Arguments @('sdset',$name,'O:BAG:SYD:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)')
             $service=Service-Facts $name $images[$name]
             Require ($service.State -ceq 'Stopped')

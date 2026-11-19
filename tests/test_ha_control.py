@@ -64,13 +64,36 @@ $image='"C:\Program Files\Caddy\caddy.exe" run --config "C:\ProgramData\Caddy\co
 New-NativeFrontendService 'N100HA_fixture_caddy' $image
 if($observed.Count -ne 7 -or $observed.Name -cne 'N100HA_fixture_caddy' -or
  $observed.DisplayName -cne 'N100HA_fixture_caddy' -or $observed.PathName -cne $image -or
- $observed.ServiceType -ne 16 -or $observed.ErrorControl -ne 1 -or
+ $observed.ServiceType -isnot [byte] -or $observed.ServiceType -ne 16 -or
+ $observed.ErrorControl -isnot [byte] -or $observed.ErrorControl -ne 1 -or
  $observed.StartMode -cne 'Manual' -or $observed.StartName -cne 'LocalSystem'){throw 'cim_fields'}
 $script:code=5;$blocked=$false
 try{New-NativeFrontendService 'N100HA_fixture_caddy' $image}catch{
  if($_.Exception.Message -cne 'native_frontend_rejected'){throw};$blocked=$true
 }
 if(-not $blocked){throw 'nonzero_accepted'}
+exit 0
+'''
+        environment = os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1")}
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=environment, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_new_service_owner_helper_compiles_and_rejects_unscoped_services(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for service owner validation")
+        command = r'''
+$e=$null;$t=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$t,[ref]$e)
+if($e.Count){throw 'parser'}
+$node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Set-NativeFrontendServiceOwner'},$false)
+if($null -eq $node){throw 'missing_owner_function'}
+. ([scriptblock]::Create($node.Extent.Text))
+$blocked=$false
+try{Set-NativeFrontendServiceOwner 'UnrelatedService'}catch{
+ if(-not $_.Exception.ToString().Contains('native_frontend_owner_scope')){throw};$blocked=$true
+}
+if(-not $blocked -or -not ('HaNativeFrontendOwnerV1' -as [type])){throw 'owner_scope_not_enforced'}
 exit 0
 '''
         environment = os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1")}
