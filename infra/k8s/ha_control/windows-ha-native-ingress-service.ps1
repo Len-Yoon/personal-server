@@ -374,7 +374,17 @@ try{
         $units=foreach($index in 0..2){[regex]::Replace($utf8.GetString($supportRaw[$index]),'using [A-Za-z0-9_.]+;','')}
         Add-Type -Language CSharp -TypeDefinition ($using+"`n"+($units -join "`n"))
     } else {
-        $validated=& ([scriptblock]::Create($utf8.GetString($stageRaw))) -Mode Validate -InputDirectory $stageRoot -ProfileSha256 $preliminary.profile_sha256 -SupportSha256 $preliminary.support_sha256
+        # A file invocation preserves PSScriptRoot on Windows PowerShell 5.1.
+        # Dot-sourcing also retains the stager's script-scoped route contracts.
+        $serviceMode=$Mode
+        $stageFile=[IO.File]::Open($stageScript,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try{
+            Require ($stageFile.Length -eq $stageRaw.Length)
+            $pinnedStage=[byte[]]::new($stageRaw.Length);$at=0
+            while($at -lt $pinnedStage.Length){$count=$stageFile.Read($pinnedStage,$at,$pinnedStage.Length-$at);Require ($count -gt 0);$at+=$count}
+            Require ((Digest $pinnedStage) -ceq $StageScriptSha256)
+            $validated=. $stageScript -Mode Validate -InputDirectory $stageRoot -ProfileSha256 $preliminary.profile_sha256 -SupportSha256 $preliminary.support_sha256
+        }finally{$stageFile.Dispose();$Mode=$serviceMode}
         Require ((ConvertFrom-Json $validated).status -ceq 'validated')
     }
     $held=[Collections.Generic.List[object]]::new()

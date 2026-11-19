@@ -197,6 +197,42 @@ Assert-MaintenanceOrigins 'route'|ConvertTo-Json -Compress
             server.server_close()
             thread.join(timeout=5)
 
+    def test_native_validator_keeps_file_context_mode_and_shared_contracts(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        source = (ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1").read_text()
+        start = source.index("        $serviceMode=$Mode")
+        stop = source.index("        Require ((ConvertFrom-Json $validated).status -ceq 'validated')", start)
+        block = source[start:stop]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            child = root / "support"
+            child.mkdir()
+            stage = child / "stage.ps1"
+            stage.write_text(r"""param($Mode,$InputDirectory,$ProfileSha256,$SupportSha256)
+if($Mode -cne 'Validate' -or $PSScriptRoot -cne $InputDirectory){throw 'file_context'}
+$script:mainRoutes=@{fixture='retained'};$script:hosts=@('fixture')
+$script:fixture_calls++
+'{"status":"validated"}'
+""")
+            runner = root / "runner.ps1"
+            runner.write_text(r"""$ErrorActionPreference='Stop';$script:fixture_calls=0
+function Require([bool]$Value){if(-not $Value){throw 'rejected'}}
+function Digest([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+$Mode='Install';$stageScript=$env:CONTEXT_STAGE;$stageRoot=[IO.Path]::GetDirectoryName($stageScript)
+$stageRaw=[IO.File]::ReadAllBytes($stageScript);$StageScriptSha256=Digest $stageRaw
+$preliminary=[pscustomobject]@{profile_sha256='fixture';support_sha256='fixture'}
+""" + block + r"""
+if($Mode -cne 'Install' -or $script:mainRoutes.fixture -cne 'retained' -or $script:hosts[0] -cne 'fixture'){throw 'scope_lost'}
+$StageScriptSha256='0'*64;$blocked=$false
+try{
+""" + block + r"""
+}catch{$blocked=$true}
+if(-not $blocked -or $Mode -cne 'Install' -or $script:fixture_calls -ne 1){throw 'unpinned_stage_executed'}
+""")
+            result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-File", str(runner)],
+                env=os.environ | {"CONTEXT_STAGE": str(stage)}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_derived_native_plan_binds_original_deployment_marker_and_driver(self):
         pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
         code = r"""
