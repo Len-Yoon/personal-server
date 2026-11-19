@@ -17,12 +17,14 @@ from .controller import TransitionBlocked
 
 
 ACTION = 'ha-initial-wsl-cutover'
+RECOVERY_ACTION = 'ha-recover-initial-writer'
 PROFILE = 'enforced-vm-v1'
 SHA = re.compile(r'[a-f0-9]{64}\Z')
 SID = re.compile(r'S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\Z')
 INSTALL_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z')
 APPROVAL_FIELDS = {'schema_version', 'action', 'authority_kind', 'installation_id', 'source_commit',
                    'installed_at', 'plan_sha256'}
+RECOVERY_FIELDS = {'attempt_id', 'predecessor_terminal_sha256', 'predecessor_service_sha256'}
 ARGS_FIELDS = ('format', 'service_name', 'service_sid', 'python_path', 'python_sha256', 'launcher_path',
                'launcher_sha256', 'plan_path', 'plan_sha256', 'approval_path', 'approval_sha256', 'mode', 'host_sha256')
 WRITERS = {'S-1-5-18', 'S-1-5-32-544'}  # SYSTEM and BUILTIN\Administrators
@@ -77,9 +79,9 @@ def _args(raw):
     return values
 
 
-def _service(installation):
-    _need(type(installation) is str and SHA.fullmatch(installation))
-    name = f'N100HA_{installation[:24]}_controller'
+def initial_service_identity(scope_sha256):
+    _need(type(scope_sha256) is str and SHA.fullmatch(scope_sha256))
+    name = f'N100HA_{scope_sha256[:24]}_controller'
     digest = hashlib.sha1(name.upper().encode('utf-16-le'), usedforsecurity=False).digest()
     sid = 'S-1-5-80-' + '-'.join(str(number) for number in struct.unpack('<5I', digest))
     return name, sid
@@ -91,7 +93,7 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
     plan, approval = _decode(plan_raw), _decode(approval_raw)
     _need(type(plan) is dict and type(approval) is dict and approval.keys() == APPROVAL_FIELDS
           and type(approval['schema_version']) is int and approval['schema_version'] == 1
-          and approval['action'] == ACTION and approval['authority_kind'] == 'installed-runtime'
+          and approval['authority_kind'] == 'installed-runtime'
           and approval['plan_sha256'] == plan_pin
           and type(plan.get('schema_version')) is int and plan['schema_version'] == 2
           and plan.get('profile') == PROFILE and plan.get('node') == 'A'
@@ -101,7 +103,36 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
     mode = plan.get('initial_wsl_cutover')
     _need(type(mode) is dict and mode == {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
           and type(mode['schema_version']) is int)
-    name, expected_sid = _service(plan.get('installation_id'))
+    action = approval['action']
+    from .initial_unpublished import ACTION as UNPUBLISHED_ACTION, scope as unpublished_scope
+    unpublished='initial_unpublished_recovery' in plan
+    if unpublished:
+        unpublished_scope(plan)
+        _need('initial_cutover_recovery' in plan and action==UNPUBLISHED_ACTION)
+    from .initial_postboot import ACTION as POSTBOOT_ACTION, scope as postboot_scope
+    postboot = 'initial_recovery_postboot' in plan
+    if postboot:
+        postboot_scope(plan)
+        _need('initial_cutover_recovery' in plan and action == POSTBOOT_ACTION)
+    rearming = 'initial_recovery_rearm' in plan
+    if rearming:
+        from .initial_pg_lease import REARM_ACTION, rearm_scope
+        rearm_scope(plan)
+        _need('initial_cutover_recovery' in plan and action == REARM_ACTION)
+    original_name, original_sid = initial_service_identity(plan.get('installation_id'))
+    if 'initial_cutover_recovery' in plan:
+        recovery = plan['initial_cutover_recovery']
+        _need(action == (UNPUBLISHED_ACTION if unpublished else (POSTBOOT_ACTION if postboot else (REARM_ACTION if rearming else RECOVERY_ACTION))) and type(recovery) is dict and recovery.keys() == RECOVERY_FIELDS
+              and all(type(value) is str and SHA.fullmatch(value) for value in recovery.values()))
+        name, expected_sid = initial_service_identity(recovery['attempt_id'])
+        _need(name != original_name and expected_sid != original_sid)
+    else:
+        _need(action == ACTION)
+        name, expected_sid = original_name, original_sid
+    if 'initial_effect_quarantine' in plan:
+        _need(action == (UNPUBLISHED_ACTION if unpublished else (POSTBOOT_ACTION if postboot else (REARM_ACTION if rearming else RECOVERY_ACTION))))
+        from .initial_pg_lease import InitialPgLeaseRecovery
+        InitialPgLeaseRecovery.quarantine_binding(plan)
     configuration = plan.get('windows_enforced')
     _need(type(configuration) is dict and configuration.get('service_name') == settings['service_name'] == name
           and configuration.get('service_sid') == settings['service_sid'] == sid == expected_sid
@@ -111,8 +142,61 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
           and type(approval['installed_at']) is str and INSTALL_TIME.fullmatch(approval['installed_at']))
     installed = datetime.fromisoformat(approval['installed_at'].replace('Z', '+00:00'))
     _need(installed < now)
-    return plan | {'_approval_action': ACTION}, plan_pin, approval_pin
+    return plan | {'_approval_action': action}, plan_pin, approval_pin
 
+
+
+def validate_rearm_seal(plan, plan_pin, files):
+    """Validate TCB-writable snapshots while the native gate holds their read handles."""
+    from .initial_pg_lease import rearm_scope
+    rearm = rearm_scope(plan)
+    _need(set(files) == {'rearm-predecessor-state.json', 'rearm-predecessor-binding.json',
+                         'rearm-predecessor-args.txt', 'rearm-predecessor-seal.json'})
+    for name, key in (('state.json', 'predecessor_terminal_sha256'),
+                      ('binding.json', 'predecessor_binding_sha256'), ('args.txt', 'predecessor_args_sha256')):
+        _need(_digest(files['rearm-predecessor-' + name]) == rearm[key])
+    previous = _decode(files['rearm-predecessor-state.json'])
+    binding = _decode(files['rearm-predecessor-binding.json'])
+    settings = _args(files['rearm-predecessor-args.txt'])
+    seal = _decode(files['rearm-predecessor-seal.json'])
+    identity = plan['windows_enforced']
+    handoff = plan['initial_cutover_handoff']
+    stable = {'schema_version', 'kind', 'generation', 'attempt_id', 'legacy_plan_sha256',
+              'restore_receipt_sha256', 'activation_intent_sha256', 'controller_plan_sha256', 'recovery',
+              'revision', 'phase', 'sequence'}
+    binding_keys = {'attempt_id', 'controller_plan_sha256', 'first_write_proof_sha256', 'legacy_plan_sha256',
+                    'service_created_ticks', 'service_image_path_sha256', 'service_name', 'service_pid', 'state_path'}
+    _need(type(previous) is dict and set(previous) in (stable, stable | {'failure_code'})
+          and previous['schema_version'] == 1 and type(previous['schema_version']) is int
+          and previous['kind'] == 'initial-wsl-cutover-recovery'
+          and previous['phase'] in ('lease_lost', 'local_revoke_observed')
+          and type(previous['revision']) is int and previous['revision'] == 4
+          and type(previous['generation']) is int and previous['generation'] == 1
+          and type(previous['sequence']) is int and previous['sequence'] > 0
+          and previous['recovery'] == plan['initial_cutover_recovery']
+          and all(previous[key] == handoff[key] for key in ('attempt_id', 'legacy_plan_sha256',
+                                                           'restore_receipt_sha256', 'activation_intent_sha256')))
+    _need(type(binding) is dict and set(binding) == binding_keys
+          and binding['controller_plan_sha256'] == previous['controller_plan_sha256'] != plan_pin
+          and binding['legacy_plan_sha256'] == previous['legacy_plan_sha256']
+          and binding['attempt_id'] == previous['attempt_id']
+          and binding['service_name'] == settings['service_name'] == identity['service_name']
+          and settings['service_sid'] == identity['service_sid']
+          and settings['plan_sha256'] == binding['controller_plan_sha256']
+          and settings['host_sha256'] == identity['service_image_sha256']
+          and type(binding['service_pid']) is int and binding['service_pid'] > 0
+          and type(binding['service_created_ticks']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', binding['service_created_ticks'])
+          and all(type(binding[key]) is str and SHA.fullmatch(binding[key]) for key in (
+              'controller_plan_sha256', 'first_write_proof_sha256', 'service_image_path_sha256'))
+          and _path(settings['plan_path']).parent / 'journal' / 'controller-state.json' == _path(binding['state_path']))
+    expected = {'schema_version': 1, 'plan_sha256': plan_pin, 'rearm': rearm,
+                'windows_boot_sha256': plan['windows_initial_observer']['windows_boot_sha256'],
+                'service': {'service_name': identity['service_name'], 'service_sid': identity['service_sid'],
+                            'state': 'Stopped', 'start_mode': 'Disabled', 'process_id': 0,
+                            'service_image_path_sha256': binding['service_image_path_sha256']}}
+    _need(type(seal) is dict and seal == expected and type(seal.get('schema_version')) is int
+          and type(seal.get('service')) is dict and type(seal['service'].get('process_id')) is int)
+    return rearm
 
 def _check_acl(owner, entries, *, depth, os_drive_root, private_reader):
     _need(owner in WRITERS or depth > 1 and os_drive_root and owner == TRUSTED_INSTALLER)
@@ -392,11 +476,40 @@ class InitialWindowsGate:
                     verified = _validate(plan_raw, approval_raw, settings, sid, datetime.now(timezone.utc))
                 except (OSError, ValueError, TypeError, KeyError, RecursionError, AttributeError):
                     _need(False)
+                self._predecessor_terminal=None
+                self._unpublished_verified=None
+                if 'initial_unpublished_recovery' in verified[0]:
+                    from .initial_unpublished import FILES as UNPUBLISHED_FILES, validate_seal as validate_unpublished
+                    snapshots={name:stack.enter_context(native.protected_file(
+                        self.plan_path.with_name(name),1048576,private_reader=sid)) for name in UNPUBLISHED_FILES}
+                    self._unpublished_verified=validate_unpublished(verified[0],verified[1],snapshots)
+                    self._predecessor_terminal=snapshots[UNPUBLISHED_FILES[0]]
+                self._postboot_stopped_sha256 = None
+                self._postboot_verified = None
+                if 'initial_recovery_postboot' in verified[0]:
+                    from .initial_postboot import FILES, validate_seal
+                    snapshots = {name: stack.enter_context(native.protected_file(
+                        self.plan_path.with_name(name), 65536, private_reader=sid)) for name in FILES}
+                    self._postboot_verified = validate_seal(verified[0], verified[1], snapshots)
+                    self._predecessor_terminal=snapshots[FILES[0]]
+                    self._postboot_stopped_sha256 = _decode(snapshots['postboot-resume-evidence.json'])['postboot_stopped_receipt_sha256']
+                self._rearm_verified = None
+                if 'initial_recovery_rearm' in verified[0]:
+                    snapshots = {name: stack.enter_context(native.protected_file(
+                        self.plan_path.with_name(name), 65536, private_reader=sid))
+                        for name in ('rearm-predecessor-state.json', 'rearm-predecessor-binding.json',
+                                     'rearm-predecessor-args.txt', 'rearm-predecessor-seal.json')}
+                    self._rearm_verified = validate_rearm_seal(verified[0], verified[1], snapshots)
                 self.plan_data, self.plan_sha256, self.approval_sha256 = verified
                 self._installed_runtime = True
                 try:
                     yield
                 finally:
+                    self._predecessor_terminal=None
+                    self._unpublished_verified=None
+                    self._postboot_stopped_sha256 = None
+                    self._postboot_verified = None
+                    self._rearm_verified = None
                     self._installed_runtime = False
                     self.plan_data = self.plan_sha256 = self.approval_sha256 = None
         finally:

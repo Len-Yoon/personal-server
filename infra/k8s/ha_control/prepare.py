@@ -10,9 +10,11 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[3]
 SOURCES = tuple("infra/k8s/ha_control/" + name for name in (
     "__init__.py", "controller.py", "windows.py", "pg.py", "initial_pg_lease.py", "initial_lease_service.py",
-    "initial_windows_gate.py", "windows-ha-start-initial-service.ps1", "windows-ha-start-lease-observer.ps1",
-    "windows-ha-stage-initial-activation.ps1",
+    "initial_windows_gate.py", "initial_postboot.py", "initial_unpublished.py", "windows-ha-start-initial-service.ps1", "windows-ha-start-lease-observer.ps1",
+    "windows-ha-stage-initial-activation.ps1", "windows-ha-native-ingress.ps1",
+    "windows-ha-native-ingress-service.ps1",
     "windows_lease_pipe.py", "windows-ha-lease-proof-client.ps1", "windows-ha-lease-proof-server.ps1",
+    "windows-ha-recovery-proof-protocol.ps1", "windows-ha-native-recovery-observer.ps1",
     "windows-ha-wsl-lease-observer.ps1",
     "cli.py", "prepare.py", "windows-fence.ps1",
     "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py", "legacy_cutover.py", "legacy_writers.py", "launcher.py",

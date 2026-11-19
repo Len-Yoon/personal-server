@@ -265,11 +265,11 @@ def _identity(pins):
     _need(raw.decode().strip() == pins.utility_digest + " amd64 linux", "guest_restore_utility_mismatch")
 
 
-def _pg(pins, sql):
+def _pg(pins, sql, *, timeout=10):
     raw = _docker("exec", "--user", f"{pins.uid}:{pins.gid}", "--env",
                   "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=3000",
                   "--env", "PGCONNECT_TIMEOUT=3", pins.postgres_id, "psql", "-XqwAt", "-v", "ON_ERROR_STOP=1",
-                  "-h", "/var/run/postgresql", "-U", "postgres", "-d", "ha", "-c", sql)
+                  "-h", "/var/run/postgresql", "-U", "postgres", "-d", "ha", "-c", sql, timeout=timeout)
     return json.loads(raw)
 
 

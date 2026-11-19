@@ -433,12 +433,138 @@ def install(bundle, expected_manifest):
     return {'status':'PASS','postgres_started':False,'writer_authority_issued':False,'production_deployed':False}
 
 
+def standby_docker(args, *, timeout, compose=False):
+    executable = '/usr/libexec/docker/cli-plugins/docker-compose' if compose else '/usr/bin/docker'
+    for path in (Path(executable), *Path(executable).parents, Path('/etc/docker')):
+        info = path.lstat()
+        kind = stat.S_ISREG if path == Path(executable) else stat.S_ISDIR
+        need(kind(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+             'replacement_standby_docker_untrusted')
+    socket = Path('/run/docker.sock')
+    info = socket.lstat()
+    need(Path('/var/run/docker.sock').resolve(strict=True) == socket and stat.S_ISSOCK(info.st_mode)
+         and info.st_uid == 0 and not info.st_mode & 0o007, 'replacement_standby_docker_untrusted')
+    result = subprocess.run([executable,*args],timeout=timeout,capture_output=True,check=False,
+                            env={'PATH':'/usr/bin:/bin','HOME':'/var/empty','LANG':'C',
+                                 'DOCKER_CONFIG':'/etc/docker','DOCKER_HOST':'unix:///var/run/docker.sock'})
+    need(result.returncode == 0, 'replacement_standby_docker_failed')
+    return result.stdout
+
+
+def replacement_container(lock):
+    compose = json.loads(pg_files(lock)['pg-compose.json'])
+    expected = compose['services']['postgres']
+    identifiers = standby_docker(['ps','--all','--quiet','--no-trunc','--filter',
+                                  'label=com.docker.compose.project='+compose['name']],timeout=10).decode().split()
+    need(len(identifiers) == 1 and HEX.fullmatch(identifiers[0]), 'replacement_standby_container_unconfirmed')
+    identifier = identifiers[0]
+    item, = json.loads(standby_docker(['container','inspect',identifier],timeout=10))
+    image, = json.loads(standby_docker(['image','inspect',expected['image']],timeout=10))
+    config, host, state = item['Config'], item['HostConfig'], item['State']
+    base = image['Config']
+    expected_env = dict(entry.split('=',1) for entry in base.get('Env') or []) | expected['environment']
+    actual_env = config['Env'] or []
+    mounts = {(row['Source'], row['Destination'], row['RW']) for row in item['Mounts'] if row['Type'] == 'bind'}
+    expected_mounts = {(row['source'], row['target'], not row['read_only']) for row in expected['volumes']}
+    need(item['Id'] == identifier and item['Image'] == image['Id'] == expected['image']
+         and state['Status'] == 'running' and state['Running'] is True and item['RestartCount'] == 0
+         and all(state[key] is False for key in ('Paused','Restarting','OOMKilled','Dead'))
+         and config['Labels']['com.docker.compose.project'] == compose['name']
+         and config['Labels']['com.docker.compose.service'] == 'postgres'
+         and config['Entrypoint'] == expected['entrypoint'] and config['Cmd'] in (None, [])
+         and config['User'] == expected['user']
+         and len(actual_env) == len(expected_env) and dict(entry.split('=',1) for entry in actual_env) == expected_env
+         and host['NetworkMode'] == 'host' and host['Privileged'] is False and host['ReadonlyRootfs'] is True
+         and host['RestartPolicy']['Name'] == 'no' and (host['CapAdd'] or []) == [] and host['CapDrop'] == ['ALL']
+         and host['SecurityOpt'] == expected['security_opt']
+         and sorted(host['ExtraHosts']) == sorted(f'{name}:{ip}' for name,ip in expected['extra_hosts'].items())
+         and host['Tmpfs'] == dict(entry.split(':',1) for entry in expected['tmpfs'])
+         and len(item['Mounts']) == len(expected_mounts) and mounts == expected_mounts,
+         'replacement_standby_container_unconfirmed')
+    return hashlib.sha256(identifier.encode()).hexdigest()
+
+
+def start_replacement_standby(bundle, expected_manifest, boot_sha256, *, observe=False, preflight=False):
+    """Check a fresh standby, start it once, or inspect a recorded start."""
+    bundle = Path(bundle).absolute()
+    need(os.geteuid() == 0 and os.uname().machine == 'x86_64', 'fresh_amd64_guest_root_required')
+    need(HEX.fullmatch(expected_manifest) and digest(regular(bundle/'manifest.json')) == expected_manifest,
+         'trusted_manifest_hash_required')
+    lock, _ = verify(bundle)
+    primary, source = direction(lock)
+    need(lock['schema_version'] == 3 and source == primary and source != lock['node'],
+         'replacement_standby_direction_required')
+    need(HEX.fullmatch(boot_sha256) and digest('/proc/sys/kernel/random/boot_id') == boot_sha256,
+         'replacement_standby_boot_mismatch')
+    root = Path('/etc/n100-ha')
+    state = Path('/var/lib/n100-ha')
+    for directory, owner, mode in ((root,0,0o700),(state,0,0o700),(root/'pg-bootstrap',0,0o750),
+                                   (root/'pg-private',lock['postgres']['uid'],0o700),
+                                   (Path('/run/n100-ha/pg'),lock['postgres']['uid'],0o700)):
+        info = directory.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid == owner and stat.S_IMODE(info.st_mode) == mode
+             and not any(parent.is_symlink() for parent in directory.parents), 'replacement_standby_mount_untrusted')
+    for name in ('server.crt','server.key','ca.crt','postgres-password','repl.pgpass'):
+        info = regular(root/'pg-private'/name).stat()
+        need(info.st_uid == lock['postgres']['uid'] and not info.st_mode & 0o022
+             and (name not in {'server.key','repl.pgpass'} or stat.S_IMODE(info.st_mode) == 0o600),
+             'replacement_standby_credentials_untrusted')
+    journal = regular(state/'bootstrap.json')
+    expected = {'installation_id':lock['installation_id'], 'status':'engine_installed_pg_not_started',
+                'manifest_sha256':expected_manifest, 'writer_authority_issued':False, 'production_deployed':False}
+    need(journal.stat().st_uid == 0 and stat.S_IMODE(journal.stat().st_mode) == 0o600
+         and json.loads(journal.read_bytes()) == expected, 'replacement_standby_installation_unconfirmed')
+    data = state/'pgdata'
+    info = data.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid == lock['postgres']['uid']
+         and stat.S_IMODE(info.st_mode) == 0o700, 'replacement_standby_data_untrusted')
+    for installed, packaged in (
+        ('pg-compose.json', 'generated/pg-compose.json'),
+        ('pg-bootstrap/postgresql.conf', 'generated/postgresql.conf'),
+        ('pg-bootstrap/pg_hba.conf', 'generated/pg_hba.conf'),
+        ('pg-bootstrap/pg-entrypoint.sh', 'assets/pg-entrypoint.sh'),
+    ):
+        path = regular(root/installed)
+        need(path.stat().st_uid == 0 and not path.stat().st_mode & 0o022
+             and digest(path) == digest(bundle/packaged), 'replacement_standby_config_changed')
+    intent = state/'replacement-standby-start.json'
+    recorded = expected | {'boot_sha256':boot_sha256, 'source_node':source, 'node':lock['node']}
+    if observe:
+        path = regular(intent)
+        need(path.stat().st_uid == 0 and stat.S_IMODE(path.stat().st_mode) == 0o600
+             and json.loads(path.read_bytes()) == recorded, 'replacement_standby_intent_unconfirmed')
+        return {'status':'PASS','standby_container_sha256':replacement_container(lock),'writer_authority_issued':False}
+    need(not any(data.iterdir()), 'replacement_standby_data_not_empty')
+    need(not standby_docker(['ps','--all','--quiet'],timeout=10).strip(), 'replacement_standby_engine_not_empty')
+    if preflight:
+        need(not os.path.lexists(intent), 'replacement_standby_intent_unconfirmed')
+        return {'status':'PASS','source_commit':lock['source_commit'],'production_deployed':False}
+    # Record before Docker mutates. A lost response leaves the attempt for
+    # inspection, with the old database and its storage outside this guest.
+    fd = os.open(intent, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(encode(recorded))
+        stream.flush()
+        os.fsync(stream.fileno())
+    directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    standby_docker(['--env-file','/dev/null','--file',str(root/'pg-compose.json'),
+                    'up','--detach','--no-recreate','--no-build','--pull','never','postgres'],timeout=45,compose=True)
+    return {'status':'PASS','standby_start_requested':True,'writer_authority_issued':False}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest='action',required=True)
     p = subs.add_parser('prepare'); p.add_argument('--lock',required=True); p.add_argument('--inputs',required=True); p.add_argument('--output',required=True)
     p = subs.add_parser('verify'); p.add_argument('--bundle',required=True)
     p = subs.add_parser('install'); p.add_argument('--bundle',required=True); p.add_argument('--manifest-sha256',required=True)
+    for action in ('preflight-replacement-standby','start-replacement-standby','observe-replacement-standby'):
+        p = subs.add_parser(action); p.add_argument('--bundle',required=True)
+        p.add_argument('--manifest-sha256',required=True); p.add_argument('--boot-sha256',required=True)
     args = parser.parse_args()
     try:
         if args.action == 'prepare':
@@ -446,7 +572,12 @@ def main():
             result = {'status':'PASS','source_commit':manifest['source_commit'],'production_deployed':False}
         elif args.action == 'verify':
             lock,_ = verify(args.bundle); result = {'status':'PASS','source_commit':lock['source_commit'],'production_deployed':False}
-        else: result = install(args.bundle,args.manifest_sha256)
+        elif args.action == 'install':
+            result = install(args.bundle,args.manifest_sha256)
+        else:
+            result = start_replacement_standby(args.bundle,args.manifest_sha256,args.boot_sha256,
+                                               observe=args.action == 'observe-replacement-standby',
+                                               preflight=args.action == 'preflight-replacement-standby')
     except Exception as error:
         # Never emit dpkg output, credentials, endpoint values, SQL or exception text.
         result = {'status':'FAIL','reason':str(error) if isinstance(error,BootstrapError) else 'bootstrap_failed'}

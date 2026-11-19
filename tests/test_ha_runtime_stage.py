@@ -53,6 +53,132 @@ if($s -cne 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'){thr
 'portable-only'
 '''),'portable-only')
 
+    def test_recovery_runtime_requires_separate_identity_and_exact_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)
+            fixture(folder)
+            self.ps(r'''
+$path=Join-Path $env:FIXTURE 'manifest.json'
+$value=ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -AsHashtable
+$legacy=$value.service_name
+$attempt='c'*64
+$value.schema_version=2
+$value.recovery_attempt_id=$attempt
+$value.reservation_receipt_sha256='d'*64
+$value.service_name=[HaRuntimeStageV1.Rules]::ServiceName($attempt)
+$value.service_sid=[HaRuntimeStageV1.Rules]::ServiceSid($value.service_name)
+$spec=[HaRuntimeStageV1.Rules]::Manifest((ConvertTo-Json $value -Depth 10 -Compress))
+if($spec.RecoveryAttempt -cne $attempt -or $spec.InstallationId -cne $value.installation_id -or
+   $spec.ServiceName -ceq $legacy -or $spec.HostStaged){throw 'recovery_identity_mismatch'}
+$receipt=[HaRuntimeStageV1.Json]::Object((ConvertTo-Json @{
+ format='fresh-recovery-service-reservation-receipt-v1';installation_id=$value.installation_id;recovery_attempt_id=$attempt;
+ ready_to_start=$false;args_present=$false;runtime_authority_issued=$false;service_started=$false;namespace_changed=$false
+} -Compress),32768)
+Assert-RecoveryRuntimeReceipt $receipt $spec
+$receipt['service_started']=$true
+try{Assert-RecoveryRuntimeReceipt $receipt $spec;throw 'running_receipt_accepted'}catch{
+ if($_.Exception.Message -cne 'runtime_stage_recovery_receipt'){throw}
+}
+function Reject-Manifest {
+ $ok=$false
+ try{$null=[HaRuntimeStageV1.Rules]::Manifest((ConvertTo-Json $value -Depth 10 -Compress))}catch{$ok=$true}
+ if(-not $ok){throw 'unsafe_recovery_manifest'}
+}
+$value.service_name=$legacy
+$value.service_sid=[HaRuntimeStageV1.Rules]::ServiceSid($legacy)
+Reject-Manifest
+$value.recovery_attempt_id=$value.installation_id.Substring(0,24)+('e'*40)
+Reject-Manifest
+''', folder)
+
+    def test_rearm_stage_scope_is_explicit_and_rejects_partial_or_fresh_use(self):
+        self.ps(r'''
+if(Test-RuntimeRearmMode $false '' '' ''){throw 'fresh_became_rearm'}
+if(-not (Test-RuntimeRearmMode $true ('a'*64) ('b'*64) ('c'*64))){throw 'rearm_missing'}
+foreach($parameters in @(@($false,('a'*64),('b'*64),('c'*64)),@($true,('a'*64),'',('c'*64)),
+                   @($true,'',('b'*64),('c'*64)),@($true,('c'*64),('b'*64),('c'*64)),
+                   @($true,'bad',('b'*64),('c'*64)))){
+ try{Test-RuntimeRearmMode @parameters;throw 'fixture_accepted_scope'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_rearm_scope'){throw}}
+}
+exit 0
+''')
+
+    def test_rearm_stage_matches_only_stopped_owned_service_paths(self):
+        self.ps(r'''
+$root='C:\ProgramData\N100HA_'+('a'*24)
+$spec=[pscustomobject]@{ServiceName='N100HA_'+('a'*24)+'_controller'}
+$good=@{Name=$spec.ServiceName;State='Stopped';StartMode='Manual';ProcessId=0;
+ StartName=('NT SERVICE\'+$spec.ServiceName);ServiceType='Own Process';DesktopInteract=$false;
+ PathName=('"'+$root+'\host\windows-service-host.exe"')}
+$script:row=[pscustomobject]$good
+function Get-CimInstance {return $script:row}
+function Test-Path {return $true}
+function Join-Path {param($Path,$ChildPath);return $Path+'\'+$ChildPath}
+$null=Read-RearmRuntimeService $root $spec
+try{Assert-RecoveryRuntimeStopped $root $spec;throw 'fresh_accepted_existing_args'}
+catch{if($_.Exception.Message -cne 'runtime_stage_recovery_service'){throw}}
+foreach($mode in @('Manual','Disabled')){
+ $copy=$good.Clone();$copy.StartMode=$mode;$copy.PathName='"'+$root+'\rearm-'+('b'*64)+'\host\windows-service-host.exe"'
+ $script:row=[pscustomobject]$copy;$null=Read-RearmRuntimeService $root $spec
+}
+foreach($drift in @(@{State='Running'},@{ProcessId=4},@{StartMode='Auto'},@{ServiceType='Share Process'},
+ @{DesktopInteract=$true},@{DesktopInteract=$null},@{StartName='LocalSystem'},@{Name='different'},
+ @{PathName='"C:\elsewhere\windows-service-host.exe"'},@{PathName=('"'+$root+'\host\windows-service-host.exe" extra')},
+ @{PathName=('"'+$root+'\rearm-invalid\host\windows-service-host.exe"')})){
+ $copy=$good.Clone();foreach($key in $drift.Keys){$copy[$key]=$drift[$key]};$script:row=[pscustomobject]$copy
+ try{Read-RearmRuntimeService $root $spec;throw 'fixture_accepted_service'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_rearm_service'){throw}}
+}
+exit 0
+''')
+
+    def test_rearm_stage_pins_actual_args_owned_host_and_scm_before_after(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.ps(r'''
+Add-Type 'public static class StageRearmNativeFixture {public static bool Drift=false; public static string Identity(string path){return (Drift ? "changed:" : "stable:")+path;}}'
+$parseErrors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:RUNTIME_STAGE_SOURCE,[ref]$tokens,[ref]$parseErrors)
+if($parseErrors.Count){throw 'parse_fixture'}
+foreach($name in @('Open-RearmRuntimeInput','Assert-RearmRuntimeStopped')){
+ $fn=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
+ if($fn.Count -ne 1){throw 'fixture_function'}
+ . ([scriptblock]::Create($fn[0].Extent.Text.Replace('[HaRuntimeStageV1.Native]::Identity','[StageRearmNativeFixture]::Identity')))
+}
+function Assert-RuntimeStagePath {param($Path,$Root,$Sid,$InputFile);if($Sid -cne 'fixtureSID' -or -not $InputFile){throw 'fixture_acl_scope'}}
+$root=$env:FIXTURE;$null=[IO.Directory]::CreateDirectory((Join-Path $root 'host'))
+$exe=Join-Path $root 'host/windows-service-host.exe';[IO.File]::WriteAllText($exe,'owned-host')
+$hostPin=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($exe))
+$spec=[pscustomobject]@{ServiceName='fixture';ServiceSid='fixtureSID';InstallationId=('a'*64);RecoveryAttempt=('b'*64)}
+$argsFile=Join-Path $root 'host/service.args'
+$text="format=enforced-service-v1`nservice_name=fixture`nservice_sid=fixtureSID`npython_path=old`npython_sha256=old`nlauncher_path=old`nlauncher_sha256=old`nplan_path=old`nplan_sha256="+('c'*64)+"`napproval_path=old`napproval_sha256=old`nmode=serve`nhost_sha256="+$hostPin+"`n"
+[IO.File]::WriteAllText($argsFile,$text)
+$argPin=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($argsFile))
+$owner=@{format='ha-owned-recovery-service-v1';service_name='fixture';service_sid='fixtureSID';installation_id=('a'*64);
+ recovery_attempt_id=('b'*64);service_image_sha256=$hostPin}
+[IO.File]::WriteAllText((Join-Path $root 'namespace-service-ownership.json'),(ConvertTo-Json $owner -Compress))
+$script:snapshot=[pscustomobject]@{Name='fixture';State='Stopped';StartMode='Manual';ProcessId=0;StartName='NT SERVICE\fixture';ServiceType='Own Process';DesktopInteract=$false;PathName=('"'+$exe+'"')}
+function Read-RearmRuntimeService {return $script:snapshot.PSObject.Copy()}
+$ownerPin=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes((Join-Path $root 'namespace-service-ownership.json')))
+$lease=Open-RearmRuntimeStopped $root $spec $argPin $ownerPin
+try{
+ Assert-RearmRuntimeStopped $root $spec $lease
+ $script:snapshot.StartMode='Disabled'
+ try{Assert-RearmRuntimeStopped $root $spec $lease;throw 'fixture_accepted_scm_drift'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_rearm_service_changed'){throw}}
+ $script:snapshot.StartMode='Manual';[StageRearmNativeFixture]::Drift=$true
+ try{Assert-RearmRuntimeStopped $root $spec $lease;throw 'fixture_accepted_identity_drift'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_rearm_input'){throw}}
+ [StageRearmNativeFixture]::Drift=$false
+}finally{foreach($file in $lease.Opened){$file.Dispose()}}
+try{Open-RearmRuntimeStopped $root $spec ('d'*64) $ownerPin;throw 'fixture_accepted_args_drift'}
+catch{if($_.Exception.Message -cne 'runtime_stage_rearm_args'){throw}}
+$owner.service_image_sha256='e'*64;[IO.File]::WriteAllText((Join-Path $root 'namespace-service-ownership.json'),(ConvertTo-Json $owner -Compress))
+try{Open-RearmRuntimeStopped $root $spec $argPin $ownerPin;throw 'fixture_accepted_host_drift'}
+catch{if($_.Exception.Message -cne 'runtime_stage_rearm_host'){throw}}
+exit 0
+''', folder)
+
     def test_clr_parent_walk_uses_real_filesystem_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp);(folder/'leaf').write_text('fixture')

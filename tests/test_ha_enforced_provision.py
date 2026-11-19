@@ -68,7 +68,7 @@ if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner 
         good=settings()
         raw=P.render_args(good)
         self.assertEqual(raw.decode().splitlines()[0], 'format=enforced-service-v1')
-        for mode in ('authenticate','initialize','advance','serve'):
+        for mode in ('authenticate','initialize','advance','serve','observe-rejoin-stage'):
             self.assertIn(('mode='+mode+'\n').encode(),P.render_args(good|{'mode':mode}))
         for key, value in [('mode','shell'),('python_path',r'\\host\python.exe'),
                 ('plan_path',r'C:\Private\..\other'),('approval_path',r'C:\Private\file:stream'),
@@ -78,6 +78,20 @@ if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner 
                 bad=deepcopy(good);bad[key]=value;P.render_args(bad)
         with self.assertRaises(P.ProvisionError):
             P.render_args(good | {'command':'whoami'})
+
+    def test_closure_arguments_only_change_the_authorized_mode(self):
+        values = settings() | {"mode": "transition-serve"}
+        scope = {key: values[key] for key in
+                 ("service_name", "service_sid", "python_path", "python_sha256", "launcher_path", "launcher_sha256")}
+        plan = {"profile": "enforced-vm-v1", "windows_enforced": scope | {"service_image_sha256": values["host_sha256"]},
+                "transition_service_start": {"lease_closure_check": True, "mode": "transition-serve"}}
+        raw = json.dumps(plan).encode()
+        values["plan_sha256"] = P.sha(raw)
+        serving, lookup = P.closure_service_args(values, raw)
+        self.assertEqual(lookup, serving.replace(b"mode=transition-serve\n", b"mode=check-lease-closed\n"))
+        for bad in (values | {"service_name": "other"}, values | {"plan_sha256": "a"*64}):
+            with self.subTest(bad=bad), self.assertRaises(P.ProvisionError):
+                P.closure_service_args(bad, raw)
 
     def test_real_managed_host_parser_and_quoted_fixed_command(self):
         pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
@@ -96,6 +110,24 @@ if($initialize.CommandLine().EndsWith('--arm')){throw 'initialize_armed'}
 $advance=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=advance'))
 if($advance.CommandLine() -cne $expected.Replace(' serve ',' advance ').Replace(' --arm','')){throw 'advance_not_exact_fixed_command'}
 if($advance.CommandLine().EndsWith('--arm')){throw 'advance_armed'}
+$transition=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=transition-serve'))
+if($transition.CommandLine() -cne $expected.Replace(' serve ',' transition-serve ').Replace(' --arm','')){throw 'transition_not_exact_fixed_command'}
+$rearm=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=transition-rearm'))
+if($rearm.CommandLine() -cne $expected.Replace(' serve ',' transition-rearm ').Replace(' --arm','')){throw 'rearm_not_exact_fixed_command'}
+$stage=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=stage-rejoin'))
+if($stage.CommandLine() -cne $expected.Replace(' serve ',' stage-rejoin ').Replace(' --arm','')){throw 'stage_not_exact_fixed_command'}
+$observe=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=observe-rejoin-stage'))
+if($observe.CommandLine() -cne $expected.Replace(' serve ',' observe-rejoin-stage ').Replace(' --arm','')){throw 'observe_not_exact_fixed_command'}
+$rejoin=$observe.RejoinLaunchRecord(('a'*32),123,456,1731712345000)|ConvertFrom-Json
+if($rejoin.probe -cne ('a'*32) -or $rejoin.mode -cne 'observe-rejoin-stage' -or
+   $rejoin.plan_sha256 -cne $observe.Values['plan_sha256'] -or $rejoin.python_pid -ne 123 -or
+   $rejoin.host_pid -ne 456 -or $rejoin.started_at_ms -ne 1731712345000){throw 'rejoin_launch_record_unbound'}
+$check=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-rejoin'))
+if($check.CommandLine() -cne $expected.Replace(' serve ',' check-rejoin ').Replace(' --arm','')){throw 'check_not_exact_fixed_command'}
+$closure=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-lease-closed'))
+$launch=$closure.ClosureLaunchRecord(123,456,1731712345000)|ConvertFrom-Json
+if($launch.python_pid -ne 123 -or $launch.host_pid -ne 456 -or $launch.started_at_ms -ne 1731712345000 -or
+   $launch.plan_sha256 -cne $closure.Values['plan_sha256'] -or $launch.schema_version -ne 1){throw 'closure_launch_record_unbound'}
 $auth=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=authenticate'))
 if($auth.CommandLine() -cne $expected.Replace(' serve ',' authenticate ').Replace(' --arm','')){throw 'auth_not_exact_fixed_command'}
 $ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
@@ -103,11 +135,11 @@ if(-not [EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($ti,'c:\','C:\',2)){t
 foreach($case in @(@($ti,'C:\','C:\',0),@($ti,'C:\','C:\',1),@($ti,'C:\Private','C:\',3),@($ti,'D:\','C:\',3),@($ti,'C:\..\','C:\',3),@('S-1-1-0','C:\','C:\',3))){
  if([EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($case[0],$case[1],$case[2],[int]$case[3])){throw 'unsafe_owner_exception'}
 }
-foreach($mode in @('authenticate','initialize','advance')){
+foreach($mode in @('authenticate','initialize','advance','stage-rejoin','observe-rejoin-stage','check-rejoin','check-lease-closed')){
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }
-foreach($mode in @('serve','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
+foreach($mode in @('serve','transition-serve','transition-rearm','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
 $phases=[EnforcedServiceV1.StartupPhase]
 if([int]$phases::ArgsRead -ne 22 -or [int]$phases::Dispatch -ne 25 -or
    [int]$phases::PythonTree -ne 35 -or [int]$phases::PythonCreate -ne 39 -or

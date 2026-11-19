@@ -1,4 +1,5 @@
 """Native-adapter unit evidence only; no Windows/N100 actions are executed."""
+import base64
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -6,19 +7,816 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 import sys
 import tempfile
+import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
-from ha_control.controller import TransitionBlocked
-from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
+from ha_control import native_stdio_bridge
+from ha_control.controller import Journal, TransitionBlocked
+from ha_control.initial_pg_lease import INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, InitialPgLease, InitialPgLeaseRecovery
+from ha_control.native_guest_activation import ServingGeneration
+from ha_control.native_windows_activation import (
+    WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
+    prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
+    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller, read_transition_closure_receipt, observe_transition_db_closed, read_transition_rejoin_receipt,
+)
+from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
 from ha_control import cli, scm_pg_auth_probe
+
+
+class TransitionServiceStartTests(unittest.TestCase):
+    def test_controller_requires_ready_lease_before_exposing_app_guard(self):
+        generation = ServingGeneration("B", 2, 3, 2)
+        controller = {"plan_sha256": "1"*64}
+        starter = MagicMock()
+        prepare = MagicMock()
+        handoff = MagicMock(return_value="2"*64)
+        records = {"service_instance_sha256": "3"*64, "binding_path": "fixture",
+                   "binding": b'{"legacy_plan_sha256":"fixture"}'}
+        check = MagicMock(side_effect=[None, BridgeRejected("lease unavailable")])
+        settle = MagicMock(return_value={"plan_sha256": controller["plan_sha256"], "generation": 2,
+                                        "node_proofs": {"A": "a"*64, "B": "b"*64}})
+        with patch("ha_control.native_windows_activation._transition_authority_scope"), \
+                patch("ha_control.native_windows_activation.transition_authority_records", return_value=records), \
+                patch("ha_control.native_windows_activation.publish_transition_authority_records") as publish, \
+                patch("ha_control.native_windows_activation.WindowsTransitionLease") as lease:
+            lease.return_value.guest_authority.return_value = nullcontext(check)
+            with self.assertRaisesRegex(BridgeRejected, "lease unavailable"), open_transition_controller(
+                controller, generation, starter=starter, prepare_service=prepare, stage_sha256="4"*64,
+                live_sha256="5"*64, root="fixture", attempt="6"*64, old_vm_id="fixture",
+                publish_handoff=handoff, assert_non_vm_exclusions=MagicMock(), observe_closed=settle, deadline=time.monotonic()+30,
+            ):
+                self.fail("unconfirmed lease allowed activation")
+        starter.start.assert_called_once()
+        publish.assert_called_once()
+        self.assertEqual(check.call_count, 2)
+        starter.stop.assert_called_once()
+        settle.assert_called_once()
+        self.assertEqual(check.call_args.args[1], "controller-ready")
+
+    def test_closure_receipt_reader_is_pinned_to_launched_query(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        windows = MagicMock()
+        kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+                      deadline=time.monotonic()+10)
+        with self.assertRaisesRegex(BridgeRejected, "db_closure_unconfirmed"):
+            read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **(kwargs | {"host_pid": True}))
+        windows.powershell.assert_not_called()
+        read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **kwargs)
+        command = windows.powershell.call_args.args[0]
+        self.assertIn(" -ReadClosureReceipt ", command)
+        self.assertIn(" -ClosureHostPid '123' ", command)
+        self.assertIn(f" -BindingPath '{root}\\journal\\lease-closure-{'a'*64}.json'", command)
+
+    def test_rejoin_reader_binds_exact_mode_and_rejects_open_authority(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        windows = MagicMock()
+        receipt = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
+                   "rejoin_stage_sha256": "b"*64, "standby_rejoined": True, "revision": 5}
+        windows.powershell.side_effect = [receipt, receipt | {"authority_opened": True}, receipt,
+                                         receipt | {"revision": True}]
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        common = (windows, pin, root, "a"*64)
+        kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+                      deadline=time.monotonic()+10)
+        self.assertEqual(read_transition_rejoin_receipt(*common, "check-rejoin", **kwargs), receipt)
+        command = windows.powershell.call_args.args[0]
+        self.assertIn(" -ReadRejoinReceipt ", command)
+        self.assertIn(" -RejoinMode 'check-rejoin' ", command)
+        for mode in ("check-rejoin", "observe-rejoin-stage", "check-rejoin"):
+            with self.assertRaisesRegex(BridgeRejected, "rejoin_receipt_unconfirmed"):
+                read_transition_rejoin_receipt(*common, mode, **kwargs)
+
+    def test_rejoin_reader_keeps_replica_and_source_wal_distinct(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        windows = MagicMock()
+        common = (windows, pin, rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}", "a"*64)
+        kwargs = dict(host_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+                      deadline=time.monotonic()+10)
+        state = {"phase": "rejoining", "replica_fence_wal": 0x31}
+        backend = SimpleNamespace(fence_adapter=SimpleNamespace(plan_sha256="a"*64))
+        receipt = cli.rejoin_stage_receipt(backend, state)
+        self.assertEqual(receipt["replica_fence_wal"], "0000000000000031")
+        self.assertNotIn("source_fence_wal", receipt)
+        windows.powershell.return_value = receipt
+        self.assertEqual(read_transition_rejoin_receipt(*common, "stage-rejoin", **kwargs), receipt)
+        for mode, invalid in (
+            ("stage-rejoin", receipt | {"source_fence_wal": "0000000000000031"}),
+            ("stage-rejoin", receipt | {"replica_fence_wal": "0000000000000000"}),
+            ("initialize", receipt | {"phase": "fencing"}),
+        ):
+            with self.subTest(mode=mode, receipt=invalid):
+                windows.powershell.return_value = invalid
+                with self.assertRaisesRegex(BridgeRejected, "rejoin_receipt_unconfirmed"):
+                    read_transition_rejoin_receipt(*common, mode, **kwargs)
+        with self.assertRaisesRegex(TransitionBlocked, "transition_rejoin_wal_unconfirmed"):
+            cli.rejoin_stage_receipt(backend, state | {"source_fence_wal": 0x31})
+
+    def test_lost_closure_response_recovers_scm_result_without_replay(self):
+        starter = MagicMock()
+        starter.check_lease_closed.side_effect = OSError("lost response")
+        started = {"host_pid": 123, "started_at_ms": 1731712345000, "service_sid": "S-1-5-80-1-2-3-4-5"}
+        starter.observe_closure_check.return_value = started
+        controller = {"plan_sha256": "a"*64}
+        generation = ServingGeneration("B", 2, 3, 2)
+        deadline = time.monotonic() + 35
+        with patch("ha_control.native_windows_activation.read_transition_closure_receipt") as reader:
+            outcome = observe_transition_db_closed(
+                starter, controller, {}, generation, live_sha256="b"*64, root="fixture", deadline=deadline,
+            )
+            self.assertIs(outcome, reader.return_value)
+            reader.assert_called_once_with(
+                starter.windows, "b"*64, "fixture", "a"*64, 2,
+                host_pid=123, started_ms=1731712345000, service_sid=started["service_sid"], deadline=deadline,
+            )
+        starter.check_lease_closed.assert_called_once()
+        starter.observe_closure_check.assert_called_once_with(controller, {}, deadline)
+        starter.restore_closure_args.assert_not_called()
+
+    def test_successor_needs_exact_prior_identity_and_closed_database_lease(self):
+        from ha_control.native_windows_activation import close_previous_transition_service
+
+        service, image, pin = "N100HA_" + "1"*24 + "_controller", "2"*64, "3"*64
+        scope = {"service_name": service, "service_sid": "S-1-5-80-1-2-3-4-5", "service_image_sha256": pin}
+        common = {"profile": "enforced-vm-v1", "cluster": "fixture", "system_id": "system",
+                  "installation_id": "4"*64, "windows_enforced": scope,
+                  "transition_service_start": {"service_image_path_sha256": image, "lease_closure_check": True, "target_timeline": 2}}
+
+        def controller(**fields):
+            raw = json.dumps(common | fields).encode()
+            return {"plan": raw, "plan_sha256": hashlib.sha256(raw).hexdigest()}
+
+        prior, successor = ServingGeneration("B", 2, 2, 3), ServingGeneration("A", 3, 3, 4)
+        fields = {"node": "B", "timeline": 2, "generation": 3, "source_lease_close_required": True}
+        starter = MagicMock()
+        previous = controller(timeline=1)
+        params = {"PlanPath": r"fixture\plan.json", "PlanSha256": previous["plan_sha256"]}
+        args = (starter, previous, params, prior)
+        kwargs = {"previous_root": "fixture", "previous_attempt": "5"*64, "previous_old_vm_id": "fixture",
+                  "live_sha256": "6"*64, "deadline": time.monotonic()+10}
+        prefix = "ha_control.native_windows_activation."
+        with patch(prefix + "_transition_authority_scope", return_value=("legacy", service, image, "", "")), \
+                patch(prefix + "fixed_script"), patch(prefix + "settle_transition_controller") as settle:
+            with self.assertRaisesRegex(BridgeRejected, "predecessor_unconfirmed"):
+                close_previous_transition_service(*args, controller(**(fields | {"cluster": "other"})), successor, **kwargs)
+            settle.assert_not_called()
+            settle.side_effect = BridgeRejected("lease still active")
+            with self.assertRaisesRegex(BridgeRejected, "lease still active"):
+                close_previous_transition_service(*args, controller(**fields), successor, **kwargs)
+            starter.verify_prepared.assert_not_called()
+            settle.side_effect = None
+            starter.verify_prepared.return_value = {"serving_args_sha256": pin}
+            self.assertEqual(close_previous_transition_service(*args, controller(**fields), successor, **kwargs), pin)
+            starter.verify_prepared.assert_called_once_with(previous, params, kwargs["deadline"])
+
+    def test_settlement_never_reads_db_until_exact_service_is_stopped(self):
+        starter = MagicMock()
+        controller = {"plan_sha256": "a"*64}
+        parameters = {}
+        generation = ServingGeneration("B", 2, 3, 2)
+        deadline = time.monotonic() + 10
+        closed = MagicMock()
+        order = MagicMock()
+        order.attach_mock(starter, "service")
+        order.attach_mock(closed, "db")
+        starter.stop.side_effect = BridgeRejected("stop unconfirmed")
+        with self.assertRaisesRegex(BridgeRejected, "stop unconfirmed"):
+            settle_transition_controller(starter, controller, parameters, None, generation, closed, deadline)
+        self.assertEqual([call[0] for call in order.mock_calls], ["service.observe", "service.stop"])
+        order.reset_mock()
+        starter.stop.side_effect = None
+        closed.return_value = {"plan_sha256": "a"*64, "generation": 2, "node_proofs": {"A": "b"*64}}
+        with self.assertRaisesRegex(BridgeRejected, "db_closure_unconfirmed"):
+            settle_transition_controller(starter, controller, parameters, None, generation, closed, deadline)
+        self.assertEqual([call[0] for call in order.mock_calls], ["service.observe", "service.stop", "db"])
+
+    def test_live_authority_records_bind_previous_vm_and_running_controller(self):
+        image = "7"*64
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        python = r"C:\Python311\python.exe"
+        observer = {"legacy_plan_sha256": "8"*64}
+        plan = {"profile": "enforced-vm-v1", "generation": 2, "node": "A",
+                "windows_enforced": {"service_name": "N100HA_" + "1"*24 + "_controller",
+                                     "vm_id": vm_id, "python_path": python,
+                                     "disks": [{"path": r"C:\VM\Z.vhdx"}, {"path": r"C:\VM\a.vhdx"}]},
+                "windows_transition_observer": observer,
+                "transition_service_start": {"service_image_path_sha256": image}}
+        raw = json.dumps(plan).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        controller = {"plan": raw, "plan_sha256": pin}
+        started = {"controller_plan_sha256": pin, "service_pid": 123,
+                   "service_created_ticks": "638674752000000000", "service_image_path_sha256": image,
+                   "python_command_sha256": "e"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        generation = ServingGeneration("B", 2, 3, 2)
+        args = dict(root=root, attempt="a"*64, handoff_sha256="b"*64, old_vm_id=vm_id)
+        records = transition_authority_records(controller, started, generation, **args)
+        body = json.loads(records["binding"])
+        self.assertEqual((body["old_vm_id"], body["target"], body["generation"], body["timeline"]), (vm_id, "B", 2, 3))
+        self.assertEqual(body["python_path_sha256"], hashlib.sha256(python.encode()).hexdigest())
+        self.assertEqual(body["python_command_sha256"], started["python_command_sha256"])
+        expected_disks = (r"c:\vm\a.vhdx" + "\n" + r"c:\vm\z.vhdx").encode()
+        self.assertEqual(body["old_disk_paths_sha256"], hashlib.sha256(expected_disks).hexdigest())
+        self.assertEqual(body["state_path"], root + r"\journal\controller-state.json")
+        self.assertEqual(json.loads(records["grant"]), {
+            "attempt_id": args["attempt"], "handoff_sha256": args["handoff_sha256"],
+            "service_instance_sha256": hashlib.sha256(records["binding"]).hexdigest(),
+        })
+        with self.assertRaisesRegex(BridgeRejected, "authority_record_invalid"):
+            transition_authority_records(controller, started, generation, **(args | {"old_vm_id": "9"*8 + vm_id[8:]}))
+
+        stage = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(stage.read_bytes()).hexdigest()
+        windows = MagicMock()
+        record_pins = [hashlib.sha256(records[name]).hexdigest() for name in ("binding", "grant")]
+        windows.powershell.side_effect = [{"transition_authority_record_sha256": digest} for digest in record_pins]
+        deadline = time.monotonic() + 30
+        self.assertEqual(publish_transition_authority_records(windows, stage_pin, records, pin, deadline), record_pins[0])
+        sent = [call.args[0] for call in windows.powershell.call_args_list]
+        for command, name in zip(sent, ("binding", "grant"), strict=True):
+            self.assertIn(records[f"{name}_path"], command)
+            self.assertIn("-PublishTransitionAuthority", command)
+        windows.powershell.reset_mock()
+        windows.powershell.side_effect = [{"blocked": "incorrect binding"}]
+        with self.assertRaisesRegex(BridgeRejected, "record_unconfirmed"):
+            publish_transition_authority_records(windows, stage_pin, records, pin, deadline)
+        windows.powershell.assert_called_once()
+
+    def test_native_start_records_durable_intent_before_scm(self):
+        script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
+        scope = script[script.index("function Start-PreparedTransitionService"):script.index("    if (-not $Go")]
+        statements = (
+            "transition-service-start-",
+            "$commandLock =",
+            "Assert-TransitionPreflight $servingSha",
+            "Assert-TransitionStopped $Plan $HostPath $Current.PathName",
+            "Test-Path -LiteralPath $intentPath",
+            "[IO.FileMode]::CreateNew",
+            "[IO.FileOptions]::WriteThrough",
+            "$file.Flush($true)",
+            "Get-Acl -LiteralPath $intentPath",
+            "[IO.File]::Replace($stage,$argsPath",
+            "Assert-TransitionPreflight $argsSha",
+            "Start-Service -Name $ServiceName",
+            "} finally {",
+            "Assert-TransitionStopped $Plan $HostPath $Current.PathName",
+            "Restore-TransitionServingArgs $argsPath $restore $servingSha $argsSha",
+            "Write-TransitionArgsStage ($intentPath + '.completed')",
+            "$receiptJson\n                return",
+            "} finally { $commandLock.Dispose() }",
+        )
+        cursor = 0
+        for statement in statements:
+            cursor = scope.index(statement, cursor) + len(statement)
+
+    def test_native_closure_restore_does_not_replay_scm_start(self):
+        script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
+        scope = script[script.index("            if ($restoreOneShot) {"):
+                       script.index("        } else {\n            if ('TrustedStoppedV1.Native'")]
+        self.assertLess(scope.index("Assert-TransitionStopped"), scope.index("Restore-TransitionServingArgs"))
+        self.assertLess(scope.index("Restore-TransitionServingArgs"), scope.index("serving_args_restored"))
+        self.assertNotIn("Start-Service", scope)
+
+    def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        service = "N100HA_" + "1"*24 + "_controller"
+        image = "6"*64
+        raw = json.dumps({"windows_enforced": {"service_name": service}, "windows_transition_observer": {},
+                          "transition_service_start": {"service_image_path_sha256": image}}).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        plan = {"plan": raw, "plan_sha256": pin}
+        parameters = {"ServiceName": service, "PlanSha256": pin, "ApprovalSha256": "2"*64,
+                      "ServiceHostSha256": "3"*64, "PreflightSha256": "4"*64,
+                      "PlanPath": r"C:\fixture\plan.json", "ApprovalPath": r"C:\fixture\approval.json",
+                      "PreflightPath": r"C:\fixture\preflight.ps1", "ScmVerifierPath": r"C:\fixture\scm.cs"}
+        windows = MagicMock()
+        observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin,
+                    "service_created_ticks": "638674752000000000", "service_image_path_sha256": image,
+                   "python_command_sha256": "e"*64}
+        windows.powershell.side_effect = [TimeoutError("lost reply"), observed]
+        start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
+        deadline = time.monotonic() + 30
+        with self.assertRaisesRegex(BridgeRejected, "start_scope_invalid"):
+            start.start(plan, parameters | {"PlanSha256": "5"*64}, deadline)
+        windows.powershell.assert_not_called()
+        self.assertEqual(start.start(plan, parameters, deadline), observed)
+        with self.assertRaisesRegex(BridgeRejected, "start_reconciliation_required"):
+            start.start(plan, parameters, deadline)
+        requests = [call.args[0] for call in windows.powershell.call_args_list]
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[0].endswith(" -StartTransition -Go"))
+        self.assertTrue(requests[1].endswith(" -ObserveTransition -Go"))
+
+        for replies, calls in (([{"blocked": "initial_service_transition_scope"}], 1),
+                               ([TimeoutError("lost reply"), {"blocked": "not running"}], 2),
+                               ([TimeoutError("lost reply"), observed | {"service_image_path_sha256": "7"*64}], 2),
+                               ([TimeoutError("lost reply"), observed | {"service_created_ticks": 123}], 2)):
+            with self.subTest(replies=replies):
+                windows.powershell.reset_mock()
+                windows.powershell.side_effect = replies
+                start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
+                with self.assertRaisesRegex(BridgeRejected, "service_start_unconfirmed"):
+                    start.start(plan, parameters, deadline)
+                self.assertEqual(windows.powershell.call_count, calls)
+
+
+    def test_windows_args_publication_requires_the_previous_pin(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        windows = MagicMock()
+        starter = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
+        with self.assertRaisesRegex(BridgeRejected, "prepared_service_unconfirmed"):
+            starter.publish_args({}, {}, "not-a-pin", time.monotonic()+10)
+        windows.powershell.assert_not_called()
+        source = script.read_text()
+        start = source.index("        if ($PublishTransitionArgs) {")
+        end = source.index("        if ($VerifyPreparedTransition) {", start)
+        branch = source[start:end]
+        self.assertLess(branch.index("Confirm-ClosureArgsState"), branch.index("[IO.File]::Replace"))
+        self.assertLess(branch.index("[IO.File]::Replace"), branch.index("transition_service_prepared"))
+        self.assertNotIn("Start-Service", branch)
+
+    def test_windows_rejoin_start_binds_reader_before_scm_dispatch(self):
+        source = ROOT / "infra/k8s/ha_control"
+        start_pin = hashlib.sha256((source / "windows-ha-start-initial-service.ps1").read_bytes()).hexdigest()
+        live_pin = hashlib.sha256((source / "windows-ha-cutover-live-authority.ps1").read_bytes()).hexdigest()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        service = "N100HA_" + "1"*24 + "_controller"
+        sid = "S-1-5-80-1-2-3-4-5"
+        raw = json.dumps({"windows_enforced": {"service_name": service, "service_sid": sid},
+                          "windows_transition_observer": {}, "transition_service_start": {
+                              "service_image_path_sha256": "6"*64, "lease_closure_check": True,
+                          }}).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        controller = {"plan": raw, "plan_sha256": pin}
+        parameters = {"ServiceName": service, "PlanSha256": pin, "ApprovalSha256": "2"*64,
+                      "ServiceHostSha256": "3"*64, "PreflightSha256": "4"*64,
+                      "PlanPath": root + r"\plan.json", "ApprovalPath": root + r"\approval.json",
+                      "PreflightPath": root + r"\preflight.ps1", "ScmVerifierPath": root + r"\scm.cs"}
+        windows = MagicMock()
+        result = {"status": "PASS", "phase": "rejoining", "authority_opened": False, "rejoin_stage_sha256": "b"*64}
+        windows.powershell.side_effect = [
+            {"rejoin_command_completed": True, "mode": "stage-rejoin", "controller_plan_sha256": pin,
+             "service_sid": sid, "host_pid": 123, "started_at_ms": 1731712345000},
+            result,
+        ]
+        starter = WindowsTransitionServiceStart(windows, start_pin)
+        options = {"root": root, "live_sha256": live_pin, "deadline": time.monotonic() + 30}
+        inputs = (controller, parameters, "stage-rejoin", "a"*32)
+        with self.assertRaisesRegex(BridgeRejected, "script_unpinned"):
+            starter.run_rejoin(*inputs, **(options | {"live_sha256": "0"*64}))
+        windows.powershell.assert_not_called()
+        self.assertEqual(starter.run_rejoin(*inputs, **options), result)
+        start, read = [call.args[0] for call in windows.powershell.call_args_list]
+        self.assertIn(" -RejoinMode 'stage-rejoin' ", start)
+        self.assertIn(" -ReadRejoinReceipt ", read)
+        self.assertIn(" -ClosureHostPid '123' ", read)
+
+
+class TransitionObserverPublicationTests(unittest.TestCase):
+    def test_publish_transition_plan_binds_supplied_approval_before_transport(self):
+        from ha_control.native_windows_activation import publish_transition_plan
+
+        raw = json.dumps({"generation": 2, "profile": "enforced-vm-v1", "source_commit": "a"*40,
+                          "installation_id": "c"*64, "windows_enforced": {"policy_sha256": "d"*64}}).encode()
+        plan_pin = hashlib.sha256(raw).hexdigest()
+        controller = {"plan": raw, "plan_sha256": plan_pin}
+        values = {"plan_sha256": plan_pin, "action": "ha-transition", "authority_kind": "installed-runtime",
+                  "schema_version": 3, "profile": "enforced-vm-v1", "source_commit": "a"*40,
+                  "installation_id": "c"*64, "policy_sha256": "d"*64, "installed_at": "2026-11-17T00:00:00Z"}
+        approval = json.dumps(values).encode()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        options = {"root": root, "stage_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+                   "manifest_sha256": "b"*64, "deadline": time.monotonic()+10}
+        windows = MagicMock()
+        with self.assertRaisesRegex(BridgeRejected, "plan_publication_unconfirmed"):
+            publish_transition_plan(windows, controller, json.dumps(values | {"plan_sha256": "0"*64}).encode(), **options)
+        windows.powershell.assert_not_called()
+        receipt = {"transition_plan_published": True, "plan_sha256": plan_pin,
+                   "approval_sha256": hashlib.sha256(approval).hexdigest()}
+        windows.powershell.return_value = receipt
+        self.assertEqual(publish_transition_plan(windows, controller, approval, **options), receipt)
+        self.assertIn(" -PublishTransitionPlan -TransitionBundleBase64 ", windows.powershell.call_args.args[0])
+
+    def test_prepare_observer_plan_runs_the_exact_setup_order(self):
+        callback = b"fixture"
+        pin = hashlib.sha256(callback).hexdigest()
+        service = "N100HA_" + "1"*24 + "_controller"
+        plan = {"profile": "enforced-vm-v1", "generation": 2,
+                "windows_enforced": {"service_name": service, "service_sid": "S-1-5-80-1-2-3-4-5"}}
+        plan_raw = json.dumps(plan).encode()
+        pins = {key: "2"*64 for key in ("windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")}
+        metadata = pins | {key: "3"*64 for key in ("launcher_sha256", "server_sha256", "callback_sha256",
+                                                   "reactivation_plan_sha256", "marker_sha256")}
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        options = dict(
+            root=rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}",
+            plan_raw=plan_raw, plan_sha256=hashlib.sha256(plan_raw).hexdigest(),
+            binding={"callback_config": callback, "callback_config_sha256": pin,
+                     "plan": "a"*64, "attempt": "b"*64, "runtime_sha256": "c"*64},
+            observer=metadata | {"service_name": service}, manifest_sha256="4"*64,
+            stage_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+            client_sha256="5"*64, deadline=time.monotonic() + 30,
+        )
+        steps = []
+        windows = MagicMock()
+
+        def execute(source, _):
+            mode = next(name for name in ("PublishTransitionObserverConfig", "ObserveTransitionObserverConfig",
+                                          "PublishTransitionObserverLaunch", "StartTransitionObserver")
+                        if f" -{name}" in source)
+            steps.append(mode)
+            if mode == "PublishTransitionObserverLaunch":
+                submitted = base64.b64decode(source.split(" -IntentBase64 '", 1)[1].split("'", 1)[0])
+                return {"transition_observer_launch_sha256": hashlib.sha256(submitted).hexdigest()}
+            return {
+                "PublishTransitionObserverConfig": {"transition_observer_config_sha256": pin},
+                "ObserveTransitionObserverConfig": {"observed_transition_observer_config_sha256": pin},
+                "StartTransitionObserver": pins | {"callback_config_sha256": pin, "key_sha256": "6"*64,
+                                                   "observer_pid": 123, "pipe_name": "n100ha-lease-proof-" + "7"*32},
+            }[mode]
+
+        windows.powershell.side_effect = execute
+        with self.assertRaisesRegex(BridgeRejected, "observer_plan_invalid"):
+            prepare_transition_observer_plan(windows, **(options | {"plan_sha256": "0"*64}))
+        windows.powershell.assert_not_called()
+        result = prepare_transition_observer_plan(windows, **options)
+        self.assertEqual(steps, ["PublishTransitionObserverConfig", "ObserveTransitionObserverConfig",
+                                 "PublishTransitionObserverLaunch", "ObserveTransitionObserverConfig",
+                                 "StartTransitionObserver"])
+        self.assertEqual(json.loads(result["plan"])["windows_transition_observer"]["server_pid"], 123)
+
+        steps.clear()
+
+        def reject_launch(source, deadline):
+            result = execute(source, deadline)
+            if steps[-1] == "PublishTransitionObserverLaunch":
+                return {"blocked": "initial_stage_observer"}
+            return result
+
+        windows.powershell.side_effect = reject_launch
+        with self.assertRaisesRegex(BridgeRejected, "observer_launch_unconfirmed"):
+            prepare_transition_observer_plan(windows, **options)
+        self.assertEqual(steps, ["PublishTransitionObserverConfig", "ObserveTransitionObserverConfig",
+                                 "PublishTransitionObserverLaunch"])
+
+    def test_plan_binds_observer_receipt_and_rejects_stale_or_foreign_evidence(self):
+        callback = b"fixture"
+        pin = hashlib.sha256(callback).hexdigest()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        service = "N100HA_" + "1"*24 + "_controller"
+        plan = {"profile": "enforced-vm-v1", "generation": 2, "untouched": [1, 2],
+                "windows_enforced": {"service_name": service, "service_sid": "S-1-5-80-1-2-3-4-5"}}
+        raw = json.dumps(plan).encode()
+        expected_sha = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": callback, "callback_config_sha256": pin, "plan": "a"*64, "attempt": "b"*64}
+        boot = {"windows_boot_sha256": "5"*64, "wsl_boot_sha256": "6"*64, "collector_sha256": "7"*64}
+        observer = boot | {"service_name": service}
+        started = boot | {"observer_pid": 123, "pipe_name": "n100ha-lease-proof-" + "2"*32,
+                          "callback_config_sha256": pin, "key_sha256": "3"*64,
+                          "callback_config_path": root + rf"\transition-observer-config-{pin}.json",
+                          "key_path": root + rf"\transition-observer-key-{pin}.key"}
+        options = {"root": root, "binding": binding, "observer": observer, "started": started, "client_sha256": "4"*64}
+        result = bind_transition_observer_plan(raw, expected_sha, **options)
+        self.assertEqual(hashlib.sha256(result["plan"]).hexdigest(), result["plan_sha256"])
+        data = json.loads(result["plan"])
+        observed = data.pop("windows_transition_observer")
+        self.assertEqual(data, plan)
+        self.assertEqual(observed, boot | {
+            "server_pid": 123, "pipe_name": started["pipe_name"], "key_sha256": started["key_sha256"],
+            "legacy_plan_sha256": binding["plan"], "legacy_attempt_id": binding["attempt"],
+            "client_sha256": options["client_sha256"], "callback_config_sha256": pin,
+        })
+        for change in ({"observer": observer | {"service_name": "foreign"}},
+                       {"started": started | {"wsl_boot_sha256": "8"*64}},
+                       {"started": started | {"key_path": root + r"\other.key"}},
+                       {"binding": binding | {"callback_config": b"tampered"}}):
+            with self.subTest(change=change), self.assertRaisesRegex(BridgeRejected, "observer_plan_invalid"):
+                bind_transition_observer_plan(raw, expected_sha, **(options | change))
+        with self.assertRaisesRegex(BridgeRejected, "observer_plan_invalid"):
+            bind_transition_observer_plan(raw, "0"*64, **options)
+
+    def test_native_publication_binds_expected_location_and_rejects_uncertain_receipt(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        raw = b'{"fixture":true}\n'
+        pin = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": raw, "callback_config_sha256": pin, "runtime_sha256": "a"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        path = root + rf"\transition-observer-config-{pin}.json"
+        windows = MagicMock()
+        windows.powershell.side_effect = [{"transition_observer_config_sha256": pin}, {"blocked": "initial_stage_observer"}]
+
+        self.assertEqual(publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, 40), path)
+        source, deadline = windows.powershell.call_args.args
+        self.assertIn("-InputPath '" + path + "'", source)
+        self.assertIn(" -Go ", source)
+        self.assertTrue(source.endswith(" -PublishTransitionObserverConfig"))
+        self.assertEqual(deadline, 40)
+        with self.assertRaisesRegex(BridgeRejected, "config_unconfirmed"):
+            publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, 40)
+        with self.assertRaisesRegex(BridgeRejected, "config_invalid"):
+            publish_transition_observer_config(windows, root, stage_pin, binding | {"callback_config": b"changed"}, "b"*64, 40)
+        self.assertEqual(windows.powershell.call_count, 2)
+
+        deadline = time.monotonic() + 40
+        windows.powershell.reset_mock()
+        observed = {"observed_transition_observer_config_sha256": pin}
+        windows.powershell.side_effect = [TimeoutError("missing receipt"), observed, observed]
+        self.assertEqual(publish_transition_observer_config(windows, root, stage_pin, binding, "b"*64, deadline), path)
+        self.assertEqual(publish_transition_observer_config(
+            windows, root, stage_pin, binding, "b"*64, deadline, observe_only=True,
+        ), path)
+        publication, observed_after_timeout, observed_only = (
+            call.args[0] for call in windows.powershell.call_args_list
+        )
+        self.assertIn("-PublishTransitionObserverConfig", publication)
+        self.assertEqual(observed_after_timeout, observed_only)
+        self.assertIn("-ObserveTransitionObserverConfig", observed_only)
+        self.assertNotIn("-IntentBase64", observed_only)
+        self.assertEqual(windows.powershell.call_count, 3)
+
+
+    def test_launch_publication_binds_exact_legacy_plan_and_attempt(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        raw = b'{"fixture":true}\n'
+        pin = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": raw, "callback_config_sha256": pin, "runtime_sha256": "a"*64,
+                   "plan": "e"*64, "attempt": "f"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        deadline = time.monotonic() + 30
+        observer = {key: "2"*64 for key in (
+            "launcher_sha256", "server_sha256", "callback_sha256", "windows_boot_sha256",
+            "wsl_boot_sha256", "collector_sha256", "reactivation_plan_sha256", "marker_sha256",
+        )}
+        observer["service_name"] = "N100HA_" + "1"*24 + "_controller"
+
+        def execute(source, _):
+            if source.endswith(" -ObserveTransitionObserverConfig"):
+                return {"observed_transition_observer_config_sha256": pin}
+            self.assertIn(f"transition-observer-launch-{pin}.json", source)
+            self.assertIn(" -PublishTransitionObserverLaunch ", source)
+            self.assertNotIn(" -StartTransitionObserver ", source)
+            submitted = base64.b64decode(source.split(" -IntentBase64 '", 1)[1].split("'", 1)[0])
+            self.assertEqual(json.loads(submitted), observer | {
+                "callback_config_sha256": pin, "legacy_plan_sha256": binding["plan"],
+                "legacy_attempt_id": binding["attempt"],
+            })
+            return {"transition_observer_launch_sha256": hashlib.sha256(submitted).hexdigest()}
+
+        windows = MagicMock()
+        windows.powershell.side_effect = execute
+        digest = publish_transition_observer_launch(windows, root, stage_pin, binding, "b"*64, observer, deadline)
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(windows.powershell.call_count, 2)
+
+    def test_transition_observer_rechecks_publication_and_starts_exact_launch_once(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        stage_pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        raw = b'{"fixture":true}\n'
+        pin = hashlib.sha256(raw).hexdigest()
+        binding = {"callback_config": raw, "callback_config_sha256": pin, "runtime_sha256": "a"*64}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        deadline = time.monotonic() + 30
+        response = {"observer_pid": 123, "pipe_name": "n100ha-lease-proof-" + "1"*32, "callback_config_sha256": pin,
+                    **{key: "2"*64 for key in ("key_sha256", "windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")}}
+        windows = MagicMock()
+        windows.powershell.side_effect = [{"observed_transition_observer_config_sha256": pin}, response]
+        result = start_transition_observer(windows, root, stage_pin, binding, "b"*64, "c"*64, deadline)
+        self.assertEqual(result["observer_pid"], 123)
+        self.assertTrue(result["key_path"].endswith(f"transition-observer-key-{pin}.key"))
+        observed, launched = [entry.args[0] for entry in windows.powershell.call_args_list]
+        self.assertIn("-ObserveTransitionObserverConfig", observed)
+        self.assertIn("-StartTransitionObserver", launched)
+        self.assertIn(f"transition-observer-launch-{pin}.json", launched)
+
+
+class InitialServiceRetirementTests(unittest.TestCase):
+    def test_prior_args_read_rejects_another_windows_service_instance(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        windows, guard = MagicMock(), MagicMock()
+        custody = SimpleNamespace(windows=windows, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+                                  binding=SimpleNamespace(plan_sha256="a"*64, attempt_id="b"*64))
+        lease = WindowsActivationLease(custody, r"C:\Private\binding.json", {
+            "first_write_proof_sha256": "e"*64, "service_instance_sha256": "c"*64,
+        })
+        reply = {"prior_args_sha256": "d"*64, "service_instance_sha256": "c"*64}
+        windows.powershell.side_effect = [reply | {"service_instance_sha256": "0"*64}, reply]
+        deadline = time.monotonic() + 10
+        with self.assertRaisesRegex(BridgeRejected, "prior_args_unconfirmed"):
+            lease.read_prior_service_args(deadline, assert_guard=guard)
+        self.assertEqual(lease.read_prior_service_args(deadline, assert_guard=guard), "d"*64)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ReadPriorServiceArgs"))
+        self.assertEqual(guard.call_count, 3)
+
+    def test_crash_handoff_requires_terminal_record_with_stopped_service_args(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        windows, guard = MagicMock(), MagicMock()
+        custody = SimpleNamespace(windows=windows, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+                                  binding=SimpleNamespace(plan_sha256="a"*64, attempt_id="b"*64))
+        lease = WindowsActivationLease(custody, "fixture", {
+            "first_write_proof_sha256": "e"*64, "service_instance_sha256": "c"*64,
+        })
+        reply = {"prior_args_sha256": "d"*64, "service_instance_sha256": "c"*64}
+        windows.powershell.side_effect = [reply, reply | {"terminal_state_sha256": "f"*64}]
+        deadline = time.monotonic() + 10
+        with self.assertRaisesRegex(BridgeRejected, "prior_args_unconfirmed"):
+            lease.read_prior_service_args(deadline, assert_guard=guard, require_terminal=True)
+        self.assertEqual(lease.read_prior_service_args(deadline, assert_guard=guard, require_terminal=True), "d"*64)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ReadPriorServiceArgs -RequireTerminalInitial"))
+
+    def test_quiescence_requires_same_terminal_predecessor_and_fresh_database_at_each_boundary(self):
+        from ha_control import native_stdio_bridge as wire
+
+        binding = wire.Binding(*(key*64 for key in "abcde"))
+        lease = WindowsActivationLease(SimpleNamespace(binding=binding), "fixture", {
+            "first_write_proof_sha256": "e"*64, "service_instance_sha256": "c"*64,
+        })
+        predecessor = {"prior_args_sha256": "d"*64, "service_instance_sha256": "c"*64,
+                       "terminal_state_sha256": "f"*64}
+        verb = wire.GUEST_QUIESCE_INITIAL_RECOVERY
+        request = wire.Request(binding, "A", verb, 1, "1"*64, {key: "9"*64 for key in wire.VERBS[verb][3]})
+        deadline = time.monotonic() + 10
+        guard, database, guest = MagicMock(), MagicMock(return_value="5"*64), MagicMock()
+        digests = []
+
+        def quiesce(_request, _deadline, *, assert_windows_closed):
+            for index, boundary in enumerate(wire.QUIESCENCE_BOUNDARIES):
+                digests.append(assert_windows_closed(str(index)*64, boundary, deadline))
+            return wire.Receipt("PASS", "8"*64)
+
+        guest.quiesce_initial_recovery.side_effect = quiesce
+        with patch.object(lease, "read_stopped_predecessor", return_value=predecessor) as read:
+            self.assertEqual(lease.quiesce_initial_recovery(guest, request, deadline, predecessor=predecessor,
+                             assert_guard=guard, read_database_closed=database), "8"*64)
+            self.assertEqual(read.call_count, 4)
+            self.assertEqual(database.call_count, 4)
+            self.assertEqual(len(set(digests)), 4)
+            read.return_value = predecessor | {"terminal_state_sha256": "0"*64}
+            database.reset_mock()
+            with self.assertRaisesRegex(BridgeRejected, "native_initial_recovery_quiescence_unconfirmed"):
+                lease.quiesce_initial_recovery(guest, request, deadline, predecessor=predecessor,
+                                               assert_guard=guard, read_database_closed=database)
+            database.assert_not_called()
+
+    def test_hold_readback_resamples_windows_and_db_without_repeat_quiesce(self):
+        from dataclasses import replace
+        from ha_control import native_stdio_bridge as wire
+
+        binding = wire.Binding(*(key*64 for key in "abcde"))
+        lease = WindowsActivationLease(SimpleNamespace(binding=binding), "fixture", {
+            "first_write_proof_sha256": "e"*64, "service_instance_sha256": "c"*64,
+        })
+        predecessor = {"prior_args_sha256": "d"*64, "service_instance_sha256": "c"*64,
+                       "terminal_state_sha256": "f"*64}
+        args = {key: "9"*64 for key in wire.INITIAL_RECOVERY_ARGS}
+        issued = wire.Request(binding, "A", wire.GUEST_QUIESCE_INITIAL_RECOVERY, 1, "1"*64, args)
+        observed = wire.Request(binding, "A", wire.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, 2, "2"*64, args)
+        guest, guard, database = MagicMock(), MagicMock(), MagicMock(return_value="3"*64)
+        guest.observe_initial_recovery_hold.return_value = wire.Receipt("PASS", "4"*64)
+        options = {"predecessor": predecessor, "assert_guard": guard, "read_database_closed": database}
+        deadline = time.monotonic() + 10
+        with patch.object(lease, "read_stopped_predecessor", return_value=predecessor) as read:
+            self.assertEqual(lease.observe_initial_recovery_hold(guest, issued, observed, deadline, **options), "4"*64)
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(database.call_count, 2)
+            self.assertNotEqual(*[call.kwargs["challenge"] for call in database.call_args_list])
+            with self.assertRaisesRegex(BridgeRejected, "native_initial_recovery_hold_unconfirmed"):
+                lease.observe_initial_recovery_hold(guest, issued, replace(observed, nonce=issued.nonce), deadline, **options)
+            self.assertEqual(read.call_count, 2)
+            guest.observe_initial_recovery_hold.assert_called_once_with(observed, deadline)
+            guest.quiesce_initial_recovery.assert_not_called()
+
+    def test_quiescence_dispatch_intent_survives_unknown_response_and_blocks_repeat_stop(self):
+        from dataclasses import replace
+        from ha_control import native_stdio_bridge as wire
+
+        binding = wire.Binding(*(key*64 for key in "abcde"))
+        lease = WindowsActivationLease(SimpleNamespace(binding=binding), "fixture", {
+            "first_write_proof_sha256": "e"*64, "service_instance_sha256": "c"*64,
+        })
+        predecessor = {"prior_args_sha256": "d"*64, "service_instance_sha256": "c"*64,
+                       "terminal_state_sha256": "f"*64}
+        args = {key: "9"*64 for key in wire.INITIAL_RECOVERY_ARGS}
+        issued = wire.Request(binding, "A", wire.GUEST_QUIESCE_INITIAL_RECOVERY, 1, "1"*64, args)
+        observed = wire.Request(binding, "A", wire.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, 2, "2"*64, args)
+        deadline = time.monotonic() + 10
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder).resolve() / args["recovery_attempt_id"]
+            directory.mkdir(mode=0o700)
+            info = directory.stat()
+            store = wire._digest(wire._bytes({"path": str(directory), "device": info.st_dev, "inode": info.st_ino}))
+            options = {"directory": directory, "store_sha256": store, "recovery_plan_sha256": "a"*64,
+                       "predecessor": predecessor, "assert_guard": MagicMock(),
+                       "read_database_closed": MagicMock(return_value="2"*64)}
+            intent = directory / "quiesce-issued.json"
+            done = directory / "quiesce-observed.json"
+
+            def lose_response(*_args, **_options):
+                saved = json.loads(intent.read_bytes())
+                self.assertEqual(saved["nonce"], issued.nonce)
+                self.assertEqual(saved["sequence"], issued.sequence)
+                self.assertEqual(saved["predecessor"], predecessor)
+                raise TimeoutError("response lost")
+
+            with patch.object(lease, "quiesce_initial_recovery", side_effect=lose_response) as dispatch, \
+                    patch.object(lease, "observe_initial_recovery_hold", return_value="4"*64) as read, \
+                    patch.object(lease, "read_stopped_predecessor") as prior:
+                prior.return_value = predecessor | {"terminal_state_sha256": "0"*64}
+                with self.assertRaisesRegex(BridgeRejected, "native_initial_recovery_dispatch_unconfirmed"):
+                    lease.run_recovery_quiescence_once(object(), issued, observed, deadline, **options)
+                self.assertFalse(intent.exists())
+                dispatch.assert_not_called()
+                prior.return_value = predecessor
+                with self.assertRaises(TimeoutError):
+                    lease.run_recovery_quiescence_once(object(), issued, observed, deadline, **options)
+                self.assertTrue(intent.is_file())
+                self.assertFalse(done.exists())
+                self.assertEqual(lease.run_recovery_quiescence_once(object(), issued, observed, deadline, **options),
+                                 "4"*64)
+                self.assertEqual(json.loads(done.read_bytes())["hold_sha256"], "4"*64)
+                dispatch.assert_called_once()
+                read.assert_called_once()
+                with self.assertRaisesRegex(BridgeRejected, "native_initial_recovery_dispatch_unconfirmed"):
+                    lease.run_recovery_quiescence_once(object(), replace(issued, nonce="3"*64), observed,
+                                                       deadline, **options)
+                dispatch.assert_called_once()
+                read.assert_called_once()
+
+    def test_uncertain_retirement_requires_exact_read_only_observation(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        guard = MagicMock()
+        windows = MagicMock()
+        windows.powershell.side_effect = [
+            TimeoutError("uncertain"), {"initial_service_retired": True, "retirement_sha256": "d" * 64},
+        ]
+        custody = SimpleNamespace(windows=windows, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+                                  binding=SimpleNamespace(plan_sha256="a" * 64, attempt_id="b" * 64))
+        lease = WindowsActivationLease(custody, r"C:\Private\binding.json", {
+            "first_write_proof_sha256": "e" * 64, "service_instance_sha256": "c" * 64,
+        })
+        deadline = time.monotonic() + 30
+        with self.assertRaises(TimeoutError):
+            lease.retire_service(deadline, assert_guard=guard)
+        with self.assertRaisesRegex(BridgeRejected, "initial_service_retirement_reconciliation_required"):
+            lease.retire_service(deadline, assert_guard=guard)
+        self.assertEqual(lease.observe_retired(deadline, assert_guard=guard), "d" * 64)
+        retire, observe = (call.args[0] for call in windows.powershell.call_args_list)
+        self.assertTrue(retire.endswith(" -Retire"))
+        self.assertTrue(observe.endswith(" -ObserveRetired"))
+        self.assertIn("-ExpectedServiceInstanceSha256 '" + "c" * 64 + "'", retire)
+        self.assertEqual(guard.call_count, 3)
+        unsettled = MagicMock(side_effect=TransitionBlocked("previous_scm_call_unsettled"))
+        with self.assertRaisesRegex(TransitionBlocked, "previous_scm_call_unsettled"):
+            lease.resume_retirement(deadline, assert_guard=guard, assert_settled=unsettled)
+        self.assertEqual(windows.powershell.call_count, 2)
+        windows.powershell.side_effect = None
+        windows.powershell.return_value = {"initial_service_retired": True, "retirement_sha256": "f" * 64}
+        self.assertEqual(lease.resume_retirement(deadline, assert_guard=guard, assert_settled=lambda: None), "f" * 64)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ResumeRetire"))
+
+    def test_generation_windows_challenge_requires_live_process_and_other_exclusions(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        attempt, service = "a"*64, "b"*64
+        path = rf"C:\ProgramData\N100HA-InitialCutover\{'c'*40}\transition-service-{attempt}.json"
+        reply = MagicMock(return_value={"generation": 2, "timeline": 3, "revision": 4,
+                                       "transition_proof_sha256": "d"*64})
+        windows = MagicMock()
+        windows.live_authority_session.return_value = nullcontext(reply)
+        exclusions = MagicMock(return_value={"legacy_sha256": "e"*64, "standby_sha256": "f"*64})
+        lease = WindowsTransitionLease(
+            windows, path, service_instance_sha256=service, live_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+            transition_attempt=attempt, legacy_plan_sha256="1"*64, generation_handoff_sha256="2"*64,
+            generation=ServingGeneration("B", 2, 3, 4), assert_non_vm_exclusions=exclusions,
+        )
+        deadline = time.monotonic() + 30
+        with lease.guest_authority(deadline) as verify:
+            result = verify("3"*64, "start:portal-web", deadline)
+            self.assertRegex(result, r"^[a-f0-9]{64}$")
+            source = reply.call_args.args[0]
+            self.assertIn("-PriorSha256 '" + "3"*64 + "'", source)
+            self.assertIn("-TransitionBoundarySha256 '" + hashlib.sha256(b"start:portal-web").hexdigest() + "'", source)
+            reply.return_value["timeline"] = 7
+            with self.assertRaisesRegex(BridgeRejected, "native_transition_service_proof_unconfirmed"):
+                verify("4"*64, "guest_started", deadline)
+            exclusions.return_value = {"legacy_sha256": "e"*64}
+            with self.assertRaisesRegex(BridgeRejected, "native_transition_exclusions_unconfirmed"):
+                verify("5"*64, "guest_started", deadline)
+        self.assertEqual(reply.call_count, 2)
 
 
 class Fence:
@@ -170,7 +968,200 @@ class PGControlTests(unittest.TestCase):
                     operation(self.state)
             connect.assert_not_called()
 
+    def test_planned_vm_stop_requires_a_drained_and_closed_source_lease(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20",
+                                 source_lease_close_required=True)
+        state = dict(self.state, phase="fencing")
+        closed = dict(self.candidate(), node="ha_A", recovery=False, remaining=-1)
+        self.primary, self.peer = MagicMock(), MagicMock()
+        self.fence.stopped = False
+        for drift in ({"writes": True}, {"history": True}, {"remaining": 1}, {"actual_timeline": 2},
+                      {"epoch": 5}, {"remaining": float("nan")}, {"remaining": None}):
+            with self.subTest(drift=drift):
+                with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(
+                    self.backend, "_observe", return_value=closed | drift,
+                ):
+                    with self.assertRaisesRegex(TransitionBlocked, "source_write_authority_not_closed"):
+                        self.backend.fence(state)
+                self.assertFalse(self.fence.stopped)
+        active = []
+
+        @contextmanager
+        def source_connection(node):
+            self.assertEqual(node, "A")
+            active.append(node)
+            try:
+                yield self.peer
+            finally:
+                active.pop()
+
+        fence = self.fence.fence
+        record = MagicMock()
+
+        def stop_while_locked(current):
+            self.assertEqual(active, ["A"])
+            self.peer.execute.assert_any_call("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
+            record.assert_called_once_with(0x20)
+            return fence(current)
+
+        with patch.object(self.backend, "_connection", side_effect=source_connection), patch.object(
+            self.backend, "_observe", return_value=closed,
+        ), patch.object(self.backend, "_read") as observe_peer, patch.object(
+            self.fence, "fence", side_effect=stop_while_locked,
+        ) as stop:
+            observe_peer.return_value = dict(self.candidate(), replay="0/1F")
+            with self.assertRaisesRegex(TransitionBlocked, "source_final_wal_not_replayed"):
+                self.backend.fence(state, record_source_wal=record)
+            stop.assert_not_called()
+            record.assert_not_called()
+            observe_peer.return_value = self.candidate()
+            with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_record_required"):
+                self.backend.fence(state)
+            self.backend.fence(state, record_source_wal=record)
+        self.assertTrue(self.fence.stopped)
+        self.assertEqual(active, [])
+
+    def test_enforced_transition_requires_a_nonzero_approved_replay_floor(self):
+        self.backend.plan = dict(self.plan, profile="enforced-vm-v1")
+        for checkpoint in (None, "0/0", "0/100000000", "missing"):
+            with self.subTest(checkpoint=checkpoint):
+                self.backend.plan["required_replay_lsn"] = checkpoint
+                with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_required"):
+                    self.backend.bind(self.state)
+        self.backend.plan["required_replay_lsn"] = "1/0"
+        self.backend.bind(self.state)
+
+    def test_fenced_candidate_cannot_promote_before_approved_replay(self):
+        self.backend.plan["required_replay_lsn"] = "0/21"
+        self.primary = MagicMock()
+        self.peer = MagicMock()
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), \
+             patch.object(self.backend, "_observe", return_value=self.candidate()):
+            with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_not_reached"):
+                self.backend.promote(self.state)
+        self.primary.execute.assert_not_called()
+
+    def test_planned_promotion_after_restart_requires_recorded_wal(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20",
+                                 source_lease_close_required=True)
+        state = dict(self.state, phase="promoting")
+        self.primary, self.peer = MagicMock(), MagicMock()
+        with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_record_required"):
+            self.backend.fenced(dict(state, phase="fencing"))
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(
+            self.backend, "_observe", return_value=self.candidate(),
+        ):
+            with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_record_required"):
+                self.backend.promote(state)
+            with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_not_reached"):
+                self.backend.promote(state | {"source_fence_wal": 0x21})
+        self.primary.execute.assert_not_called()
+
+    def test_reconciled_primary_must_fork_from_the_source_at_the_recorded_wal(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20",
+                                 source_lease_close_required=True)
+        state = dict(self.state, phase="promoting", source_fence_wal=0x30)
+        promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
+        connection = MagicMock()
+        for history in ("1\t0/2F\tbefore recorded WAL\n", "3\t0/30\twrong parent\n",
+                        "# no parent\n", "1\t0/30\tvalid parent\n"):
+            connection.execute.return_value.fetchone.side_effect = [
+                ("123", 2, "0/80", "ha"), ("00000002.history", history),
+            ]
+            with patch.object(self.backend, "_connection", return_value=nullcontext(connection)):
+                if history.startswith("1\t0/30"):
+                    self.backend._promoted_history(promoted, state)
+                else:
+                    with self.assertRaisesRegex(TransitionBlocked, "promotion_fork_unconfirmed"):
+                        self.backend._promoted_history(promoted, state)
+
+    def test_enforced_unplanned_promotion_checks_authenticated_fork_at_approved_floor(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/30")
+        state = dict(self.state, phase="promoting", replica_fence_wal=0x31)
+        promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
+        connection = MagicMock()
+        with patch.object(self.backend, "_connection", return_value=nullcontext(connection)) as connect:
+            for history in ("1\t0/30\tbelow recorded floor\n", "3\t0/31\twrong parent\n"):
+                with self.subTest(history=history):
+                    connection.execute.return_value.fetchone.side_effect = [
+                        ("123", 2, "0/80", "ha"), ("00000002.history", history),
+                    ]
+                    with self.assertRaisesRegex(TransitionBlocked, "promotion_fork_unconfirmed"):
+                        self.backend._promoted_history(promoted, state)
+            connection.execute.return_value.fetchone.side_effect = [
+                ("123", 2, "0/80", "ha"), ("00000002.history", "1\t0/31\tvalid parent\n"),
+            ]
+            self.backend._promoted_history(promoted, state)
+            connect.assert_called_with("B", replication=True)
+
+    def test_unplanned_crash_requires_existing_fence_without_mutating_old_primary(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        state = dict(self.state, phase="fencing")
+        with (patch.object(self.backend, "_read", return_value=self.candidate()),
+              patch.object(self.backend, "_local_metadata") as metadata,
+              patch.object(self.fence, "fence") as stop):
+            self.fence.stopped = False
+            with self.assertRaisesRegex(TransitionBlocked, "crash_source_off_unconfirmed"):
+                self.backend.close(state)
+            with self.assertRaisesRegex(TransitionBlocked, "crash_source_off_unconfirmed"):
+                self.backend.fence(state)
+            self.fence.stopped = True
+            self.backend.close(state)
+            metadata.assert_not_called()
+            stop.assert_not_called()
+
+    def test_unplanned_reconciliation_revokes_candidate_without_adopting_a_lost_fence(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        state = dict(self.state, phase="promoting", replica_fence_wal=0x31)
+        self.fence.stopped = False
+        with (patch.object(self.backend, "_read", return_value=self.observation()),
+              patch.object(self.backend, "_local_metadata") as metadata,
+              patch.object(self.backend, "_promoted_history") as history):
+            with self.assertRaisesRegex(TransitionBlocked, "crash_source_off_unconfirmed"):
+                self.backend.close(state)
+            metadata.assert_called_once_with("B", state)
+            history.assert_not_called()
+
+    def test_unplanned_promote_records_replayed_replica_wal_before_dispatch(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        self.primary, self.peer = MagicMock(), MagicMock()
+        state = dict(self.state, phase="promoting")
+        replica = dict(self.candidate(), received_wal="0/31", flush="0/30", replay="0/30")
+        order = MagicMock()
+        with (patch.object(self.backend, "_connection", side_effect=self.fake_connection),
+              patch.object(self.backend, "_observe", side_effect=lambda *_: replica),
+              patch.object(self.backend, "promoted", return_value=True)):
+            with self.assertRaisesRegex(TransitionBlocked, "replica_fence_wal_not_replayed"):
+                self.backend.promote(state, record_replica_wal=order.record)
+            self.primary.execute.assert_not_called()
+            order.record.assert_not_called()
+            replica.update(flush="0/31", replay="0/31")
+            self.primary.execute = order.execute
+            self.backend.promote(state, record_replica_wal=order.record)
+            self.assertEqual(order.mock_calls, [call.record(0x31), call.execute("SELECT pg_promote(true,1)")])
+
+    def test_disconnected_standby_uses_replay_timeline_without_substituting_flush(self):
+        self.backend.plan["required_replay_lsn"] = "0/21"
+        state = dict(self.state, phase="promoting")
+        sql = MagicMock()
+        sql.execute.return_value.fetchone.return_value = (
+            dict(self.candidate(), actual_timeline=None, replay="0/20", flush=None),
+        )
+        replication = MagicMock()
+        replication.execute.return_value.fetchone.return_value = ("123", 1, "0/30", "ha")
+        with patch.object(self.backend, "_connection", return_value=nullcontext(replication)) as connect:
+            status = self.backend._observe_runtime(sql, "B", state)
+            self.assertEqual((status["actual_timeline"], status["replay"], status["flush"]), (1, "0/20", "0/30"))
+            connect.assert_called_once_with("B", replication=True)
+            replication.execute.assert_called_once_with("IDENTIFY_SYSTEM")
+            for invalid in (("foreign", 1, "0/30", "ha"), ("123", 2, "0/30", "ha"),
+                            ("123", 1, "0/1F", "ha"), ("123", 1, "0/30", "foreign")):
+                replication.execute.return_value.fetchone.return_value = invalid
+                with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_identity_unconfirmed"):
+                    self.backend._observe_runtime(sql, "B", state)
+
     def test_lost_promotion_response_is_reconciled_without_second_promote(self):
+        self.backend.plan["required_replay_lsn"] = "0/20"
         self.primary, self.peer = MagicMock(), MagicMock()
         def execute(query, *args):
             if "pg_promote" in query:
@@ -182,10 +1173,56 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(sum("pg_promote" in call.args[0] for call in self.primary.execute.call_args_list), 1)
         metadata.assert_called_once_with("B", self.state, promoted=True)
 
+    def test_rejoin_staging_proves_closed_primary_between_fence_observations(self):
+        state = dict(self.state, phase="rejoining")
+        closed = dict(self.observation(), remaining=-1)
+        with patch.object(self.backend, "_read", return_value=closed) as observe, patch.object(
+            self.backend, "fenced", side_effect=[True, False],
+        ):
+            with self.assertRaisesRegex(TransitionBlocked, "positive_fence_required"):
+                self.backend.assert_rejoin_pending(state)
+            observe.assert_called_once_with("B", state)
+        with patch.object(self.backend, "_read", return_value=closed | {"writes": True}):
+            with self.assertRaisesRegex(TransitionBlocked, "rejoin_primary_authority_not_closed"):
+                self.backend.assert_rejoin_pending(state)
+        with patch.object(self.backend, "_read", return_value=closed):
+            self.backend.assert_rejoin_pending(state)
+
     def test_rejoin_never_clones_or_restarts_fenced_resource(self):
         with patch.object(self.backend, "rejoined", return_value=False):
             with self.assertRaisesRegex(TransitionBlocked, "new_standby_required"):
                 self.backend.rejoin(self.state)
+
+    def test_rejoin_replication_check_rejects_lag_and_open_lease(self):
+        state = dict(self.state, phase="rejoining")
+        primary = dict(self.observation(), remaining=-1)
+        peer = dict(primary, node="ha_A", recovery=True)
+        for changes, reason in (
+            ({"replay": "0/1F"}, "replacement_standby_replay_not_current"),
+            ({"remaining": 2}, "rejoin_primary_authority_not_closed"),
+            ({"recovery": False}, "strict_replication_required"),
+        ):
+            with self.subTest(changes=changes), patch.object(self.backend, "_read", side_effect=[primary, peer | changes]):
+                with self.assertRaisesRegex(TransitionBlocked, reason):
+                    self.backend.assert_rejoin_synchronized(state)
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]) as read:
+            self.assertEqual(self.backend.assert_rejoin_synchronized(state), primary["revision"])
+            self.assertEqual([call.args[0] for call in read.call_args_list], ["B", "A"])
+
+    def test_unplanned_rejoin_cannot_drop_the_recorded_replica_floor(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20")
+        state = dict(self.state, phase="rejoining", replica_fence_wal=0x31)
+        primary = dict(self.observation(), remaining=-1)
+        peer = dict(primary, node="ha_A", recovery=True, replay="0/30")
+
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]):
+            self.assertFalse(self.backend.rejoined(state))
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]):
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_standby_replay_not_current"):
+                self.backend.assert_rejoin_synchronized(state)
+        peer["replay"] = "0/31"
+        with patch.object(self.backend, "_read", side_effect=[primary, peer]):
+            self.assertTrue(self.backend.rejoined(state))
 
     def test_pair_rejects_async_wrong_timeline_role_revision_and_wrong_node(self):
         good, peer = self.observation(), self.observation("A", recovery=True)
@@ -331,6 +1368,79 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(update.args[1], ("synthetic", 7, 9, "B", "A", 2, ["B"], "B", "AS"))
         self.assertIsNotNone(self.backend.validated)
 
+    def test_cli_checks_only_the_plan_bound_closed_lease(self):
+        journal = self.root / "journal"
+        journal.mkdir()
+        Journal(journal / "controller-state.json").save(self.state)
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_transition_observer={},
+                            transition_service_start={"target_timeline": 2, "lease_closure_check": True})
+        backend.fence_adapter.plan_sha256 = "a"*64
+        expected = {"plan_sha256": "a"*64, "generation": 7, "node_proofs": {"A": "b"*64, "B": "c"*64}}
+        backend.observe_transition_lease_closed.return_value = expected
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="check-lease-closed")
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"):
+            backend.plan["transition_service_start"]["lease_closure_check"] = 1
+            with self.assertRaisesRegex(TransitionBlocked, "closure_unconfirmed"):
+                cli.run(args)
+            backend.observe_transition_lease_closed.assert_not_called()
+            backend.plan["transition_service_start"]["lease_closure_check"] = True
+            self.assertEqual(cli.run(args), {"status": "PASS", **expected})
+            receipt = journal / ("lease-closure-" + "a"*64 + ".json")
+            raw = receipt.read_bytes()
+            data = json.loads(raw)
+            self.assertGreater(data.pop("observed_at_ms"), 0)
+            self.assertEqual(data, expected | {"schema_version": 1, "python_pid": os.getpid()})
+            with self.assertRaisesRegex(TransitionBlocked, "receipt_unconfirmed"):
+                cli.run(args)
+            self.assertEqual(receipt.read_bytes(), raw)
+        pin, generation, _ = backend.observe_transition_lease_closed.call_args.args
+        self.assertEqual((pin, generation.primary, generation.partner, generation.timeline), ("a"*64, "B", "A", 2))
+        backend.renew.assert_not_called()
+        backend.open.assert_not_called()
+
+    def test_transition_closure_observes_each_node_and_rejects_wrong_role(self):
+        generation = ServingGeneration("B", 7, 2, 9)
+        self.backend.plan["profile"] = "enforced-vm-v1"
+        self.backend.fence_adapter.plan_sha256 = "a"*64
+        rows = {
+            node: ("ha_" + node, "123", node == "A", "synthetic", 7, "B", "A", 2, 10, True)
+            for node in ("A", "B")
+        }
+        connections = {node: MagicMock() for node in rows}
+        for node, row in rows.items():
+            connections[node].execute.return_value.fetchone.return_value = row
+        with patch.object(self.backend, "_connection", side_effect=lambda node: nullcontext(connections[node])):
+            proof = self.backend.observe_transition_lease_closed("a"*64, generation, time.monotonic()+5)
+            self.assertEqual(set(proof["node_proofs"]), {"A", "B"})
+            self.assertNotEqual(proof["node_proofs"]["A"], proof["node_proofs"]["B"])
+            for connection in connections.values():
+                connection.execute.assert_any_call("SET TRANSACTION READ ONLY")
+            connections["B"].execute.return_value.fetchone.return_value = rows["A"]
+            with self.assertRaisesRegex(TransitionBlocked, "db_closure_unconfirmed"):
+                self.backend.observe_transition_lease_closed("a"*64, generation, time.monotonic()+5)
+
+    def test_transition_renewal_needs_observed_legacy_closure_before_pg_write(self):
+        self.backend.plan["windows_transition_observer"] = {}
+        rejected = MagicMock(side_effect=ValueError("observer unavailable"))
+        for observer in (None, rejected):
+            self.backend.transition_observer = observer
+            with patch.object(self.backend, "_connection") as connection, patch.object(
+                self.backend, "_best_effort_revoke",
+            ) as revoke:
+                with self.assertRaisesRegex(TransitionBlocked, "transition_legacy_closure_unverified"):
+                    self.backend.renew(self.state)
+                connection.assert_not_called()
+                revoke.assert_called_once_with(self.state)
+
+        self.backend.transition_observer = MagicMock(return_value="a"*64)
+        connections, observations = self.prepare_fresh(lease=True, opened=True)
+        with connections, observations, patch.object(self.backend, "_commit") as commit:
+            self.backend.renew(self.state)
+        self.backend.transition_observer.assert_called_once()
+        self.assertEqual(commit.call_count, 2)
+
     def test_shared_renewal_never_reopens_closed_or_expired_authority(self):
         for opened, expired in ((False, False), (True, True)):
             connections, observations = self.prepare_fresh(lease=True, opened=opened)
@@ -422,6 +1532,107 @@ class PGControlTests(unittest.TestCase):
             journal.assert_not_called()
         self.assertEqual(list((self.root / "journal").iterdir()), [])
 
+    def test_production_transition_cannot_start_writes_without_observer_or_by_alternate_mode(self):
+        (self.root / "journal").mkdir()
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1",
+                            windows_enforced={"config_profile": {"acceptance_scope": "production"}})
+        backend.fence_adapter.plan_sha256 = "a"*64
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="transition-serve")
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
+                patch.object(cli, "Controller") as controller, patch.object(cli, "Journal"):
+            for command in ("advance", "serve", "transition-serve", "transition-rearm"):
+                args.command = command
+                with self.subTest(command=command), self.assertRaisesRegex(TransitionBlocked, "observer_required"):
+                    cli.run(args)
+            controller.assert_not_called()
+            backend.plan["windows_transition_observer"] = {}
+            args.command = "serve"
+            with self.assertRaisesRegex(TransitionBlocked, "observer_required"):
+                cli.run(args)
+            controller.assert_not_called()
+            del backend.plan["windows_transition_observer"]
+            backend.plan["windows_enforced"] = {}
+            args.command = "transition-serve"
+            with self.assertRaisesRegex(TransitionBlocked, "acceptance_scope_required"):
+                cli.run(args)
+            controller.assert_not_called()
+            args.command = "stage-rejoin"
+            controller.return_value.advance.return_value = {"phase": "rejoining"}
+            self.assertFalse(cli.run(args)["authority_opened"])
+            controller.return_value.advance.assert_called_once_with(stop_at_rejoin=True)
+
+    def test_observe_rejoin_stage_never_runs_fencing_or_promotion(self):
+        (self.root / "journal").mkdir()
+        backend = MagicMock(spec=cli.PgBackend)
+        backend.plan = dict(self.plan, profile="enforced-vm-v1")
+        backend.fence_adapter = SimpleNamespace(plan_sha256="a" * 64)
+        state = {"phase": "rejoining", "attempts": 1}
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="observe-rejoin-stage")
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
+                patch.object(cli, "Controller") as controller, patch.object(cli, "Journal") as journal:
+            journal.return_value.read.return_value = state
+            observed = cli.run(args)
+            controller.return_value.advance.assert_not_called()
+        backend.assert_rejoin_pending.assert_called_once_with(state)
+        backend.assert_rejoin_synchronized.assert_not_called()
+        self.assertEqual(observed, cli.rejoin_stage_receipt(backend, state))
+        self.assertFalse(observed["authority_opened"])
+
+    def test_rejoin_receipt_is_launch_bound_and_never_overwritten(self):
+        journal = self.root / "controller-state.json"
+        plan_pin, probe = "a" * 64, "c" * 32
+        proof = {"status": "PASS", "phase": "rejoining", "authority_opened": False,
+                 "rejoin_stage_sha256": "b" * 64}
+        cli.write_rejoin_receipt(journal, plan_pin, "observe-rejoin-stage", proof, probe)
+        path = self.root / f"rejoin-result-{plan_pin}-{probe}.json"
+        raw = path.read_bytes()
+        record = json.loads(raw)
+        self.assertEqual(record, proof | {"schema_version": 1, "plan_sha256": plan_pin, "probe": probe,
+                                          "mode": "observe-rejoin-stage", "python_pid": os.getpid(),
+                                          "observed_at_ms": record["observed_at_ms"]})
+        with self.assertRaisesRegex(TransitionBlocked, "receipt_unconfirmed"):
+            cli.write_rejoin_receipt(journal, plan_pin, "check-rejoin", proof, probe)
+        self.assertEqual(path.read_bytes(), raw)
+
+    def test_transition_rearm_holds_observer_and_reopens_only_a_ready_generation(self):
+        journal = self.root / "journal"
+        journal.mkdir()
+        state_path = journal / "controller-state.json"
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_transition_observer={},
+                            windows_enforced={"config_profile": {"acceptance_scope": "production"}})
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="transition-rearm")
+        observer = MagicMock()
+
+        def arm(state):
+            self.assertEqual(state["phase"], "ready")
+            self.assertIs(backend.transition_observer, observer)
+            if sys.platform != "win32":
+                from ha_control.controller import exclusive
+                with self.assertRaisesRegex(TransitionBlocked, "controller_lock_unavailable"):
+                    with exclusive(state_path.with_suffix(".lock")):
+                        pass
+
+        backend.arm.side_effect = arm
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
+                patch("ha_control.initial_lease_service.native_transition_observer", return_value=nullcontext(observer)), \
+                patch.object(cli, "record_renewal"), patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
+            Journal(state_path).save(self.state)
+            with self.assertRaisesRegex(TransitionBlocked, "ready_transition_required"):
+                cli.run(args)
+            backend.arm.assert_not_called()
+            Journal(state_path).save(dict(self.state, phase="ready"))
+            with self.assertRaises(KeyboardInterrupt):
+                cli.run(args)
+        backend.arm.assert_called_once()
+        backend.renew.assert_called_once()
+        backend.close.assert_called_once()
+        self.assertIsNone(backend.transition_observer)
+
     def test_enforced_cli_persists_only_in_precreated_mutable_journal_root(self):
         backend = MagicMock()
         backend.plan = dict(self.plan, profile="enforced-vm-v1")
@@ -478,6 +1689,50 @@ class PGControlTests(unittest.TestCase):
         close.assert_called_once_with("B", self.state)
         self.assertIsNone(self.backend.validated)
 
+    def test_transition_heartbeat_records_only_postcommit_live_renewal(self):
+        connections, observations = self.prepare_fresh(lease=True, opened=True)
+        state = dict(self.state, phase="ready")
+        self.fence.plan_sha256, self.fence.instance = "a"*64, "b"*64
+        journal = Journal(self.root / "controller-state.json")
+        journal.save(state)
+        with connections, observations, patch("ha_control.pg.time.time_ns", return_value=10_000_000_000):
+            proof = self.backend.renew(state)
+            self.assertEqual(proof["sampled_at_ms"], 10000)
+            self.assertEqual(proof["valid_until_ms"], 14000)
+            cli.record_renewal(self.backend, journal, state, 1, proof)
+            heartbeat = journal.read()["lease_heartbeat"]
+            self.assertEqual((heartbeat["epoch"], heartbeat["timeline"], heartbeat["revision"]), (7, 2, 9))
+            self.assertEqual(heartbeat["broker_instance_sha256"], "b"*64)
+            self.assertEqual(heartbeat["python_pid"], os.getpid())
+            with self.assertRaisesRegex(TransitionBlocked, "transition_lease_heartbeat_unconfirmed"):
+                cli.record_renewal(self.backend, journal, state, 2, proof | {"valid_until_ms": 9000})
+            self.assertEqual(journal.read()["lease_heartbeat"], heartbeat)
+
+    def test_transition_service_removes_heartbeat_before_closing_lease(self):
+        backend = MagicMock()
+        backend.fence_adapter.plan_sha256, backend.fence_adapter.instance = "a"*64, "b"*64
+        backend.renew.return_value = {"epoch": 7, "timeline": 2, "revision": 9, "sampled_at_ms": 10000,
+                                      "valid_until_ms": 14000, "postcommit_nonce_sha256": "c"*64}
+        state = dict(self.state, phase="ready")
+        journal = Journal(self.root / "controller-state.json")
+        journal.save(state)
+
+        def inspect_active_then_stop(_):
+            self.assertEqual(journal.read()["lease_heartbeat"]["sequence"], 1)
+            raise KeyboardInterrupt
+
+        def close_after_unpublish(_):
+            self.assertNotIn("lease_heartbeat", journal.read())
+
+        backend.close.side_effect = close_after_unpublish
+        with patch("ha_control.cli.time.time_ns", return_value=10_000_000_000), patch(
+            "ha_control.cli.time.sleep", side_effect=inspect_active_then_stop,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.serve_ready(backend, state, heartbeat_journal=journal)
+        backend.close.assert_called_once_with(state)
+        self.assertNotIn("lease_heartbeat", journal.read())
+
     def test_guard_unavailable_before_renewal_does_not_prevent_safe_revocation(self):
         with patch.object(self.backend, "fenced", side_effect=TransitionBlocked("windows_guard_lost")), patch.object(self.backend, "_local_metadata_write") as close:
             with self.assertRaisesRegex(TransitionBlocked, "windows_guard_lost"):
@@ -524,6 +1779,16 @@ class PGControlTests(unittest.TestCase):
         self.assertNotIn("primary_node=", updates[0])
         self.assertNotIn("timeline=", updates[0])
         self.assertNotIn("epoch=", updates[0])
+
+    def test_promotion_readback_does_not_republish_the_recorded_generation(self):
+        self.primary, self.peer = MagicMock(), MagicMock()
+        state = dict(self.state, phase="promoting")
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), \
+                patch.object(self.backend, "_observe", return_value=self.observation()):
+            self.backend._local_metadata("B", state, promoted=True)
+        update, = [call.args[0] for call in self.primary.execute.call_args_list if call.args[0].startswith("UPDATE")]
+        self.assertNotIn("primary_node=", update)
+        self.assertIn("WHERE singleton=1 AND (writes_open OR history_safe OR expires_at > clock_timestamp())", update)
 
     def test_recorded_later_phase_closes_unexpected_fork_without_adopting_it(self):
         for phase in ("ready", "rejoining", "validating"):
@@ -639,7 +1904,7 @@ class PGControlTests(unittest.TestCase):
         services = sorted(ENFORCED_SERVICES)
         sources = {path:hashlib.sha256((ROOT/'infra/k8s'/TARGETS[path]).read_bytes()).hexdigest()
                    for path in EFFECTS_SOURCES}
-        self.plan.update(profile='enforced-vm-v1',schema_version=2,source_commit='c'*40,
+        self.plan.update(profile='enforced-vm-v1',schema_version=2,source_commit='c'*40, required_replay_lsn='0/10',
                          pg_enforcement={'definition_sha256':hashlib.sha256((ROOT/'infra/k8s/ha_runtime/enforcement.sql').read_bytes()).hexdigest(),
                             'effects':{'code_sha256':effects_runtime_sha256(sources),'broker_role':'ha_broker'},
                             'role_sets':{node:{service:'app_'+str(index)+'_'+node.lower() for index,service in enumerate(services)} for node in ('A','B')},
@@ -657,6 +1922,54 @@ class PGControlTests(unittest.TestCase):
             plan['pg_enforcement']['effects']=original
         del self.fence.plan_sha256
         with self.assertRaisesRegex(TransitionBlocked,'enforced_effects_plan_required'):self.backend._plan()
+
+    def test_initial_recovery_requires_exact_installed_native_guard_and_fresh_approval(self):
+        from ha_control.initial_windows_gate import InitialWindowsGate, RECOVERY_ACTION
+
+        plan = self.enforced_plan()
+        plan.update(initial_wsl_cutover=INITIAL_CUTOVER, generation=1, timeline=1,
+                    initial_cutover_recovery={"attempt_id": "1"*64, "predecessor_terminal_sha256": "2"*64,
+                                             "predecessor_service_sha256": "3"*64},
+                    _approval_action=RECOVERY_ACTION)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_native_scope_required'):
+            self.backend._plan()
+        gate = InitialWindowsGate(r"C:\Private\plan.json", r"C:\Private\approval.json")
+        gate.plan_sha256 = self.fence.plan_sha256
+        gate.plan_data = plan
+        self.backend.fence_adapter = gate
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_native_scope_required'):
+            self.backend._plan()
+        gate._installed_runtime = True
+        gate.plan_data = plan.copy()
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_native_scope_required'):
+            self.backend._plan()
+        gate.plan_data = plan
+        self.backend._plan()
+        for action in ('ha-initial-wsl-cutover', 'ha-transition'):
+            plan["_approval_action"] = action
+            with self.assertRaisesRegex(TransitionBlocked, 'ha_transition_approval_required'):
+                self.backend._plan()
+        plan["_approval_action"] = RECOVERY_ACTION
+        (self.root / "journal").mkdir()
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="serve", arm=True)
+        with patch("ha_control.cli.PgBackend", return_value=self.backend), patch("ha_control.cli.validate_bundle"), \
+                patch("ha_control.initial_lease_service.native_initial_observer") as observer:
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_native_observer_required'):
+                cli.run(args)
+        observer.assert_not_called()
+        plan["windows_recovery_observers"] = {}
+        token = object()
+        with (
+            patch("ha_control.cli.PgBackend", return_value=self.backend),
+            patch("ha_control.cli.validate_bundle"),
+            patch("ha_control.initial_lease_service.native_recovery_observer", return_value=nullcontext(token)),
+            patch("ha_control.initial_lease_service.serve_initial_recovery", return_value="fixture") as serve,
+            patch("ha_control.initial_lease_service.native_initial_observer") as original,
+        ):
+            self.assertEqual(cli.run(args), "fixture")
+            serve.assert_called_once_with(self.backend, self.root / "journal/controller-state.json", token)
+            original.assert_not_called()
 
     def test_effects_observation_rejects_missing_storage_and_every_binding_mismatch(self):
         from ha_runtime import effects
@@ -760,6 +2073,153 @@ class PGControlTests(unittest.TestCase):
 
 
 class InitialLeaseServiceTests(unittest.TestCase):
+    def test_first_publication_independent_reads_start_together_with_one_deadline(self):
+        from threading import Barrier
+        from ha_control import initial_lease_service as service
+        barrier=Barrier(2);deadlines=[]
+        deadline=time.monotonic()+2
+        def fresh(limit):
+            deadlines.append(limit);barrier.wait(timeout=1)
+            return True
+        for _ in range(3):
+            self.assertTrue(service._recovery_boundary(fresh,fresh,deadline))
+        self.assertEqual(deadlines,[deadline]*6)
+
+    def test_first_publication_failure_drains_the_other_read_without_authorizing_writes(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from ha_control import initial_lease_service as service
+        for failed_side in ('held','legacy'):
+            started=Event();release=Event();drained=Event()
+            write=MagicMock();publish=MagicMock()
+            def failing(limit):
+                self.assertTrue(started.wait(1))
+                raise TransitionBlocked('synthetic_proof_rejected')
+            def pending(limit):
+                started.set();self.assertTrue(release.wait(2));drained.set()
+                return True
+            def boundary():
+                service._recovery_boundary(failing if failed_side=='held' else pending,
+                    failing if failed_side=='legacy' else pending,time.monotonic()+3)
+                write();publish()
+            with ThreadPoolExecutor(max_workers=1) as caller:
+                result=caller.submit(boundary)
+                self.assertTrue(started.wait(1))
+                self.assertFalse(result.done());self.assertFalse(drained.is_set())
+                release.set()
+                with self.assertRaisesRegex(TransitionBlocked,'synthetic_proof_rejected'):
+                    result.result(timeout=2)
+            self.assertTrue(drained.is_set());write.assert_not_called();publish.assert_not_called()
+
+    def test_first_publication_positive_reads_that_finish_late_cannot_authorize_writes(self):
+        from ha_control import initial_lease_service as service
+        write=MagicMock();publish=MagicMock()
+        with patch.object(service.time,'monotonic',return_value=4.0):
+            with self.assertRaisesRegex(TransitionBlocked,'initial_service_proof_deadline_exceeded'):
+                service._recovery_boundary(lambda deadline:True,lambda deadline:True,4.0)
+                write();publish()
+        write.assert_not_called();publish.assert_not_called()
+
+    def test_first_publication_requires_both_explicit_positive_reads(self):
+        from ha_control import initial_lease_service as service
+        for held,legacy in ((None,True),(True,None)):
+            with self.assertRaises(TransitionBlocked):
+                service._recovery_boundary(lambda deadline:held,lambda deadline:legacy,time.monotonic()+2)
+
+    def test_only_prepublication_boundaries_parallelize_and_renewal_keeps_original_path(self):
+        from contextlib import contextmanager
+        from ha_control import initial_lease_service as service
+        admission=SimpleNamespace(assert_held=MagicMock(return_value=True),publish=MagicMock())
+        @contextmanager
+        def admitted(*args):yield admission
+        observer=SimpleNamespace(assert_intent=MagicMock(),recovery_admission=admitted,
+            assert_legacy_closed=MagicMock(return_value=True),assert_exclusion_held=MagicMock(return_value=True))
+        lease=SimpleNamespace(proof_started=None,revoke=MagicMock(return_value=True))
+        def factory(backend,closure,*,assert_exclusion_held):
+            def opened(state):
+                lease.proof_started=time.monotonic()
+                for read in (closure,assert_exclusion_held,closure):
+                    self.assertTrue(read(state,lease.proof_started+service.INITIAL_PROOF_SECONDS))
+                return 'f'*64
+            def renewed(state):
+                admission.publish.assert_called_once()
+                self.assertTrue(closure(state,time.monotonic()+1))
+                self.assertTrue(assert_exclusion_held(state,time.monotonic()+1))
+                raise TransitionBlocked('synthetic_renewal_stop')
+            lease.open=opened;lease.renew=renewed
+            return lease
+        with tempfile.TemporaryDirectory() as folder:
+            backend=SimpleNamespace(plan={'cluster':'synthetic'},plan_path=Path(folder)/'plan.json')
+            journal=Path(folder)/'journal/controller-state.json';journal.parent.mkdir()
+            with patch.object(service,'_recovery_predecessor',return_value={'attempt_id':'1'*64}), \
+                 patch.object(service,'InitialPgLeaseRecovery',side_effect=factory), \
+                 patch.object(service,'_recovery_boundary',wraps=service._recovery_boundary) as parallel, \
+                 patch.object(service.time,'sleep'):
+                with self.assertRaisesRegex(TransitionBlocked,'synthetic_renewal_stop'):
+                    service._serve(backend,journal,observer,{},recovering=True)
+                self.assertEqual(parallel.call_count,3)
+        self.assertEqual(admission.assert_held.call_count,3)
+        self.assertEqual(observer.assert_legacy_closed.call_count,3)
+        self.assertEqual(observer.assert_exclusion_held.call_count,2)
+        lease.revoke.assert_called_once()
+
+    def test_windows_first_save_budget_includes_slow_fsync_and_native_age_includes_io(self):
+        from ha_control import controller
+        clock=[1.0];anchor=1_800_000_000_000_000_000
+        original_fsync=controller.os.fsync
+        original_replace=controller.os.replace
+        fsync_calls=[];observed={}
+        def slow_fsync(fd):
+            original_fsync(fd);fsync_calls.append(fd)
+            clock[0]+=0.2
+        def replace(temporary,path,deadline):
+            self.assertLess(clock[0],deadline)
+            self.assertGreater(clock[0]-1.0,0.15)
+            observed.update(json.loads(Path(temporary).read_text()))
+            written=controller.os.stat(temporary).st_mtime_ns
+            self.assertEqual(written,anchor)
+            native_age_ms=(clock[0]-1.0)*1000
+            self.assertAlmostEqual(native_age_ms+observed['proof_elapsed_ms'],400,places=3)
+            original_replace(temporary,path)
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'controller-state.json'
+            with patch.object(controller.sys,'platform','win32'), \
+                 patch.object(controller.time,'time_ns',return_value=anchor), \
+                 patch.object(controller.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(controller.os,'fsync',side_effect=slow_fsync), \
+                 patch.object(controller.Journal,'_replace_windows',side_effect=replace):
+                controller.Journal(path).save({'phase':'serving','proof_elapsed_ms':0},
+                    windows_retry_until=6.0,proof_started_monotonic=1.0)
+            self.assertEqual(len(fsync_calls),2)
+            self.assertEqual(json.loads(path.read_text())['phase'],'serving')
+
+    def test_save_that_consumes_the_full_proof_budget_never_publishes_admission(self):
+        from contextlib import contextmanager
+        from ha_control import initial_lease_service as service
+        clock=[0.0]
+        admission=SimpleNamespace(publish=MagicMock())
+        @contextmanager
+        def admitted(*args):yield admission
+        observer=SimpleNamespace(assert_intent=MagicMock(),recovery_admission=admitted,
+            assert_legacy_closed=MagicMock(),assert_exclusion_held=MagicMock())
+        lease=SimpleNamespace(proof_started=0.0,open=MagicMock(return_value='f'*64),
+            renew=MagicMock(),revoke=MagicMock(return_value=True))
+        original_save=service.Journal.save
+        def delayed_save(journal,value,**options):
+            original_save(journal,value,**options)
+            if value.get('phase')=='serving':clock[0]=service.INITIAL_PROOF_SECONDS+0.01
+        with tempfile.TemporaryDirectory() as folder:
+            backend=SimpleNamespace(plan={'cluster':'synthetic'},plan_path=Path(folder)/'plan.json')
+            journal=Path(folder)/'journal/controller-state.json';journal.parent.mkdir()
+            with patch.object(service,'_recovery_predecessor',return_value={'attempt_id':'1'*64}), \
+                 patch.object(service,'InitialPgLeaseRecovery',return_value=lease), \
+                 patch.object(service.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(service.Journal,'save',new=delayed_save):
+                with self.assertRaisesRegex(TransitionBlocked,'initial_service_proof_deadline_exceeded'):
+                    service._serve(backend,journal,observer,{},recovering=True)
+            admission.publish.assert_not_called();lease.renew.assert_not_called();lease.revoke.assert_called_once()
+            self.assertEqual(json.loads(journal.read_text())['phase'],'local_revoke_observed')
+
     def test_windows_heartbeat_replace_retries_transient_open_reader(self):
         from ha_control import controller
 
@@ -810,6 +2270,378 @@ class InitialLeaseServiceTests(unittest.TestCase):
         native.nt_open = MagicMock(return_value=-1)
         with self.assertRaises(TransitionBlocked):
             native._open_directory(path)
+
+    def test_recovery_service_identity_keeps_predecessor_service_separate(self):
+        from ha_control import initial_windows_gate as gate
+
+        installation, attempt, commit = 'a'*64, 'b'*64, 'c'*40
+        new_name, new_sid = gate.initial_service_identity(attempt)
+        old_name, old_sid = gate.initial_service_identity(installation)
+        self.assertNotEqual(new_name, old_name)
+        self.assertNotEqual(new_sid, old_sid)
+        now = datetime.now(timezone.utc)
+        plan = {'schema_version': 2, 'profile': gate.PROFILE, 'node': 'A', 'generation': 1, 'timeline': 1,
+                'initial_wsl_cutover': INITIAL_CUTOVER, 'installation_id': installation, 'source_commit': commit,
+                'initial_cutover_recovery': {'attempt_id': attempt, 'predecessor_terminal_sha256': '1'*64,
+                                             'predecessor_service_sha256': '2'*64}}
+
+        def validate(name, sid, data):
+            raw = json.dumps(data | {'windows_enforced': {'service_name': name, 'service_sid': sid}}).encode()
+            approval = {'schema_version': 1, 'action': gate.RECOVERY_ACTION, 'authority_kind': 'installed-runtime',
+                        'installation_id': installation, 'source_commit': commit, 'installed_at': '2020-01-01T00:00:00Z',
+                        'plan_sha256': hashlib.sha256(raw).hexdigest()}
+            receipt = json.dumps(approval).encode()
+            settings = {'service_name': name, 'service_sid': sid, 'plan_sha256': approval['plan_sha256'],
+                        'approval_sha256': hashlib.sha256(receipt).hexdigest()}
+            return gate._validate(raw, receipt, settings, sid, now)
+
+        self.assertEqual(validate(new_name, new_sid, plan)[0]['_approval_action'], gate.RECOVERY_ACTION)
+        with self.assertRaises(TransitionBlocked):
+            validate(old_name, old_sid, plan)
+        collision = plan['initial_cutover_recovery'] | {'attempt_id': installation[:24] + 'f'*40}
+        with self.assertRaises(TransitionBlocked):
+            validate(old_name, old_sid, plan | {'initial_cutover_recovery': collision})
+
+    def test_recovery_publication_rejects_changed_windows_heartbeat(self):
+        from ha_control import native_windows_activation as native
+
+        custody = SimpleNamespace(binding=SimpleNamespace(plan_sha256='1'*64, attempt_id='2'*64),
+                                  live_sha256='3'*64)
+        lease = native.WindowsActivationLease(custody, r'C:\fixture\binding.json',
+                                               dict(first_write_proof_sha256='4'*64, service_instance_sha256='5'*64))
+        recovery = dict(attempt_id='6'*64, predecessor_terminal_sha256='7'*64, predecessor_service_sha256='8'*64)
+        heartbeat = dict(windows_generation=1, windows_generation_sha256='a'*64, live_lease_sha256='b'*64)
+        paired, guard = MagicMock(return_value='c'*64), MagicMock()
+        deadline = time.monotonic() + 2
+        windows = MagicMock(return_value=heartbeat)
+        with patch.object(native, 'fixed_script', return_value='fixture') as source:
+            self.assertRegex(lease.verify_recovery_publication(windows, recovery, deadline,
+                                                              observe_pair=paired, assert_guard=guard), r'^[a-f0-9]{64}$')
+            self.assertEqual(source.call_args.args[2]['RecoveryAttemptId'], recovery['attempt_id'])
+            paired.assert_called_once_with(challenge=source.call_args.args[2]['PriorSha256'],
+                                           lease_sha256=heartbeat['live_lease_sha256'], deadline=deadline)
+            self.assertEqual(windows.call_args_list, [call('fixture', deadline)]*2)
+            windows.side_effect = [heartbeat, heartbeat | {'windows_generation_sha256': 'd'*64}]
+            with self.assertRaisesRegex(native.bridge.BridgeRejected, 'native_initial_recovery_publication_unconfirmed'):
+                lease.verify_recovery_publication(windows, recovery, deadline, observe_pair=paired, assert_guard=guard)
+
+    def continuity_fixture(self, *, change=None):
+        from ha_control import native_windows_activation as native
+        custody = SimpleNamespace(binding=SimpleNamespace(plan_sha256='1'*64, attempt_id='2'*64),
+                                  live_sha256='3'*64)
+        lease = native.WindowsActivationLease(custody, r'C:\fixture\binding.json',
+                                              dict(first_write_proof_sha256='4'*64, service_instance_sha256='5'*64))
+        recovery = dict(attempt_id='6'*64, predecessor_terminal_sha256='7'*64, predecessor_service_sha256='8'*64)
+        before = dict(windows_generation=1, service_incarnation_sha256='a'*64, heartbeat_sequence=10,
+                      live_lease_sha256='b'*64)
+        after = before | {'heartbeat_sequence': 11, 'live_lease_sha256': 'd'*64}
+        pair = dict(proof_sha256='c'*64, lease_sha256='e'*64, valid_until_monotonic=3.0)
+        clock = [0.0]
+        calls = []
+        if callable(change):
+            change(before, after, pair)
+
+        def windows(source, deadline):
+            calls.append(source)
+            if len(calls) == 2:
+                if change == 'late_after':
+                    clock[0] = 2.1
+                return after
+            return before
+
+        def paired(**values):
+            self.assertEqual(values, {'challenge': 'f'*64, 'service_incarnation_sha256': before['service_incarnation_sha256'],
+                                      'deadline': 10.0})
+            if change == 'late_pair':
+                clock[0] = 2.1
+            return pair
+
+        return native, lease, recovery, windows, paired, clock
+
+    def run_continuity_fixture(self, *, change=None, deadline=10.0):
+        native, lease, recovery, windows, paired, clock = self.continuity_fixture(change=change)
+        with patch.object(native, 'fixed_script', return_value='fixture-continuity') as source, \
+                patch.object(native.secrets, 'token_hex', return_value='f'*64), \
+                patch.object(native.time, 'monotonic', side_effect=lambda: clock[0]):
+            result = lease.verify_recovery_continuity(windows, recovery, deadline,
+                                                      observe_pair=paired, assert_guard=lambda: None)
+        self.assertIs(source.call_args.args[2]['RecoveryContinuity'], True)
+        return result
+
+    def test_continuity_accepts_advanced_heartbeat_and_new_current_paired_lease(self):
+        self.assertRegex(self.run_continuity_fixture(), r'^[a-f0-9]{64}$')
+
+    def test_continuity_rejects_changed_incarnation_backward_sequence_and_bad_native_fields(self):
+        for field, value in (('service_incarnation_sha256', '0'*64), ('heartbeat_sequence', 9),
+                             ('heartbeat_sequence', True), ('windows_generation', True),
+                             ('live_lease_sha256', None)):
+            def change(before, after, pair):
+                after[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(change=change)
+
+    def test_continuity_rejects_bad_pair_proof_and_unbounded_or_expired_validity(self):
+        for field, value in (('proof_sha256', None), ('lease_sha256', 'invalid'),
+                             ('valid_until_monotonic', True), ('valid_until_monotonic', float('nan')),
+                             ('valid_until_monotonic', float('inf')), ('valid_until_monotonic', 6),
+                             ('valid_until_monotonic', 1)):
+            def change(before, after, pair):
+                pair[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(change=change)
+
+    def test_continuity_rejects_pair_aging_during_callback_or_native_after(self):
+        for mode in ('late_pair', 'late_after'):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(change=mode)
+
+    def test_continuity_rejects_invalid_caller_deadlines(self):
+        for deadline in (None, True, float('nan'), float('inf'), 0):
+            with self.subTest(deadline=deadline), self.assertRaisesRegex(
+                    native_stdio_bridge.BridgeRejected, 'native_initial_recovery_continuity_unconfirmed'):
+                self.run_continuity_fixture(deadline=deadline)
+
+    def test_recovery_marker_uses_broker_without_opening_the_marker_file(self):
+        from ha_control import initial_lease_service as service
+        handoff = dict(attempt_id="a"*64, legacy_plan_sha256="b"*64,
+                       restore_receipt_sha256="c"*64, activation_intent_sha256="d"*64)
+        intent = {key: value for key, value in handoff.items() if key != "activation_intent_sha256"}
+        intent.update(schema_version=1, phase="activate_vm_intent", fence_sha256="e"*64,
+                      activation_check_sha256="f"*64, settlement_sha256="1"*64)
+        client = MagicMock(pins=SimpleNamespace(attempt_id=handoff["attempt_id"],
+                                                plan_sha256=handoff["legacy_plan_sha256"]))
+        client.request_marker.return_value = "2"*64
+        path = Path("/fixture/intent")
+        observer = service.WindowsInitialObserver(client, path, "3"*64, "fixture", broker_marker=True)
+        with patch.object(service, "_read_pinned", return_value=(intent, (1, 2))) as read:
+            observer.assert_intent(handoff)
+            deadline = time.monotonic() + 1
+            self.assertTrue(observer.assert_exclusion_held(handoff, deadline))
+            read.assert_called_once_with(path, handoff["activation_intent_sha256"])
+        client.request_marker.assert_called_with(deadline, "3"*64)
+        client.request.assert_not_called()
+        client.request_marker.side_effect = ValueError()
+        with self.assertRaisesRegex(TransitionBlocked, "initial_service_handoff_unverified"):
+            observer.assert_exclusion_held(handoff, deadline)
+
+    def test_rearm_marker_stays_on_the_authenticated_broker_path(self):
+        from ha_control import initial_lease_service as service
+        handoff={'legacy_plan_sha256':'a'*64,'attempt_id':'b'*64}
+        params={key:'c'*64 for key in service.OBSERVER_KEYS}
+        params.update(pipe_name='fixture',server_pid=1)
+        backend=SimpleNamespace(plan_path=Path('/fixture/plan.json'),plan={
+            'windows_initial_observer':params,'windows_enforced':{'service_sid':'S-1-5-80-1-2-3-4-5'},'cluster':'fixture'})
+        with patch.object(service,'_handoff',return_value=handoff), \
+                patch.object(service,'PersistentLeaseProofClient'),patch.object(service,'_powershell_path'):
+            for action in (service.RECOVERY_ACTION,service.REARM_ACTION):
+                with service.native_initial_observer(backend,action=action) as observer:
+                    self.assertIs(observer.broker_marker,True)
+
+    def test_recovery_native_observer_separates_proofs_and_preserves_holds(self):
+        from ha_control import initial_lease_service as service
+
+        handoff = {"legacy_plan_sha256": "a"*64}
+        recovery = {"attempt_id": "b"*64, "predecessor_terminal_sha256": "c"*64, "predecessor_service_sha256": "7"*64}
+        legacy_config = {key: "d"*64 for key in service.OBSERVER_KEYS}
+        legacy_config.update(pipe_name="legacy", server_pid=4)
+        params = {"guest_boot_sha256": "e"*64, "hold_sha256": "f"*64,
+                  "broker_scope_sha256": "1"*64, "resource_set_sha256": "2"*64,
+                  "held_admission": dict(pipe_name="held", server_pid=5, key_sha256="3"*64),
+                  "provider_isolation": dict(pipe_name="provider", server_pid=6, key_sha256="4"*64)}
+        backend = SimpleNamespace(plan_path=Path("/fixture/plan.json"),
+            plan={"windows_initial_observer": legacy_config, "windows_recovery_observers": params,
+                  "windows_enforced": {"service_sid": "S-1-5-80-1-2-3-4-5"},
+                  "initial_effect_quarantine": {"broker_scope_sha256": "1"*64, "resource_set_sha256": "2"*64,
+                    "rows": {"car.telegram.poll": "5"*64, "car.hyundai.snapshot": "6"*64}, "hyundai_state_sha256": "7"*64}})
+        clients = []
+
+        def open_client(**args):
+            client = MagicMock()
+            client.pins = args["pins"]
+            client.request.return_value = "8"*64
+            client.__enter__.return_value = client
+            clients.append(client)
+            return client
+
+        legacy = MagicMock()
+        with (
+            patch.object(service, "_handoff", return_value=handoff),
+            patch.object(service, "_recovery_predecessor", return_value=recovery),
+            patch.object(service, "native_initial_observer", return_value=nullcontext(legacy)),
+            patch.object(service, "PersistentLeaseProofClient", side_effect=open_client),
+            patch.object(service, "_powershell_path"),
+        ):
+            with service.native_recovery_observer(backend) as observer:
+                self.assertEqual([client.pins.purpose for client in clients], ["held_admission", "provider_isolation"])
+                self.assertEqual(clients[0].pins.plan_sha256, handoff["legacy_plan_sha256"])
+                self.assertEqual(clients[0].pins.predecessor_service_sha256, recovery["predecessor_service_sha256"])
+                deadline = time.monotonic() + 4
+                with observer.recovery_admission(handoff, recovery) as admission:
+                    with self.assertRaisesRegex(TransitionBlocked, "initial_recovery_admission_unverified"):
+                        admission.publish()
+                    self.assertTrue(admission.assert_held(deadline))
+                    admission.publish()
+                    clients[0].request.assert_called_once_with(deadline)
+                with self.assertRaisesRegex(TransitionBlocked, "initial_recovery_quarantine_unverified"):
+                    observer.assert_quarantine_held(handoff, recovery, "0"*64, "2"*64, deadline)
+                self.assertTrue(observer.assert_quarantine_held(handoff, recovery, "1"*64, "2"*64, deadline))
+                clients[1].request.assert_called_once_with(deadline)
+            params["provider_isolation"]["server_pid"] = 5
+            with self.assertRaisesRegex(TransitionBlocked, "initial_recovery_native_observer_required"):
+                with service.native_recovery_observer(backend):
+                    self.fail("reused proof server PID")
+        self.assertEqual(len(clients), 2)
+        for client in clients:
+            client.__exit__.assert_called_once()
+
+    def test_recovery_proof_accepts_windows_json_decimal_without_accepting_coercible_values(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        command = r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$conditions=@($ast.FindAll({param($node)
+    $node -is [Management.Automation.Language.ParenExpressionAst] -and
+    $node.Extent.Text -match '\$(lease|record)\.proof_elapsed_ms -isnot \[int\]'
+},$true) | Sort-Object {$_.Extent.Text.Length})
+if(-not $conditions.Count){throw 'missing_numeric_guard'}
+$guard=[scriptblock]::Create($conditions[0].Extent.Text)
+# Windows PowerShell 5.1 JSON emits Decimal; modern PowerShell emits Double.
+foreach($value in @([decimal]1933.525,[double]1933.525,[int]1933,[long]1933)){
+    $lease=$record=[pscustomobject]@{proof_elapsed_ms=$value}
+    if((& $guard) -ne $false){throw 'valid_numeric_rejected'}
+}
+foreach($value in @('1933.525',$true,$null,[datetime]::UtcNow,@(1933))){
+    $lease=$record=[pscustomobject]@{proof_elapsed_ms=$value}
+    if((& $guard) -ne $true){throw 'coercible_value_accepted'}
+}
+exit 0
+"""
+        for name in ("windows-ha-start-initial-service.ps1", "windows-ha-cutover-live-authority.ps1"):
+            with self.subTest(script=name):
+                result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", command),
+                    env=os.environ | {"N100_TEST_SCRIPT": str(ROOT / "infra/k8s/ha_control" / name)},
+                    capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_recovery_start_rechecks_the_exact_predecessor_scm(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        command = r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_START,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq 'Assert-RecoveryPredecessorStopped'},$false)
+. ([scriptblock]::Create($function.Extent.Text))
+$hashPattern='\A[a-f0-9]{64}\z'
+$name='N100HA_'+('a'*24)+'_controller'
+$image='"C:\ProgramData\owned\windows-service-host.exe"'
+$sha=[Security.Cryptography.SHA256]::Create()
+try {$pin=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($image))).Replace('-','').ToLowerInvariant()}
+finally {$sha.Dispose()}
+$binding=[pscustomobject]@{service_name=$name;attempt_id='b'*64;service_image_path_sha256=$pin}
+$plan=[pscustomobject]@{installation_id='a'*64;initial_cutover_handoff=@{attempt_id='b'*64};
+    initial_cutover_recovery=@{predecessor_service_sha256='c'*64}}
+function Read-PinnedJson($Path,$Sha){
+    if ((Split-Path $Path -Leaf) -cne 'initial-predecessor-service.json' -or $Sha -cne ('c'*64)){throw 'fixture_pin'}
+    return $binding
+}
+$expected=@{Name=$name;State='Stopped';ProcessId=0;StartMode='Disabled';ServiceType='Own Process';
+    DesktopInteract=$false;StartName='NT SERVICE\'+$name;PathName=$image}
+$rows=@([pscustomobject]$expected)
+function Get-CimInstance { return $rows }
+Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetTempPath())
+foreach ($drift in @(@{State='Running'},@{ProcessId=42},@{StartMode='Manual'},@{PathName='other'})) {
+    $rows=@([pscustomobject]($expected.Clone()))
+    foreach ($key in $drift.Keys) { $rows[0].$key=$drift[$key] }
+    try { Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetTempPath()); throw 'fixture_accepted_drift' }
+    catch { if ($_.Exception.Message -cne 'initial_service_predecessor_unconfirmed'){throw} }
+}
+$rows=@()
+try { Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetTempPath()); throw 'fixture_accepted_absence' }
+catch { if ($_.Exception.Message -cne 'initial_service_predecessor_unconfirmed'){throw} }
+exit 0
+"""
+        result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", command),
+                                env=os.environ | {"N100_TEST_START": str(script)},
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_recovery_start_requires_own_reservation_and_distinct_service(self):
+        runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        command = r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_START,[ref]$tokens,[ref]$errors)
+if($errors.Count -ne 0){throw 'start_parse'}
+$definition=$ast.Find({
+ param($node)
+ $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-RecoveryStartScope'
+},$false)
+. ([scriptblock]::Create($definition.Extent.Text))
+$hashPattern='\A[a-f0-9]{64}\z'
+function Join-Path($Parent,$Leaf){$Parent+'\'+$Leaf}
+$attempt='b'*64
+$reservation='c'*64
+$name='N100HA_'+$attempt.Substring(0,24)+'_controller'
+$hostExe='C:\ProgramData\N100HA_'+$attempt.Substring(0,24)+'\host\windows-service-host.exe'
+$plan=[pscustomobject]@{installation_id=('a'*64);
+ windows_enforced=[pscustomobject]@{service_sid='S-1-5-80-1-2-3-4-5';service_image_sha256=('8'*64)};
+ initial_service_start=[pscustomobject]@{reservation_receipt_sha256=$reservation};
+ initial_cutover_handoff=[pscustomobject]@{attempt_id=('d'*64)};
+ initial_cutover_recovery=[pscustomobject]@{attempt_id=$attempt;predecessor_service_sha256=('e'*64);
+    predecessor_terminal_sha256=('f'*64)}}
+$approval=[pscustomobject]@{action='ha-recover-initial-writer';schema_version=1;authority_kind='installed-runtime';
+ installation_id=$plan.installation_id;installed_at='2020-01-01T00:00:00Z';plan_sha256=('a'*64);source_commit=('b'*40)}
+$receipt=[pscustomobject]@{format='fresh-recovery-service-reservation-receipt-v1';installation_id=$plan.installation_id;
+ recovery_attempt_id=$attempt;ready_to_start=$false;runtime_authority_issued=$false;service_started=$false;args_present=$false;
+ namespace_changed=$false;ownership_receipt_sha256=('1'*64);service_config_sha256=('2'*64)}
+$ownership=[pscustomobject]@{format='ha-owned-recovery-service-v1';installation_id=$plan.installation_id;
+ recovery_attempt_id=$attempt;service_name=$name;service_sid=$plan.windows_enforced.service_sid;
+ service_image_sha256=$plan.windows_enforced.service_image_sha256;service_config_sha256=$receipt.service_config_sha256;
+ predecessor_service_sha256=('e'*64);predecessor_terminal_sha256=('f'*64);new_owned_service=$true;scm_registration_complete=$true}
+function Read-PinnedJson($Path,$Sha){
+ if($Path -ceq ('C:\ProgramData\N100HA_'+$attempt.Substring(0,24)+'\namespace-service-ownership.json') -and
+    $Sha -ceq $receipt.ownership_receipt_sha256){return $ownership}
+ if($Path -cne ('C:\ProgramData\N100HA_'+$attempt.Substring(0,24)+'\reservation-receipt.json') -or
+    $Sha -cne $reservation){throw 'wrong_reservation'}
+ $receipt
+}
+Assert-RecoveryStartScope $plan $approval $attempt $reservation $name $hostExe 'C:\ProgramData'
+function Reject-RecoveryScope($scopeName,$path) {
+ try {
+  Assert-RecoveryStartScope $plan $approval $attempt $reservation $scopeName $path 'C:\ProgramData'
+  throw 'wrong_scope_accepted'
+ } catch { if($_.Exception.Message -cne 'initial_service_recovery_scope'){throw} }
+}
+Reject-RecoveryScope ('N100HA_'+('a'*24)+'_controller') $hostExe
+Reject-RecoveryScope $name ('C:\ProgramData\N100HA_'+('a'*24)+'\host\windows-service-host.exe')
+$approval.authority_kind='temporary'
+Reject-RecoveryScope $name $hostExe
+$approval.authority_kind=@('installed-runtime')
+Reject-RecoveryScope $name $hostExe
+$approval.authority_kind='installed-runtime'
+$approval.action=@('ha-recover-initial-writer')
+Reject-RecoveryScope $name $hostExe
+$approval.action='ha-recover-initial-writer'
+$plan.initial_cutover_recovery.predecessor_service_sha256='e'*63+'1'
+Reject-RecoveryScope $name $hostExe
+$plan.initial_cutover_recovery.predecessor_service_sha256='e'*64
+$receipt.args_present=$true
+Reject-RecoveryScope $name $hostExe
+exit 0
+"""
+        result = subprocess.run((runtime, "-NoProfile", "-NonInteractive", "-Command", command),
+                                env=os.environ | {"N100_TEST_START": str(script)},
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_pinned_read_accepts_distinct_stable_handle_ctime_and_rejects_changes(self):
         from ha_control import initial_lease_service as service
@@ -872,6 +2704,101 @@ class InitialLeaseServiceTests(unittest.TestCase):
         observer.assert_intent.assert_called_once()
         lease.open.assert_called_once()
         lease.revoke.assert_called_once()
+
+    def test_recovery_journal_requires_positive_admission_before_a_lease_can_open(self):
+        from contextlib import contextmanager
+        from ha_control import initial_lease_service as service
+
+        handoff = dict(attempt_id='a' * 64, legacy_plan_sha256='b' * 64,
+                       restore_receipt_sha256='c' * 64, activation_intent_sha256='d' * 64)
+        recovery = dict(attempt_id='1' * 64, predecessor_terminal_sha256='2' * 64,
+                        predecessor_service_sha256='3' * 64)
+        backend = SimpleNamespace(plan={'cluster': 'initial_test', 'initial_wsl_cutover': INITIAL_CUTOVER,
+                                       '_approval_action': service.RECOVERY_ACTION, 'initial_cutover_handoff': handoff},
+                                 fence_adapter=SimpleNamespace(_installed_runtime=True, plan_sha256='e' * 64),
+                                 _effects_deployment_binding=lambda: ('1' * 40, 'b' * 64))
+        admission = SimpleNamespace(assert_held=MagicMock(return_value=None), publish=MagicMock())
+
+        @contextmanager
+        def hold_admission(*_):
+            try:
+                yield admission
+            finally:
+                self.assertEqual(json.loads(journal.read_text())['phase'], 'lease_lost')
+                lease.revoke.assert_called_once()
+                admission.publish.assert_not_called()
+
+        observer = SimpleNamespace(assert_intent=MagicMock(), assert_legacy_closed=MagicMock(),
+                                   assert_exclusion_held=MagicMock(), recovery_admission=hold_admission)
+        lease = MagicMock()
+        lease.revoke.side_effect = RuntimeError('unexpected revoke failure')
+        with tempfile.TemporaryDirectory() as folder:
+            backend.plan_path = Path(folder) / 'plan.json'
+            journal = Path(folder) / 'journal/controller-state.json'
+            journal.parent.mkdir()
+
+            def make_lease(_backend, closure, *, assert_exclusion_held):
+                def open_lease(state):
+                    record = json.loads(journal.read_text())
+                    self.assertEqual(record['recovery'], recovery)
+                    self.assertEqual((record['phase'], record['revision']), ('opening', 4))
+                    return closure(state, time.monotonic() + 3)
+
+                lease.open.side_effect = open_lease
+                return lease
+
+            with patch.object(service, '_recovery_predecessor', return_value=recovery), \
+                    patch.object(service, 'InitialPgLeaseRecovery', side_effect=make_lease):
+                with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_admission_unverified'):
+                    service.serve_initial_recovery(backend, journal, observer)
+                record = json.loads(journal.read_text())
+                self.assertEqual((record['kind'], record['phase'], record['failure_code']),
+                                 ('initial-wsl-cutover-recovery', 'lease_lost', 'initial_recovery_admission_unverified'))
+                with self.assertRaisesRegex(TransitionBlocked, 'initial_service_reconciliation_required'):
+                    service.serve_initial_recovery(backend, journal, observer)
+        observer.assert_legacy_closed.assert_called_once()
+        lease.renew.assert_not_called()
+
+    def test_recovery_predecessor_rejects_unexpected_or_duplicate_pinned_fields(self):
+        from hashlib import sha256
+        from ha_control import initial_lease_service as service
+        from ha_control.initial_windows_gate import initial_service_identity
+
+        installation_id = '4'*64
+        original_name, _ = initial_service_identity(installation_id)
+        recovery_name, recovery_sid = initial_service_identity('3'*64)
+        handoff = dict(attempt_id='a'*64, legacy_plan_sha256='b'*64, restore_receipt_sha256='c'*64,
+                       activation_intent_sha256='d'*64, controller_plan_sha256='e'*64)
+        terminal = handoff | dict(controller_plan_sha256='f'*64, kind='initial-wsl-cutover',
+                                  schema_version=1, phase='lease_lost', generation=1, sequence=1)
+        service_binding = {key: terminal[key] for key in ('attempt_id', 'legacy_plan_sha256', 'controller_plan_sha256')}
+        service_binding.update(first_write_proof_sha256='1'*64, service_created_ticks='123456789',
+                               service_image_path_sha256='2'*64, service_name=original_name,
+                               service_pid=70, state_path=r'C:\previous\journal\controller-state.json')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            recovery = {'attempt_id': '3'*64}
+            backend = SimpleNamespace(plan_path=root/'plan.json', plan={'initial_cutover_recovery': recovery,
+                                      'installation_id': installation_id,
+                                      'windows_enforced': {'service_name': recovery_name, 'service_sid': recovery_sid}})
+            for previous, binding, valid in (
+                (json.dumps(terminal), json.dumps(service_binding), True),
+                (json.dumps(terminal | {'unknown': True}), json.dumps(service_binding), False),
+                ('{"sequence":2,' + json.dumps(terminal)[1:], json.dumps(service_binding), False),
+                (json.dumps(terminal), json.dumps(service_binding | {'service_name': 'other'}), False),
+                (json.dumps(terminal), json.dumps(service_binding | {'service_name': recovery_name}), False),
+                (json.dumps(terminal), json.dumps(service_binding | {'service_pid': 0}), False),
+            ):
+                for kind, payload in (('terminal', previous), ('service', binding)):
+                    data = payload.encode()
+                    (root / ('initial-predecessor-state.json' if kind == 'terminal' else
+                             'initial-predecessor-service.json')).write_bytes(data)
+                    recovery[f'predecessor_{kind}_sha256'] = sha256(data).hexdigest()
+                if valid:
+                    self.assertEqual(service._recovery_predecessor(backend, handoff), recovery)
+                else:
+                    with self.assertRaises(TransitionBlocked):
+                        service._recovery_predecessor(backend, handoff)
 
 
 class InitialPgLeaseTests(unittest.TestCase):
@@ -1099,23 +3026,34 @@ class InitialPgLeaseTests(unittest.TestCase):
             row = (self.expiry,)
         elif sql == 'SELECT pg_current_wal_flush_lsn()::text':
             row = ('0/20',)
+        elif sql == 'SELECT pg_last_wal_replay_lsn()::text':
+            row = ('0/30',)
         elif sql.startswith('SELECT generation FROM ha.controller_probes'):
             nonce, = parameters
             visible = nonce in self.probes and not (node == 'B' and nonce.endswith(':lease') and self.hide_lease_on_b)
             row = (1,) if visible else None
+        elif sql.startswith('SELECT array(SELECT nonce FROM ha.controller_probes'):
+            length, prefix = parameters
+            self.assertEqual(length, len(prefix))
+            nonces = sorted(nonce for nonce in self.probes if nonce.startswith(prefix) and nonce.endswith(':lease'))
+            row = ([] if node == 'B' and self.hide_lease_on_b else nonces[:2],)
         elif sql.startswith('INSERT INTO ha.controller_probes'):
             self.pending_probes.add(parameters[0])
         elif sql.startswith('DELETE FROM ha.controller_probes'):
-            self.probes = {nonce for nonce in self.probes if not nonce.startswith('initial-a:')}
+            length, prefix = parameters
+            self.assertEqual(length, len(prefix))
+            self.probes = {nonce for nonce in self.probes if not nonce.startswith(prefix)}
         elif sql.startswith('UPDATE ha.control'):
             expected = (self.cluster, self.revision, self.opened, self.opened, self.expiry, '1234')
             if parameters == expected:
                 count = 1
-                if sql.startswith('UPDATE ha.control SET revision=3'):
-                    self.pending = (3, False, self.now - timedelta(seconds=1))
+                assignment = sql.removeprefix('UPDATE ha.control SET ').split(',', 1)[0]
+                revision = int(assignment.removeprefix('revision=')) if assignment.startswith('revision=') else self.revision
+                if 'writes_open=false' in sql:
+                    self.pending = (revision, False, self.now - timedelta(seconds=1))
                 else:
                     row = (self.now + timedelta(seconds=5),)
-                    self.pending = (2, True, row[0])
+                    self.pending = (revision, True, row[0])
         return SimpleNamespace(fetchone=lambda: row, rowcount=count)
 
     def commit(self, connection):
@@ -1311,6 +3249,500 @@ class InitialPgLeaseTests(unittest.TestCase):
             self.lease.open(self.state)
         self.assertEqual(self.trace, [])
 
+    def recovery_lease(self):
+        self.revision = 3
+        self.backend.plan['_approval_action'] = 'ha-recover-initial-writer'
+        self.backend.plan['initial_cutover_recovery'] = {
+            'attempt_id': 'e' * 64,
+            'predecessor_terminal_sha256': 'f' * 64,
+            'predecessor_service_sha256': 'a' * 64,
+        }
+        self.backend.fence_adapter._installed_runtime = True
+
+        def prove_closed(state, deadline):
+            self.legacy_closed(state, deadline)
+            return True
+
+        return InitialPgLeaseRecovery(self.backend, prove_closed)
+
+    def test_recovery_uses_distinct_attempt_and_revokes_only_the_open_recovery_stamp(self):
+        lease = self.recovery_lease()
+        other_probes = {'initial-a:previous:lease', 'recovery-a:' + '0' * 64 + ':past:lease'}
+        self.probes.update(other_probes)
+        self.assertRegex(lease.open(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(self.revision, 4)
+        self.assertEqual(self.trace.count(('closure',)), 4)
+        self.backend._effects_open_gate.assert_called_once()
+        recovery_prefix = 'recovery-a:' + 'e' * 64 + ':'
+        self.assertEqual(len([nonce for nonce in self.probes if nonce.startswith(recovery_prefix)]), 2)
+        self.now += timedelta(seconds=1)
+        self.assertRegex(lease.renew(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(len([nonce for nonce in self.probes if nonce.startswith(recovery_prefix)]), 1)
+        self.assertTrue(other_probes <= self.probes)
+        self.assertTrue(lease.revoke(self.state))
+        self.assertEqual(self.revision, 5)
+        self.assertFalse(self.opened)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_identity_unverified'):
+            InitialPgLeaseRecovery(self.backend, lease.assert_legacy_closed).open(self.state)
+        self.assertEqual(self.revision, 5)
+
+    def test_recovery_cannot_adopt_another_controller_expiry(self):
+        lease = self.recovery_lease()
+        lease.open(self.state)
+        old_expiry = self.expiry
+        unowned = InitialPgLeaseRecovery(self.backend, lease.assert_legacy_closed)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_lease_reconciliation_required'):
+            unowned.renew(self.state)
+        self.assertFalse(unowned.revoke(self.state))
+        self.assertTrue(self.opened)
+        self.assertEqual(self.expiry, old_expiry)
+
+    def test_recovery_published_open_requires_current_matching_nonce_on_both_nodes(self):
+        lease = self.recovery_lease()
+        proof = lease.open(self.state)
+        deadline = time.monotonic() + 10
+        self.trace.clear()
+        options = dict(challenge="a"*64, lease_sha256=proof, deadline=deadline)
+        self.assertNotEqual(lease.observe_published_open(self.state, **options),
+                            lease.observe_published_open(self.state, **(options | {"challenge": "b"*64})))
+        statements = [row[1] for row in self.trace if len(row) == 3]
+        self.assertEqual(statements.count('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'), 4)
+        self.assertFalse(any(sql.startswith(('UPDATE ', 'INSERT ', 'DELETE ', 'COMMIT')) for sql in statements))
+        self.hide_lease_on_b = True
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_barrier_unconfirmed'):
+            lease.observe_published_open(self.state, **options)
+        self.hide_lease_on_b = False
+        self.now += timedelta(seconds=1)
+        new = lease.renew(self.state)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_barrier_unconfirmed'):
+            lease.observe_published_open(self.state, **options)
+        self.assertRegex(lease.observe_published_open(self.state, **(options | {"lease_sha256": new})),
+                         r'^[a-f0-9]{64}$')
+        with patch('ha_control.initial_pg_lease.time.monotonic', return_value=100.0), patch.object(
+                lease, 'assert_legacy_closed', wraps=lease.assert_legacy_closed) as closure:
+            self.assertRegex(lease.observe_published_open(
+                self.state, **(options | {"lease_sha256": new, "deadline": 100.5})), r'^[a-f0-9]{64}$')
+        self.assertEqual(closure.call_args.args[1], 100.5)
+
+    def test_recovery_closed_observation_is_read_only_and_binds_the_challenge(self):
+        lease = self.recovery_lease()
+        deadline = time.monotonic() + 10
+        first = lease.observe_closed(self.state, challenge="a"*64, deadline=deadline)
+        second = lease.observe_closed(self.state, challenge="b"*64, deadline=deadline)
+        self.assertNotEqual(first, second)
+        self.assertFalse(self.opened)
+        self.assertEqual(self.revision, 3)
+        self.assertEqual(self.backend._effects_open_gate.call_count, 2)
+        statements = [row[1] for row in self.trace if len(row) == 3]
+        self.assertEqual(statements.count('BEGIN READ ONLY'), 2)
+        self.assertFalse(any(sql.startswith(('UPDATE ', 'INSERT ', 'DELETE ', 'COMMIT')) for sql in statements))
+        observe = self.backend._observe
+
+        def lagging(connection, node, state):
+            observed = observe(connection, node, state)
+            return observed | {"replay": "0/0"} if node == "B" else observed
+
+        self.backend._observe = lagging
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_barrier_unconfirmed'):
+            lease.observe_closed(self.state, challenge="c"*64, deadline=deadline)
+        self.assertEqual(self.backend._effects_open_gate.call_count, 2)
+
+    def test_quiescence_prerequisites_verify_effect_pins_before_provider_isolation(self):
+        lease = self.recovery_lease()
+        rows = {"car.hyundai.snapshot": "a"*64, "car.telegram.poll": "b"*64}
+        self.backend.plan["initial_effect_quarantine"] = {
+            "rows": rows, "broker_scope_sha256": "c"*64, "hyundai_state_sha256": "d"*64,
+            "resource_set_sha256": "7"*64,
+        }
+        args = {"challenge": "e"*64, "deadline": time.monotonic() + 10}
+        paired = tuple(sorted(rows.items())), "d"*64, "7"*64
+        with patch.object(lease, "_quarantine_observation", return_value=paired) as observe:
+            self.assertRegex(lease.observe_quiescence_prerequisites(self.state, **args), r'^[a-f0-9]{64}$')
+            self.assertEqual(observe.call_count, 2)
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_quarantine_unverified'):
+                lease.observe_closed(self.state, **args)
+        with patch.object(lease, "_quarantine_observation", side_effect=[paired, (paired[0], paired[1], "0"*64)]):
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_quarantine_unverified'):
+                lease.observe_quiescence_prerequisites(self.state, **args)
+        with patch('ha_control.initial_pg_lease.time.monotonic', return_value=100.0), patch.object(
+            lease, '_observe_pair', wraps=lease._observe_pair,
+        ) as observe_pair, patch.object(lease, "_quarantine_observation", return_value=paired):
+            lease.observe_quiescence_prerequisites(self.state, **(args | {"deadline": 100.5}))
+        self.assertEqual(observe_pair.call_args.kwargs['started'] + INITIAL_PROOF_SECONDS, 100.5)
+        self.assertFalse(self.opened)
+        self.assertEqual(self.revision, 3)
+        self.assertFalse(any(row[1].startswith(('UPDATE ', 'INSERT ', 'DELETE ', 'COMMIT'))
+                             for row in self.trace if len(row) == 3))
+
+    def test_quarantine_requires_exact_paired_pins_and_positive_live_isolation(self):
+        lease = self.recovery_lease()
+        selected = {"car.hyundai.snapshot": "a"*64, "car.telegram.poll": "b"*64}
+        self.backend.plan["initial_effect_quarantine"] = {
+            "rows": selected, "broker_scope_sha256": "c"*64, "hyundai_state_sha256": "d"*64,
+            "resource_set_sha256": "7"*64,
+        }
+        challenge = "e"*64
+        deadline = time.monotonic() + 10
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_quarantine_unverified'):
+            lease.observe_closed(self.state, challenge=challenge, deadline=deadline)
+        isolation = MagicMock(return_value=None)
+        lease = InitialPgLeaseRecovery(self.backend, lease.assert_legacy_closed, assert_quarantine_held=isolation)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_quarantine_unverified'):
+            lease.observe_closed(self.state, challenge=challenge, deadline=deadline)
+        isolation.return_value = True
+        expected = tuple(sorted(selected.items())), "d"*64, "7"*64
+        with patch.object(lease, "_quarantine_observation", side_effect=[expected, (expected[0], expected[1], "0"*64)]) as observe:
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_quarantine_unverified'):
+                lease.observe_closed(self.state, challenge=challenge, deadline=deadline)
+            self.assertEqual(observe.call_count, 2)
+        self.assertEqual(isolation.call_args.args[:2], ("c"*64, "7"*64))
+        with patch.object(lease, "_quarantine_observation", return_value=expected) as observe:
+            self.assertRegex(lease.observe_closed(self.state, challenge=challenge, deadline=deadline), r'^[a-f0-9]{64}$')
+            self.assertTrue(all(call.kwargs == {"renewal": False} for call in observe.call_args_list))
+        self.assertFalse(self.opened)
+
+        unrelated_active = False
+
+        def stored_isolation(_connection, *, renewal):
+            if unrelated_active and not renewal:
+                raise TransitionBlocked('external_effect_controller_unresolved')
+            return expected
+
+        with patch.object(lease, "_quarantine_observation", side_effect=stored_isolation):
+            lease.open(self.state)
+            unrelated_active = True
+            self.now += timedelta(seconds=1)
+            lease.renew(self.state)
+            self.assertTrue(self.opened)
+            self.assertEqual(self.revision, 4)
+
+    def test_recovery_quarantine_and_closure_share_deadline_and_overlap(self):
+        lease = self.recovery_lease()
+        lease.quarantine = ((), 'c' * 64, 'd' * 64, '7' * 64)
+        rendezvous = threading.Barrier(2)
+        started = time.monotonic()
+        deadline = started + INITIAL_PROOF_SECONDS
+
+        def isolation(broker, resources, actual_deadline):
+            self.assertEqual((broker, resources), ('c' * 64, '7' * 64))
+            self.assertEqual(actual_deadline, deadline)
+            rendezvous.wait(timeout=1)
+            return True
+
+        def closure(state, actual_deadline):
+            self.assertEqual(actual_deadline, deadline)
+            rendezvous.wait(timeout=1)
+            return True
+
+        lease.assert_quarantine_held = isolation
+        lease.assert_legacy_closed = closure
+        observed = lease._legacy(self.state, started, phase='precommit')
+        self.assertGreaterEqual(observed, started)
+        self.assertLess(observed, deadline)
+        self.assertFalse(self.opened)
+
+    def test_recovery_parallel_proofs_drain_and_reject_either_failure(self):
+        for failed_proof in ('isolation', 'closure'):
+            with self.subTest(failed_proof=failed_proof):
+                lease = self.recovery_lease()
+                lease.quarantine = ((), 'c' * 64, 'd' * 64, '7' * 64)
+                rendezvous = threading.Barrier(2)
+                finished = threading.Event()
+
+                def isolation(*_):
+                    rendezvous.wait(timeout=1)
+                    finished.set()
+                    return failed_proof != 'isolation'
+
+                def closure(*_):
+                    rendezvous.wait(timeout=1)
+                    if failed_proof == 'closure':
+                        raise TransitionBlocked('legacy_proof_failed')
+                    return True
+
+                lease.assert_quarantine_held = isolation
+                lease.assert_legacy_closed = closure
+                expected = ('initial_recovery_quarantine_unverified' if failed_proof == 'isolation'
+                            else 'legacy_proof_failed')
+                with self.assertRaisesRegex(TransitionBlocked, expected):
+                    lease._legacy(self.state, time.monotonic(), phase='precommit')
+                self.assertTrue(finished.is_set())
+                self.assertFalse(self.opened)
+
+    def test_recovery_parallel_proofs_keep_original_deadline(self):
+        lease = self.recovery_lease()
+        lease.quarantine = ((), 'c' * 64, 'd' * 64, '7' * 64)
+        rendezvous = threading.Barrier(2)
+        clock = [100.0]
+        finished = threading.Event()
+
+        def isolation(*_):
+            rendezvous.wait(timeout=1)
+            clock[0] = 100.0 + INITIAL_PROOF_SECONDS
+            finished.set()
+            return True
+
+        def closure(*_):
+            rendezvous.wait(timeout=1)
+            finished.wait(timeout=1)
+            return True
+
+        lease.assert_quarantine_held = isolation
+        lease.assert_legacy_closed = closure
+        with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_deadline_exceeded'):
+                lease._legacy(self.state, 100.0, phase='precommit')
+        self.assertTrue(finished.is_set())
+        self.assertFalse(self.opened)
+
+    def test_quarantine_fingerprint_rejects_other_rows_and_missing_inflight_barrier(self):
+        rows = [
+            ('car-care-worker', 'request-a', 'car.hyundai.snapshot', 'hyundai:'+'a'*64,
+             'b'*64, 'A', 1, 'c'*64, 'uncertain', True, True, '1.0', '2.0'),
+            ('car-care-worker', 'request-b', 'car.telegram.poll', 'telegram:'+'d'*64,
+             'e'*64, 'A', 1, 'c'*64, 'uncertain', True, True, '3.0', '4.0'),
+        ]
+        barriers = [('inflight', 1, '1'*32), ('pending', 1, '2'*32)]
+        credential = (2, 'f'*64, True)
+
+        def inspect(records, effects=barriers, state=credential, *, renewal=False):
+            connection = MagicMock()
+            replies = [SimpleNamespace(fetchall=lambda: records)]
+            replies.extend(SimpleNamespace(fetchall=lambda: effects) for _ in records)
+            replies.append(SimpleNamespace(fetchone=lambda: state))
+            connection.execute.side_effect = replies
+            value = InitialPgLeaseRecovery._quarantine_observation(connection, renewal=renewal)
+            if renewal:
+                self.assertIn("AND service='car-care-worker' AND operation IN", connection.execute.call_args_list[0].args[0])
+            return value
+
+        self.assertEqual(inspect(rows, renewal=True), inspect(rows))
+        self.assertNotEqual(inspect(rows, state=(3, 'f'*64, True)), inspect(rows))
+        with self.assertRaisesRegex(TransitionBlocked, 'external_effect_controller_unresolved'):
+            inspect(rows+[rows[0]])
+        with self.assertRaisesRegex(TransitionBlocked, 'external_effect_controller_unresolved'):
+            inspect(rows, effects=barriers[1:])
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_recovery_quarantine_unverified'):
+            inspect(rows, state=(2, 'f'*64, False))
+
+    def test_recovery_refuses_missing_binding_native_runtime_or_matching_closed_pair(self):
+        for condition in ('missing_binding', 'old_action', 'native_runtime', 'wrong_standby_revision',
+                          'lagging_standby'):
+            with self.subTest(condition=condition):
+                self.setUp()
+                lease = self.recovery_lease()
+                expected = 'initial_cutover_approval_required'
+                if condition == 'missing_binding':
+                    del self.backend.plan['initial_cutover_recovery']['predecessor_service_sha256']
+                elif condition == 'old_action':
+                    self.backend.plan['_approval_action'] = 'ha-initial-wsl-cutover'
+                elif condition == 'native_runtime':
+                    self.backend.fence_adapter._installed_runtime = False
+                else:
+                    is_lagging = condition == 'lagging_standby'
+                    expected = ('initial_replication_barrier_unconfirmed' if is_lagging
+                                else 'initial_replication_identity_unverified')
+                    observe = self.backend._observe
+
+                    def mismatched_standby(connection, node, state):
+                        value = observe(connection, node, state)
+                        if node == 'B':
+                            value.update({'replay': '0/10'} if is_lagging else {'revision': 2})
+                        return value
+
+                    self.backend._observe = mismatched_standby
+                with self.assertRaisesRegex(TransitionBlocked, expected):
+                    lease.open(self.state)
+                self.assertEqual(self.revision, 3)
+                self.assertFalse(self.opened)
+                self.assertFalse(any(row[1].startswith('UPDATE ha.control') for row in self.trace if len(row) == 3))
+
+    def test_recovery_requires_same_expired_stamp_on_a_and_b(self):
+        lease = self.recovery_lease()
+        execute = self.execute
+
+        def mismatched_expiry(node, sql, parameters):
+            if node == 'B' and sql == 'SELECT expires_at FROM ha.control WHERE singleton=1':
+                return SimpleNamespace(fetchone=lambda: (self.expiry - timedelta(seconds=1),))
+            return execute(node, sql, parameters)
+
+        with patch.object(self, 'execute', side_effect=mismatched_expiry):
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_lease_stamp_unverified'):
+                lease.open(self.state)
+        self.assertEqual(self.revision, 3)
+        self.assertFalse(self.opened)
+        self.assertFalse(self.probes)
+
+    def test_recovery_requires_explicit_positive_legacy_and_exclusion_proof(self):
+        for missing_proof in ('legacy', 'exclusion'):
+            with self.subTest(missing_proof=missing_proof):
+                self.setUp()
+                lease = self.recovery_lease()
+                proof = lease.assert_legacy_closed
+                if missing_proof == 'legacy':
+                    lease = InitialPgLeaseRecovery(self.backend, lambda *_: None, assert_exclusion_held=proof)
+                else:
+                    lease = InitialPgLeaseRecovery(self.backend, proof, assert_exclusion_held=lambda *_: None)
+                with self.assertRaisesRegex(TransitionBlocked, 'initial_legacy_closure_required'):
+                    lease.open(self.state)
+                self.assertEqual(self.revision, 3)
+                self.assertFalse(self.opened)
+                self.assertFalse(any(row[1].startswith('UPDATE ha.control') for row in self.trace if len(row) == 3))
+
+    def test_recovery_lost_commit_reconciles_only_its_issued_expiry_and_closes_at_revision_five(self):
+        lease = self.recovery_lease()
+        self.lost_commit = True
+        with self.assertRaisesRegex(TransitionBlocked, 'fixture_commit_response_lost'):
+            lease.open(self.state)
+        self.assertFalse(self.opened)
+        self.assertEqual(self.revision, 5)
+
+    def rearm_lease(self):
+        from ha_control.initial_pg_lease import InitialPgLeaseRearm, REARM_ACTION
+        recovery = self.recovery_lease()
+        self.revision = 5
+        self.backend.plan['_approval_action'] = REARM_ACTION
+        self.backend.plan['initial_recovery_rearm'] = {
+            'schema_version': 1, 'attempt_id': '9'*64, 'predecessor_terminal_sha256': '1'*64,
+            'predecessor_binding_sha256': '2'*64, 'predecessor_args_sha256': '3'*64,
+            'closure_mode': 'windows-offline-v1'}
+        return InitialPgLeaseRearm(self.backend, recovery.assert_legacy_closed)
+
+    def test_rearm_issues_exact_six_renews_owned_expiry_and_revokes_seven(self):
+        lease = self.rearm_lease()
+        self.probes.add('recovery-a:'+'e'*64+':old:lease')
+        self.assertRegex(lease.open(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(self.revision, 6)
+        self.assertTrue(any(value.startswith('rearm-a:'+'9'*64+':') for value in self.probes))
+        self.assertIn('recovery-a:'+'e'*64+':old:lease', self.probes)
+        self.now += timedelta(seconds=1)
+        lease.renew(self.state)
+        self.assertEqual(self.revision, 6)
+        self.assertTrue(lease.revoke(self.state))
+        self.assertEqual(self.revision, 7)
+        self.assertFalse(self.opened)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_identity_unverified'):
+            type(lease)(self.backend, lease.assert_legacy_closed).open(self.state)
+        self.assertEqual(self.revision, 7)
+
+    def test_rearm_never_reuses_revision_four_or_adopts_another_instance(self):
+        lease = self.rearm_lease()
+        self.revision = 3
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_identity_unverified'):
+            lease.open(self.state)
+        self.assertEqual(self.revision, 3)
+        lease = self.rearm_lease()
+        lease.open(self.state)
+        other = type(lease)(self.backend, lease.assert_legacy_closed)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_lease_reconciliation_required'):
+            other.renew(self.state)
+        self.assertFalse(other.revoke(self.state))
+        self.assertEqual(self.revision, 6)
+
+    def test_normal_lease_paths_refuse_rearm_even_if_old_action_is_supplied(self):
+        for cls, action in ((InitialPgLease, 'ha-initial-wsl-cutover'),
+                            (InitialPgLeaseRecovery, 'ha-recover-initial-writer')):
+            self.setUp()
+            lease = self.rearm_lease()
+            self.backend.plan['_approval_action'] = action
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_rearm_scope_unverified'):
+                cls(self.backend, lease.assert_legacy_closed).open(self.state)
+            self.assertFalse(self.opened)
+
+    def test_rearm_missing_offline_mode_and_changed_attempt_cannot_issue(self):
+        for field, value in (('closure_mode', 'online'), ('schema_version', True), ('attempt_id', 'e'*64),
+                             ('predecessor_args_sha256', 'broken')):
+            self.setUp()
+            lease = self.rearm_lease()
+            self.backend.plan['initial_recovery_rearm'][field] = value
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_rearm_scope_unverified'):
+                lease.open(self.state)
+            self.assertEqual(self.revision, 5)
+            self.assertFalse(self.opened)
+
+    def test_rearm_uncertain_commit_is_closed_only_at_its_own_six_stamp(self):
+        lease = self.rearm_lease()
+        self.lost_commit = True
+        with self.assertRaisesRegex(TransitionBlocked, 'fixture_commit_response_lost'):
+            lease.open(self.state)
+        self.assertEqual(self.revision, 7)
+        self.assertFalse(self.opened)
+
+class InitialRearmSealTests(unittest.TestCase):
+    def fixture(self):
+        from ha_control import initial_windows_gate as gate
+        digest=lambda value:hashlib.sha256(value).hexdigest()
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        recovery={'attempt_id':'a'*64,'predecessor_service_sha256':'b'*64,'predecessor_terminal_sha256':'c'*64}
+        handoff={'attempt_id':'d'*64,'legacy_plan_sha256':'e'*64,'restore_receipt_sha256':'1'*64,'activation_intent_sha256':'2'*64}
+        name,sid=gate.initial_service_identity(recovery['attempt_id'])
+        terminal={'schema_version':1,'kind':'initial-wsl-cutover-recovery','generation':1,**handoff,
+                  'controller_plan_sha256':'3'*64,'recovery':recovery,'revision':4,'phase':'lease_lost','sequence':1580,
+                  'failure_code':'legacy_pipe_response_timeout_refresh'}
+        binding={'attempt_id':handoff['attempt_id'],'controller_plan_sha256':'3'*64,
+                 'first_write_proof_sha256':'4'*64,'legacy_plan_sha256':handoff['legacy_plan_sha256'],
+                 'service_created_ticks':'12345','service_image_path_sha256':'5'*64,'service_name':name,
+                 'service_pid':123,'state_path':r'C:\old\journal\controller-state.json'}
+        settings=dict(zip(gate.ARGS_FIELDS,('enforced-service-v1',name,sid,r'C:\old\python.exe','6'*64,
+            r'C:\old\launcher.py','7'*64,r'C:\old\plan.json','3'*64,r'C:\old\approval.json','8'*64,'serve','9'*64)))
+        files={'rearm-predecessor-state.json':encode(terminal),'rearm-predecessor-binding.json':encode(binding),
+               'rearm-predecessor-args.txt':''.join(key+'='+settings[key]+'\n' for key in gate.ARGS_FIELDS).encode()}
+        rearm={'schema_version':1,'attempt_id':'f'*64,'predecessor_terminal_sha256':digest(files['rearm-predecessor-state.json']),
+               'predecessor_binding_sha256':digest(files['rearm-predecessor-binding.json']),
+               'predecessor_args_sha256':digest(files['rearm-predecessor-args.txt']),'closure_mode':'windows-offline-v1'}
+        plan={'initial_recovery_rearm':rearm,'initial_cutover_recovery':recovery,'initial_cutover_handoff':handoff,
+              'windows_enforced':{'service_name':name,'service_sid':sid,'service_image_sha256':'9'*64},
+              'windows_initial_observer':{'windows_boot_sha256':'0'*64}}
+        seal={'schema_version':1,'plan_sha256':'a'*64,'rearm':rearm,'windows_boot_sha256':'0'*64,
+              'service':{'service_name':name,'service_sid':sid,'state':'Stopped','start_mode':'Disabled',
+                         'process_id':0,'service_image_path_sha256':'5'*64}}
+        files['rearm-predecessor-seal.json']=encode(seal)
+        return gate,plan,files,seal
+
+    def test_sealed_same_sid_predecessor_is_bound_to_old_args_terminal_and_new_plan(self):
+        gate,plan,files,_=self.fixture()
+        self.assertEqual(gate.validate_rearm_seal(plan,'a'*64,files),plan['initial_recovery_rearm'])
+        for field in ('rearm-predecessor-state.json','rearm-predecessor-binding.json','rearm-predecessor-args.txt'):
+            changed=files|{field:files[field]+b' '}
+            with self.subTest(field=field),self.assertRaises(TransitionBlocked):
+                gate.validate_rearm_seal(plan,'a'*64,changed)
+
+    def test_native_rearm_envelope_rejects_array_coercion(self):
+        runtime=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
+        source=ROOT/'infra/k8s/ha_control/windows-ha-start-initial-service.ps1'
+        command=r"""
+$ErrorActionPreference='Stop'
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:N100_TEST_REARM,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$definition=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-RearmEnvelope'},$true))
+if($definition.Count -ne 1){throw 'fixture_function'}
+. ([scriptblock]::Create($definition[0].Extent.Text))
+$hashPattern='\A[a-f0-9]{64}\z'
+$good=@{attempt_id=('a'*64);closure_mode='windows-offline-v1';predecessor_args_sha256=('b'*64);
+        predecessor_binding_sha256=('c'*64);predecessor_terminal_sha256=('d'*64)}
+Assert-RearmEnvelope ([pscustomobject]$good)
+foreach($key in @($good.Keys)){
+ foreach($value in @(@($good[$key],$good[$key]),123)){
+  $bad=$good.Clone();$bad[$key]=$value
+  try{Assert-RearmEnvelope ([pscustomobject]$bad);throw 'fixture_accepted_array'}
+  catch{if($_.Exception.Message -cne 'initial_service_rearm_scope'){throw}}
+ }
+}
+exit 0
+"""
+        result=subprocess.run((runtime,'-NoProfile','-NonInteractive','-Command',command),
+                              env=os.environ|{'N100_TEST_REARM':str(source)},capture_output=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_seal_rejects_different_boot_plan_or_predecessor_still_running(self):
+        for field,value in (('plan_sha256','b'*64),('windows_boot_sha256','b'*64),('schema_version',True),
+                            ('service',{'state':'Running'})):
+            gate,plan,files,seal=self.fixture();seal[field]=value
+            files['rearm-predecessor-seal.json']=json.dumps(seal).encode()
+            with self.subTest(field=field),self.assertRaises(TransitionBlocked):
+                gate.validate_rearm_seal(plan,'a'*64,files)
+
 
 class IsolatedLeaseRehearsalTests(unittest.TestCase):
     def test_fixture_observer_rejects_replayed_receipt(self):
@@ -1497,12 +3929,16 @@ class NativeActivationHandoffTests(unittest.TestCase):
              patch.object(ssh, '_ssh_config', return_value=Path('/private/tmp/ssh-config')), \
              patch.object(ssh, '_same_files', return_value=True):
             workspace.return_value.__enter__.return_value = '/private/tmp/mock-ssh'
-            with client._connection(12) as (short, stamps):
-                self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
-                self.assertEqual(stamps, {Path('/unused'): None})
-            with client._connection(12, cutover=True) as (long, _):
-                self.assertEqual(long, short[:3] + ('-o', 'ServerAliveInterval=5',
-                                                   '-o', 'ServerAliveCountMax=12') + short[3:])
+            for platform, root in (('darwin', '/private/tmp'), ('linux', '/tmp')):
+                with self.subTest(platform=platform), patch.object(windows.sys, 'platform', platform):
+                    with client._connection(12) as (short, stamps):
+                        self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
+                        self.assertEqual(stamps, {Path('/unused'): None})
+                    workspace.assert_called_with(prefix='ha-native-win-', dir=root)
+                    with client._connection(12, cutover=True) as (long, _):
+                        self.assertEqual(long, short[:3] + ('-o', 'ServerAliveInterval=5',
+                                                           '-o', 'ServerAliveCountMax=12') + short[3:])
+                    workspace.assert_called_with(prefix='ha-native-win-', dir=root)
 
     def test_wsl_import_executes_only_verified_source_bytes(self):
         from ha_control import native_wsl_launcher as launcher, native_stdio_bridge as bridge
@@ -1602,6 +4038,31 @@ send({'status': 'PASS'})
         self.assertEqual(len(checks), 3)
         with self.assertRaisesRegex(bridge.BridgeRejected, 'guest_ssh_live_windows_unconfirmed'):
             ssh._activation_exchange(command, payload, time.monotonic() + 5, nonce, lambda _: False)
+
+        checked_boundaries = []
+
+        def prepared_current(challenge, boundary, deadline):
+            self.assertTrue(bridge._hash(challenge))
+            self.assertLess(time.monotonic(), deadline)
+            checked_boundaries.append(boundary)
+            return "c"*64
+
+        for boundaries in (bridge.PREPARATION_BOUNDARIES, bridge.PREPARATION_BOUNDARIES[:-1]):
+            checked_boundaries.clear()
+            payload = bridge._bytes({"nonce": nonce, "boundaries": boundaries})
+            if len(boundaries) == len(bridge.PREPARATION_BOUNDARIES):
+                observed = ssh._activation_exchange(
+                    command, payload, time.monotonic()+5, nonce, prepared_current, bind_boundary=True,
+                    boundaries=bridge.PREPARATION_BOUNDARIES,
+                )
+                self.assertEqual(json.loads(observed), {"status": "PASS"})
+            else:
+                with self.assertRaisesRegex(bridge.BridgeRejected, "guest_ssh_live_windows_required"):
+                    ssh._activation_exchange(
+                        command, payload, time.monotonic()+5, nonce, prepared_current, bind_boundary=True,
+                        boundaries=bridge.PREPARATION_BOUNDARIES,
+                    )
+            self.assertEqual(tuple(checked_boundaries), boundaries)
 
     def test_binds_wsl_intent_and_exact_guest_receipt_before_activation(self):
         from ha_control import native_activation_handoff as handoff, native_stdio_bridge as bridge

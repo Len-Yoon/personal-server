@@ -156,6 +156,32 @@ foreach($case in @('wrong-com','extra-com','missing-com','duplicate-com','unknow
         self.assertEqual(re.findall(r'(?:^|;)([a-z_0-9]+)=',base),expected)
 
 
+    def test_standalone_b_com_request_requires_explicit_no_egress_scope(self):
+        self.assertEqual(self.run_ps(r'''
+function Bind-Request($Value){
+ $bytes=[Text.Encoding]::UTF8.GetBytes(($Value|ConvertTo-Json -Compress))
+ $script:Request=[Convert]::ToBase64String($bytes);$script:RequestSha256=Get-GuestComHash $bytes
+}
+function Assert-Rejected($Value){
+ Bind-Request $Value
+ $closed=$false;try{$null=Read-GuestComRequest}catch{$closed=$true}
+ if(-not $closed){throw 'unsafe_standalone_b_com_request_accepted'}
+}
+$cfg=Read-GuestComRequest
+$cfg['node']='B'
+Assert-Rejected $cfg
+$cfg.Add('replacement_topology','standalone-isolated-b-v1')
+Bind-Request $cfg
+$actual=Read-GuestComRequest
+if($actual['node'] -cne 'B' -or $actual['replacement_topology'] -cne 'standalone-isolated-b-v1'){throw 'standalone_b_com_request_unbound'}
+$cfg['egress_mac_address']='021122334455';Assert-Rejected $cfg
+$cfg['egress_mac_address']=''
+$cfg['peer_prepared_receipt_sha256']='1'*64;Assert-Rejected $cfg
+$cfg['peer_prepared_receipt_sha256']=''
+$cfg['node']='A';Assert-Rejected $cfg
+'PASS'
+'''), 'PASS')
+
     def test_registered_profile_request_and_external_evidence_pin_are_explicit(self):
         self.assertEqual(self.run_ps(r'''
 $legacy=Read-GuestComRequest
