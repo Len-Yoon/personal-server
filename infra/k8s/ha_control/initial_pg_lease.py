@@ -96,6 +96,7 @@ class InitialPgLease:
     _owned_renewal_only = False
     _explicit_proof_only = False
     _allow_rearm = False
+    _allow_postboot = False
 
     def __init__(self, backend, assert_legacy_closed, *, assert_exclusion_held=None):
         if not callable(assert_legacy_closed) or (assert_exclusion_held is not None and not callable(assert_exclusion_held)):
@@ -109,11 +110,14 @@ class InitialPgLease:
         self.scope = None
         self.proof_started = None
         self.rearm = None
+        self.postboot = None
 
     def _bind(self, state):
         plan = self.backend.plan
         if not self.backend.depth or type(plan) is not dict:
             _deny('native_host_guard_required')
+        if 'initial_recovery_postboot' in plan and not self._allow_postboot:
+            _deny('initial_postboot_scope_unverified')
         if 'initial_recovery_rearm' in plan and not self._allow_rearm:
             _deny('initial_rearm_scope_unverified')
         mode = plan.get('initial_wsl_cutover')
@@ -274,6 +278,8 @@ class InitialPgLease:
             payload['recovery'] = dict(zip(RECOVERY_FIELDS, self.scope[4]))
         if self.rearm is not None:
             payload['rearm'] = self.rearm
+        if self.postboot is not None:
+            payload['postboot'] = self.postboot
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def _commit_primary(self, primary):
@@ -684,3 +690,24 @@ class InitialPgLeaseRearm(InitialPgLeaseRecovery):
 
     def _probe_prefix(self):
         return 'rearm-a:' + self.rearm['attempt_id'] + ':'
+
+
+class InitialPgLeasePostboot(InitialPgLeaseRecovery):
+    """One approved Windows reboot with retained guest boots: exactly 7 -> 8 -> 9."""
+    from .initial_postboot import ACTION as _approval_action
+    _closed_revision = 7
+    _open_revision = 8
+    _revoked_revision = 9
+    _allow_postboot = True
+
+    def _bind(self, state):
+        from .initial_postboot import scope
+        previous = self.postboot
+        super()._bind(state)
+        selected = scope(self.backend.plan)
+        if previous is not None and previous != selected:
+            _deny('initial_postboot_scope_unverified')
+        self.postboot = selected
+
+    def _probe_prefix(self):
+        return 'postboot-a:' + self.postboot['attempt_id'] + ':'

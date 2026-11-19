@@ -30,7 +30,7 @@ from .native_stdio_bridge import (
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_OBSERVE_REPLACEMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
     GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, QUIESCENCE_BOUNDARIES,
-    GUEST_TRANSITION_TARGET, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, RECOVERY_START_ORDER,
+    GUEST_TRANSITION_TARGET, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_QUIESCE_INITIAL_POSTBOOT, GUEST_OBSERVE_INITIAL_POSTBOOT, RECOVERY_START_ORDER,
     GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, INITIAL_RECOVERY_HOLD, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -49,6 +49,9 @@ VERBS = {
     GUEST_OBSERVE_CAR_ISOLATION,
     GUEST_START_INITIAL_RECOVERY,
     GUEST_START_INITIAL_REARM,
+    GUEST_START_INITIAL_POSTBOOT,
+    GUEST_QUIESCE_INITIAL_POSTBOOT,
+    GUEST_OBSERVE_INITIAL_POSTBOOT,
     GUEST_PREFLIGHT_REPLACEMENT,
     GUEST_PUBLISH_REPLACEMENT,
     GUEST_START_REPLACEMENT,
@@ -374,20 +377,25 @@ def start_initial_recovery(request, assert_windows_current):
     error = "guest_initial_recovery_start_unverified"
     _need(callable(assert_windows_current), error)
     _args(request.verb, request.node, request.args)
+    postboot = request.verb == GUEST_START_INITIAL_POSTBOOT
     rearming = request.verb == GUEST_START_INITIAL_REARM
     with _guest_mutation_descriptor():
         raw, hold, prepared, active = _read_initial_recovery_hold(request)
         args = request.args
         _need(_digest(raw) == args["hold_sha256"], error)
         stage = ROOT / request.binding.attempt_id
-        prefix = (("rearm-" + args["rearm"]["attempt_id"]) if rearming
-                  else ("recovery-" + args["recovery_attempt_id"])) + "-start-"
+        prefix = (("postboot-" + args["postboot"]["attempt_id"]) if postboot else
+                  (("rearm-" + args["rearm"]["attempt_id"]) if rearming else ("recovery-" + args["recovery_attempt_id"]))) + "-start-"
         intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                  for name in ("intent", "progress", "done"))
         _need(not any(os.path.lexists(path) for path in (intent_path, progress_path, done_path)), error)
         containers = hold["containers"]
         _need(set(containers) == set(RECOVERY_START_ORDER), error)
         baseline = (hold["container_contracts"], args["protected_inventory_sha256"])
+        if postboot:
+            from .native_guest_postboot import observe
+            stopped = observe(request,args['postboot']['attempt_id'],args['postboot_stopped_receipt_sha256'])
+            baseline = (stopped['container_contracts'],args['protected_inventory_sha256'])
         _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
                                     set(containers), baseline)
         worker = GuestWorker(request)
@@ -405,7 +413,7 @@ def start_initial_recovery(request, assert_windows_current):
                       for path, pin in authorities.items()), error)
             contract, _ = _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
                                                       None, baseline)
-            _need(all(contract[role]["started_at"] != hold["container_contracts"][role]["started_at"]
+            _need(all(contract[role]["started_at"] != baseline[0][role]["started_at"]
                       for role in started), error)
             current = runtime._inventory()
             _need(all(current[value["container_id"]]["State"]["Running"] is (role in started)
@@ -415,6 +423,8 @@ def start_initial_recovery(request, assert_windows_current):
             deadline = time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS
             unchanged()
             challenge_scope = {"request": _scope(request), "hold_sha256": args["hold_sha256"], "boundary": boundary}
+            if postboot:
+                challenge_scope.update(postboot=args["postboot"], postboot_plan_sha256=args["postboot_plan_sha256"])
             if rearming:
                 challenge_scope.update(rearm=args["rearm"], rearm_plan_sha256=args["rearm_plan_sha256"])
             challenge = _digest(_bytes(challenge_scope))
@@ -425,11 +435,12 @@ def start_initial_recovery(request, assert_windows_current):
             # The sample promises >1s remaining; dispatch has strictly <0.5s
             # measured before that read, accounting for time spent sampling.
             dispatch_deadline = min(deadline, time.monotonic() + 0.5)
-            observe_lease = live.observe_rearmed_a_lease if rearming else live.observe_recovered_a_lease
+            observe_lease = live.observe_postboot_a_lease if postboot else (live.observe_rearmed_a_lease if rearming else live.observe_recovered_a_lease)
             local = observe_lease(
                 pins, postgres, recovery_attempt_id=args["recovery_attempt_id"], challenge_sha256=challenge,
                 deadline=dispatch_deadline, minimum_remaining_seconds=1,
-                **({"rearm": args["rearm"], "rearm_plan_sha256": args["rearm_plan_sha256"]} if rearming else {}))
+                **({"postboot": args["postboot"], "postboot_plan_sha256": args["postboot_plan_sha256"]} if postboot else
+                   ({"rearm": args["rearm"], "rearm_plan_sha256": args["rearm_plan_sha256"]} if rearming else {})))
             _need(_hash(local) and time.monotonic() < dispatch_deadline, error)
             return {"windows_proof_sha256": proof, "guest_proof_sha256": local}, dispatch_deadline
 
@@ -1340,11 +1351,19 @@ def handle(request, assert_windows_current=None):
         _args(request.verb, request.node, request.args)
         if request.verb == GUEST_TRANSITION_TARGET:
             return verify_transition_target(request)
+        if request.verb == GUEST_QUIESCE_INITIAL_POSTBOOT:
+            from .native_guest_postboot import stop
+            return stop(request,assert_windows_current)
+        if request.verb == GUEST_OBSERVE_INITIAL_POSTBOOT:
+            from .native_guest_postboot import observe
+            with _guest_mutation_descriptor():
+                observe(request,request.args['postboot_attempt_id'],request.args['postboot_stopped_receipt_sha256'])
+                return Receipt('PASS',request.args['postboot_stopped_receipt_sha256'])
         if request.verb == GUEST_OBSERVE_INITIAL_RECOVERY_HOLD:
             return observe_initial_recovery_hold(request)
         if request.verb == GUEST_OBSERVE_CAR_ISOLATION:
             return observe_car_isolation(request)
-        if request.verb in {GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM}:
+        if request.verb in {GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT}:
             return start_initial_recovery(request, assert_windows_current)
         if request.verb == GUEST_QUIESCE_INITIAL_RECOVERY:
             _need(callable(assert_windows_current), "guest_worker_live_windows_required")

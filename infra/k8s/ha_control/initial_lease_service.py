@@ -10,9 +10,10 @@ import stat
 import time
 
 from .controller import Journal, TransitionBlocked, exclusive
+from .initial_postboot import ACTION as POSTBOOT_ACTION, scope as postboot_scope
 from .initial_pg_lease import (
     INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, RECOVERY_ACTION, RECOVERY_FIELDS, RECOVERY_OPEN_REVISION,
-    REARM_ACTION, InitialPgLeaseRearm, rearm_scope,
+    REARM_ACTION, InitialPgLeaseRearm, InitialPgLeasePostboot, rearm_scope,
     InitialPgLease, InitialPgLeaseRecovery, LegacyResponseTimeout,
 )
 from .enforced_windows import _powershell_path
@@ -195,27 +196,31 @@ def native_initial_observer(backend, *, action='ha-initial-wsl-cutover'):
     with client:
         yield WindowsInitialObserver(client, backend.plan_path.with_name('initial-cutover-activation.json'),
                                      _pin(params['marker_sha256']), plan['cluster'],
-                                     broker_marker=(action in {RECOVERY_ACTION, REARM_ACTION}))
+                                     broker_marker=(action in {RECOVERY_ACTION, REARM_ACTION, POSTBOOT_ACTION}))
 
 
 def _request_recovery_proof(client, deadline, failure):
     try:
-        _pin(client.request(deadline))
+        observed = _pin(client.request(deadline))
     except (ValueError, OSError, TransitionBlocked):
         raise TransitionBlocked(failure) from None
     if time.monotonic() >= deadline:
         raise TransitionBlocked(failure)
+    return observed
 
 
 class _HeldRecoveryAdmission:
     """Observe the durable guest hold without authorizing its removal."""
-    def __init__(self, client):
+    def __init__(self, client, expected_receipt=None):
         self.client = client
+        self.expected_receipt = expected_receipt
         self.deadline = 0
 
     def assert_held(self, deadline):
         self.deadline = 0
-        _request_recovery_proof(self.client, deadline, 'initial_recovery_admission_unverified')
+        observed = _request_recovery_proof(self.client, deadline, 'initial_recovery_admission_unverified')
+        if self.expected_receipt is not None and observed != self.expected_receipt:
+            raise TransitionBlocked('initial_postboot_stopped_unverified')
         self.deadline = deadline
         return True
 
@@ -228,8 +233,9 @@ class _HeldRecoveryAdmission:
 
 
 class WindowsRecoveryObserver:
-    def __init__(self, legacy, held, provider, handoff, recovery):
+    def __init__(self, legacy, held, provider, handoff, recovery, held_receipt=None):
         self.legacy, self.held, self.provider = legacy, held, provider
+        self.held_receipt = held_receipt
         self.handoff, self.recovery = handoff.copy(), recovery.copy()
 
     def assert_intent(self, handoff):
@@ -245,7 +251,7 @@ class WindowsRecoveryObserver:
     def recovery_admission(self, handoff, recovery):
         if handoff != self.handoff or recovery != self.recovery:
             raise TransitionBlocked('initial_recovery_admission_unverified')
-        yield _HeldRecoveryAdmission(self.held)
+        yield _HeldRecoveryAdmission(self.held,self.held_receipt)
 
     def assert_quarantine_held(self, handoff, recovery, broker, resources, deadline):
         failure = 'initial_recovery_quarantine_unverified'
@@ -261,13 +267,19 @@ class WindowsRecoveryObserver:
 def native_recovery_observer(backend):
     """Use distinct authenticated pipes for admission and provider isolation."""
     failure = 'initial_recovery_native_observer_required'
+    postboot = 'initial_recovery_postboot' in backend.plan
     rearming = 'initial_recovery_rearm' in backend.plan
-    handoff = _handoff(backend, action=REARM_ACTION if rearming else RECOVERY_ACTION)
-    if rearming:
+    action = POSTBOOT_ACTION if postboot else (REARM_ACTION if rearming else RECOVERY_ACTION)
+    handoff = _handoff(backend, action=action)
+    if postboot or rearming:
         params = backend.plan.get('windows_initial_observer', {})
         expected = hashlib.sha256(Path(__file__).with_name('windows-ha-wsl-lease-observer.ps1').read_bytes()).hexdigest()
-        if params.get('collector_sha256') != expected or backend.fence_adapter._rearm_verified != rearm_scope(backend.plan):
+        sealed = (getattr(backend.fence_adapter, '_postboot_verified', None) == postboot_scope(backend.plan) if postboot
+                  else backend.fence_adapter._rearm_verified == rearm_scope(backend.plan))
+        if params.get('collector_sha256') != expected or not sealed:
             raise TransitionBlocked('initial_rearm_offline_observer_required')
+    if postboot:
+        _pin(getattr(backend.fence_adapter,'_postboot_stopped_sha256',None))
     recovery = _recovery_predecessor(backend, handoff)
     plan = backend.plan
     params = plan.get('windows_recovery_observers')
@@ -301,7 +313,7 @@ def native_recovery_observer(backend):
         if any(type(value) is not (int if field == 'server_pid' else str) for value in values) or len(set(values)) != len(values):
             raise TransitionBlocked(failure)
     with ExitStack() as stack:
-        legacy = stack.enter_context(native_initial_observer(backend, action=REARM_ACTION if rearming else RECOVERY_ACTION))
+        legacy = stack.enter_context(native_initial_observer(backend, action=action))
         clients = {}
         for purpose, (pins, endpoint) in connections.items():
             try:
@@ -316,7 +328,7 @@ def native_recovery_observer(backend):
                 raise TransitionBlocked(failure) from None
             clients[purpose] = stack.enter_context(client)
         yield WindowsRecoveryObserver(legacy, clients['held_admission'], clients.get('provider_isolation'),
-                                      handoff, recovery)
+            handoff, recovery, getattr(backend.fence_adapter,'_postboot_stopped_sha256',None) if postboot else None)
 
 
 @contextmanager
@@ -411,7 +423,7 @@ def serve_initial_recovery(backend, journal_path, observer):
     The admission context must leave application activation disabled on any
     exit before publish, including process termination or uncertain revoke.
     """
-    action = REARM_ACTION if 'initial_recovery_rearm' in backend.plan else RECOVERY_ACTION
+    action = POSTBOOT_ACTION if 'initial_recovery_postboot' in backend.plan else (REARM_ACTION if 'initial_recovery_rearm' in backend.plan else RECOVERY_ACTION)
     return _serve(backend, journal_path, observer, _handoff(backend, action=action), recovering=True)
 
 
@@ -429,6 +441,9 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             raise TransitionBlocked('initial_service_reconciliation_required')
         observer.assert_intent(handoff)
         stable = {'schema_version': 1, 'kind': 'initial-wsl-cutover', 'generation': 1, **handoff}
+        postboot = postboot_scope(backend.plan) if 'initial_recovery_postboot' in backend.plan else None
+        if postboot is not None and (not recovering or getattr(backend.fence_adapter, '_postboot_verified', None) != postboot):
+            raise TransitionBlocked('initial_postboot_scope_unverified')
         rearm = rearm_scope(backend.plan) if 'initial_recovery_rearm' in backend.plan else None
         if rearm is not None and (not recovering or backend.fence_adapter._rearm_verified != rearm):
             raise TransitionBlocked('initial_rearm_scope_unverified')
@@ -448,6 +463,8 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             stable.update(kind='initial-wsl-cutover-recovery', recovery=recovery, revision=RECOVERY_OPEN_REVISION)
             if rearm is not None:
                 stable.update(kind='initial-wsl-cutover-rearm', rearm=rearm, revision=6)
+            if postboot is not None:
+                stable.update(kind='initial-wsl-cutover-postboot', postboot=postboot, revision=8)
 
         first_publication = False
 
@@ -465,7 +482,7 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             return observer.assert_exclusion_held(handoff, deadline)
 
         journal.save(stable | {'phase': 'opening', 'sequence': 0})
-        lease_type = InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease)
+        lease_type = InitialPgLeasePostboot if postboot is not None else (InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease))
         lease = lease_type(backend, closure, assert_exclusion_held=exclusion, **lease_options)
         sequence = 0
         failure_code = None

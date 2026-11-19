@@ -37,7 +37,7 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 class InitialRecoveryRestartTests(unittest.TestCase):
     def exercise_restart(self, *, failed_boundary=None, uncertain_start=None, stale_hold=False, already_started=False,
-                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False):
+                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False, postboot=False):
         from contextlib import ExitStack
         worker, wire = native_guest_worker, native_stdio_bridge
         binding = wire.Binding('1'*64, '2'*64, '3'*64, '4'*64, '5'*64)
@@ -50,6 +50,10 @@ class InitialRecoveryRestartTests(unittest.TestCase):
                              'closure_mode': 'windows-offline-v1'}
             args['rearm_plan_sha256'] = 'a'*64
             verb = wire.GUEST_START_INITIAL_REARM
+        if postboot:
+            from tests.test_ha_postboot import envelope
+            args.update(postboot=envelope(),postboot_plan_sha256='a'*64,postboot_stopped_receipt_sha256='b'*64)
+            verb=wire.GUEST_START_INITIAL_POSTBOOT
         request = wire.Request(binding, 'A', verb, 1, '8'*64, args)
         containers = {role: {'container_id': f'{index:064x}', 'image_id': 'sha256:'+'9'*64}
                       for index, role in enumerate(wire.RECOVERY_START_ORDER, 1)}
@@ -112,6 +116,9 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             stack.enter_context(patch.object(worker.live, '_authority_paths', return_value={'test': authority_path}))
             original_proof = stack.enter_context(patch.object(worker.live, 'observe_recovered_a_lease', side_effect=local_proof))
             rearm_proof = stack.enter_context(patch.object(worker.live, 'observe_rearmed_a_lease', side_effect=local_proof))
+            postboot_proof = stack.enter_context(patch.object(worker.live, 'observe_postboot_a_lease', side_effect=local_proof))
+            from ha_control import native_guest_postboot
+            stack.enter_context(patch.object(native_guest_postboot,'observe',return_value={'container_contracts':hold['container_contracts']}))
             stack.enter_context(patch.object(worker.runtime, '_inventory', side_effect=lambda: copy.deepcopy(runtime_state)))
             stack.enter_context(patch.object(worker.runtime, '_read', side_effect=read))
             stack.enter_context(patch.object(worker.runtime, '_write', side_effect=write))
@@ -123,6 +130,7 @@ class InitialRecoveryRestartTests(unittest.TestCase):
                 stage.mkdir()
                 (stage / ('recovery-'+args['recovery_attempt_id']+'-start-intent.json')).touch()
             result = worker.start_initial_recovery(request, windows)
+            self.postboot_proof_count = postboot_proof.call_count
             self.rearm_proof_count = rearm_proof.call_count
             self.original_proof_count = original_proof.call_count
             self.readiness_count = readiness.call_count
@@ -174,6 +182,21 @@ class InitialRecoveryRestartTests(unittest.TestCase):
         self.assertEqual(self.rearm_proof_count, len(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
         self.assertEqual(len(self.commands), 8)
         self.assertTrue(all(path.name.startswith('rearm-'+'9'*64) for path in self.records))
+
+    def test_postboot_starts_exact_original_eight_with_only_exact_eight_proof(self):
+        result=self.exercise_restart(postboot=True)
+        self.assertEqual(result.status,'PASS')
+        self.assertEqual(self.commands,[('start',f'{index:064x}') for index in range(1,9)])
+        self.assertEqual(self.original_proof_count,0)
+        self.assertEqual(self.rearm_proof_count,0)
+        self.assertEqual(self.postboot_proof_count,len(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
+        self.assertTrue(all(path.name.startswith('postboot-'+'0'*64) for path in self.records))
+
+    def test_postboot_never_starts_after_delayed_sample_or_inventory(self):
+        for option in ('delayed_inventory','delayed_local'):
+            with self.subTest(option=option),self.assertRaises(TransitionBlocked):
+                self.exercise_restart(postboot=True,**{option:True})
+            self.assertFalse(self.commands)
 
     def test_rearm_args_cannot_be_sent_to_old_start_or_wrong_node(self):
         wire = native_stdio_bridge
@@ -1170,6 +1193,17 @@ class NativeGuestLiveTests(unittest.TestCase):
             observed['authority'][2]=7
             with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
                 live.observe_rearmed_a_lease(pins,postgres,**rearm_options)
+            from tests.test_ha_postboot import envelope
+            postboot_options=options|{'postboot':envelope(),'postboot_plan_sha256':'d'*64}
+            for wrong in (4,6,7,9):
+                observed['authority'][2]=wrong
+                with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
+                    live.observe_postboot_a_lease(pins,postgres,**postboot_options)
+            observed['authority'][2]=8
+            self.assertRegex(live.observe_postboot_a_lease(pins,postgres,**postboot_options),r'^[a-f0-9]{64}$')
+            for old_method,old_options in ((live.observe_recovered_a_lease,options),(live.observe_rearmed_a_lease,rearm_options)):
+                with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
+                    old_method(pins,postgres,**old_options)
             observed["authority"][2] = 2
             with self.assertRaisesRegex(TransitionBlocked, "guest_live_pg_binding_unconfirmed"):
                 live.observe_recovered_a_lease(pins, postgres, **options)

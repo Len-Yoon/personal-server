@@ -93,6 +93,14 @@ public sealed class HaRecoveryGuestEndpoint : EndPoint
     $script:recoveryGuestHold = $Config.hold_sha256
     $script:recoveryGuestBoot = $Config.guest_boot_sha256
     $script:recoveryGuestPurpose = $Config.purpose
+    $script:recoveryPostbootReceipt=$null
+    if('postboot_attempt_id' -cin $Config.PSObject.Properties.Name){
+        if($Config.purpose -cne 'held_admission' -or $Config.postboot_attempt_id -isnot [string] -or
+           $Config.postboot_attempt_id -cnotmatch '\A[a-f0-9]{64}\z' -or
+           $Config.postboot_stopped_receipt_sha256 -isnot [string] -or
+           $Config.postboot_stopped_receipt_sha256 -cnotmatch '\A[a-f0-9]{64}\z'){throw 'recovery_postboot_scope'}
+        $script:recoveryPostbootReceipt=$Config.postboot_stopped_receipt_sha256
+    }
 }
 
 function Get-HaRecoveryObservation([string]$Raw, [long]$Deadline) {
@@ -118,7 +126,7 @@ function Get-HaRecoveryObservation([string]$Raw, [long]$Deadline) {
     $reply = ConvertFrom-Json -InputObject $text
     if ($reply.observation_sha256 -isnot [string] -or $reply.observation_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
         ($script:recoveryGuestPurpose -ceq 'held_admission' -and
-         $reply.observation_sha256 -cne $script:recoveryGuestHold)) { throw 'recovery_observer_receipt' }
+         $reply.observation_sha256 -cne $(if($null -ne $script:recoveryPostbootReceipt){$script:recoveryPostbootReceipt}else{$script:recoveryGuestHold}))) { throw 'recovery_observer_receipt' }
     $request.Insert(3, 'observation_sha256', $reply.observation_sha256)
     if ($text -cne ((ConvertTo-Json -InputObject $request -Compress) + "`n")) { throw 'recovery_observer_binding' }
     [pscustomobject]@{challenge_sha256=$nonce;closed=$true;observation_sha256=$reply.observation_sha256}

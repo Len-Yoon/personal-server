@@ -104,6 +104,11 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
     _need(type(mode) is dict and mode == {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
           and type(mode['schema_version']) is int)
     action = approval['action']
+    from .initial_postboot import ACTION as POSTBOOT_ACTION, scope as postboot_scope
+    postboot = 'initial_recovery_postboot' in plan
+    if postboot:
+        postboot_scope(plan)
+        _need('initial_cutover_recovery' in plan and action == POSTBOOT_ACTION)
     rearming = 'initial_recovery_rearm' in plan
     if rearming:
         from .initial_pg_lease import REARM_ACTION, rearm_scope
@@ -112,7 +117,7 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
     original_name, original_sid = initial_service_identity(plan.get('installation_id'))
     if 'initial_cutover_recovery' in plan:
         recovery = plan['initial_cutover_recovery']
-        _need(action == (REARM_ACTION if rearming else RECOVERY_ACTION) and type(recovery) is dict and recovery.keys() == RECOVERY_FIELDS
+        _need(action == (POSTBOOT_ACTION if postboot else (REARM_ACTION if rearming else RECOVERY_ACTION)) and type(recovery) is dict and recovery.keys() == RECOVERY_FIELDS
               and all(type(value) is str and SHA.fullmatch(value) for value in recovery.values()))
         name, expected_sid = initial_service_identity(recovery['attempt_id'])
         _need(name != original_name and expected_sid != original_sid)
@@ -120,7 +125,7 @@ def _validate(plan_raw, approval_raw, settings, sid, now):
         _need(action == ACTION)
         name, expected_sid = original_name, original_sid
     if 'initial_effect_quarantine' in plan:
-        _need(action == (REARM_ACTION if rearming else RECOVERY_ACTION))
+        _need(action == (POSTBOOT_ACTION if postboot else (REARM_ACTION if rearming else RECOVERY_ACTION)))
         from .initial_pg_lease import InitialPgLeaseRecovery
         InitialPgLeaseRecovery.quarantine_binding(plan)
     configuration = plan.get('windows_enforced')
@@ -466,6 +471,14 @@ class InitialWindowsGate:
                     verified = _validate(plan_raw, approval_raw, settings, sid, datetime.now(timezone.utc))
                 except (OSError, ValueError, TypeError, KeyError, RecursionError, AttributeError):
                     _need(False)
+                self._postboot_stopped_sha256 = None
+                self._postboot_verified = None
+                if 'initial_recovery_postboot' in verified[0]:
+                    from .initial_postboot import FILES, validate_seal
+                    snapshots = {name: stack.enter_context(native.protected_file(
+                        self.plan_path.with_name(name), 65536, private_reader=sid)) for name in FILES}
+                    self._postboot_verified = validate_seal(verified[0], verified[1], snapshots)
+                    self._postboot_stopped_sha256 = _decode(snapshots['postboot-resume-evidence.json'])['postboot_stopped_receipt_sha256']
                 self._rearm_verified = None
                 if 'initial_recovery_rearm' in verified[0]:
                     snapshots = {name: stack.enter_context(native.protected_file(
@@ -478,6 +491,8 @@ class InitialWindowsGate:
                 try:
                     yield
                 finally:
+                    self._postboot_stopped_sha256 = None
+                    self._postboot_verified = None
                     self._rearm_verified = None
                     self._installed_runtime = False
                     self.plan_data = self.plan_sha256 = self.approval_sha256 = None

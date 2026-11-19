@@ -373,6 +373,12 @@ try {
             'predecessor_service_path','predecessor_terminal_path',
             'predecessor_scm_path','predecessor_scm_sha256')
         $configNames = @($inputConfig.PSObject.Properties.Name)
+        if('postboot_attempt_id' -cin $configNames -or 'postboot_stopped_receipt_sha256' -cin $configNames){
+            if($inputConfig.purpose -cne 'held_admission' -or $inputConfig.postboot_attempt_id -isnot [string] -or
+               $inputConfig.postboot_attempt_id -cnotmatch $hashPattern -or $inputConfig.postboot_stopped_receipt_sha256 -isnot [string] -or
+               $inputConfig.postboot_stopped_receipt_sha256 -cnotmatch $hashPattern){throw 'recovery_postboot_config'}
+            $transportFields+=@('postboot_attempt_id','postboot_stopped_receipt_sha256')
+        }
         $transportCount = @($configNames | Where-Object { $_ -cin $transportFields }).Count
         $protocolNames = @($configNames | Where-Object { $_ -cnotin $transportFields } | Sort-Object -CaseSensitive)
         if ($transportCount -ne $transportFields.Count -or ($protocolNames -join ',') -cne
