@@ -1,6 +1,6 @@
 param([string]$Manifest,[string]$ManifestPath,[string]$ManifestSha256,
       [string]$OwnedProfile,[string]$OwnedProfileSha256,[string]$RecoveryAttemptId,
-      [string]$RecoveryReservationSha256,[switch]$Go)
+      [string]$RecoveryReservationSha256,[string]$RearmAttemptId,[string]$RearmPredecessorArgsSha256,[switch]$Go)
 # Stage code only into a new private directory. No SCM, policy, VM or credential installer.
 $ErrorActionPreference='Stop'
 $WarningPreference='SilentlyContinue'
@@ -235,6 +235,98 @@ function Assert-RecoveryRuntimeStopped([string]$Root,$Spec){
         $service[0].DesktopInteract -or $service[0].PathName -cne ('"'+$exe+'"') -or
         (Test-Path -LiteralPath (Join-Path $Root 'host\service.args'))){throw 'runtime_stage_recovery_service'}
 }
+function Test-RuntimeRearmMode([bool]$RecoveryMode,[string]$Attempt,[string]$ArgsSha,[string]$OriginalAttempt){
+    if([bool]$Attempt -ne [bool]$ArgsSha -or
+       ($Attempt -and (-not $RecoveryMode -or $Attempt -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $ArgsSha -cnotmatch '\A[a-f0-9]{64}\z' -or $Attempt -ceq $OriginalAttempt))){throw 'runtime_stage_rearm_scope'}
+    return [bool]$Attempt
+}
+function Read-RearmRuntimeService([string]$Root,$Spec){
+    $service=@(Get-CimInstance Win32_Service -Filter ("Name='"+$Spec.ServiceName+"'") -OperationTimeoutSec 5 -ErrorAction Stop)
+    $pattern='\A"'+[regex]::Escape($Root)+'\\(?:host|rearm-[a-f0-9]{64}\\host)\\windows-service-host\.exe"\z'
+    if($service.Count -ne 1 -or $service[0].Name -cne $Spec.ServiceName -or
+       $service[0].State -cne 'Stopped' -or $service[0].StartMode -cnotin @('Manual','Disabled') -or
+       $service[0].ProcessId -ne 0 -or $service[0].StartName -ine ('NT SERVICE\'+$Spec.ServiceName) -or
+       $service[0].ServiceType -cne 'Own Process' -or $service[0].DesktopInteract -isnot [bool] -or
+       $service[0].DesktopInteract -or $service[0].PathName -isnot [string] -or $service[0].PathName -cnotmatch $pattern){
+        throw 'runtime_stage_rearm_service'
+    }
+    $value=$service[0]
+    return [pscustomobject][ordered]@{Name=$value.Name;State=$value.State;StartMode=$value.StartMode;
+        ProcessId=$value.ProcessId;StartName=$value.StartName;ServiceType=$value.ServiceType;
+        DesktopInteract=$value.DesktopInteract;PathName=$value.PathName}
+}
+function Open-RearmRuntimeInput([string]$Path,[string]$Root,[string]$Sid,[long]$Maximum){
+    Assert-RuntimeStagePath $Path $Root $Sid $true
+    $identity=[HaRuntimeStageV1.Native]::Identity($Path)
+    $file=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try{
+        if($file.Length -lt 1 -or $file.Length -gt $Maximum -or
+           [HaRuntimeStageV1.Native]::Identity($Path) -cne $identity){throw 'runtime_stage_rearm_input'}
+        return [pscustomobject]@{Path=$Path;Identity=$identity;Stream=$file}
+    }catch{$file.Dispose();throw}
+}
+function Open-RearmRuntimeStopped([string]$Root,$Spec,[string]$ArgsSha,[string]$OwnershipSha){
+    $opened=[Collections.Generic.List[IDisposable]]::new()
+    try{
+        $service=Read-RearmRuntimeService $Root $Spec
+        $hostPath=$service.PathName.Trim('"')
+        $hostInput=Open-RearmRuntimeInput $hostPath $Root $Spec.ServiceSid 67108864
+        $opened.Add($hostInput.Stream)
+        $argsPath=Join-Path ([IO.Path]::GetDirectoryName($hostPath)) 'service.args'
+        $arguments=Open-RearmRuntimeInput $argsPath $Root $Spec.ServiceSid 16384
+        $opened.Add($arguments.Stream)
+        if([HaRuntimeStageV1.Rules]::StreamHash($arguments.Stream) -cne $ArgsSha){throw 'runtime_stage_rearm_args'}
+        $arguments.Stream.Position=0
+        $reader=[IO.StreamReader]::new($arguments.Stream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
+        try{$text=$reader.ReadToEnd()}finally{$reader.Dispose()}
+        $rows=$text.Split([char]10)
+        $keys=@('format','service_name','service_sid','python_path','python_sha256','launcher_path','launcher_sha256',
+                'plan_path','plan_sha256','approval_path','approval_sha256','mode','host_sha256')
+        if($rows.Count -ne 14 -or $rows[-1] -cne '' -or $text.Contains([char]13) -or $text.Contains([char]0)){throw 'runtime_stage_rearm_args'}
+        $settings=@{}
+        for($i=0;$i -lt $keys.Count;$i++){
+            $prefix=$keys[$i]+'='
+            if(-not $rows[$i].StartsWith($prefix,[StringComparison]::Ordinal)){throw 'runtime_stage_rearm_args'}
+            $settings[$keys[$i]]=$rows[$i].Substring($prefix.Length)
+        }
+        if($settings.format -cne 'enforced-service-v1' -or $settings.mode -cne 'serve' -or
+           $settings.service_name -cne $Spec.ServiceName -or $settings.service_sid -cne $Spec.ServiceSid -or
+           $settings.plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_args'}
+        $owner=Open-RearmRuntimeInput (Join-Path $Root 'namespace-service-ownership.json') $Root $Spec.ServiceSid 32768
+        $opened.Add($owner.Stream)
+        if($OwnershipSha -cnotmatch '\A[a-f0-9]{64}\z' -or [HaRuntimeStageV1.Rules]::StreamHash($owner.Stream) -cne $OwnershipSha){throw 'runtime_stage_rearm_host'}
+        $owner.Stream.Position=0
+        $reader=[IO.StreamReader]::new($owner.Stream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
+        try{$ownership=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),32768)}finally{$reader.Dispose()}
+        foreach($key in @('service_name','service_sid','installation_id','recovery_attempt_id','service_image_sha256')){
+            $null=[HaRuntimeStageV1.Rules]::Text($ownership,$key)
+        }
+        if($ownership['format'] -cne 'ha-owned-recovery-service-v1' -or
+           $ownership['service_name'] -cne $Spec.ServiceName -or $ownership['service_sid'] -cne $Spec.ServiceSid -or
+           $ownership['installation_id'] -cne $Spec.InstallationId -or $ownership['recovery_attempt_id'] -cne $Spec.RecoveryAttempt -or
+           $ownership['service_image_sha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or
+           [HaRuntimeStageV1.Rules]::StreamHash($hostInput.Stream) -cne $ownership['service_image_sha256'] -or
+           $settings.host_sha256 -cne $ownership['service_image_sha256']){throw 'runtime_stage_rearm_host'}
+        $lease=[pscustomobject]@{Service=$service;Arguments=$arguments;Host=$hostInput;Ownership=$owner;
+            Opened=$opened;ArgsSha=$ArgsSha;HostSha=$ownership['service_image_sha256']}
+        Assert-RearmRuntimeStopped $Root $Spec $lease
+        return $lease
+    }catch{foreach($file in $opened){$file.Dispose()};throw}
+}
+function Assert-RearmRuntimeStopped([string]$Root,$Spec,$Lease){
+    $current=Read-RearmRuntimeService $Root $Spec
+    foreach($key in @('Name','State','StartMode','ProcessId','StartName','ServiceType','DesktopInteract','PathName')){
+        if($current.$key -cne $Lease.Service.$key){throw 'runtime_stage_rearm_service_changed'}
+    }
+    foreach($item in @($Lease.Arguments,$Lease.Host,$Lease.Ownership)){
+        if([HaRuntimeStageV1.Native]::Identity($item.Path) -cne $item.Identity){throw 'runtime_stage_rearm_input'}
+    }
+    $Lease.Arguments.Stream.Position=0
+    $Lease.Host.Stream.Position=0
+    if([HaRuntimeStageV1.Rules]::StreamHash($Lease.Arguments.Stream) -cne $Lease.ArgsSha -or
+       [HaRuntimeStageV1.Rules]::StreamHash($Lease.Host.Stream) -cne $Lease.HostSha){throw 'runtime_stage_rearm_input'}
+}
 function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$ReaderSid='',[bool]$InputFile=$false){
     if($Path -cnotmatch '^[A-Za-z]:\\' -or $Path.Substring(2).Contains(':') -or $Path.Contains('/') -or $Path -match '(^|\\)\.\.?($|\\)' -or $Path -match '[ .](\\|$)'){throw 'runtime_stage_path_rejected'}
     $allowed=@('S-1-5-18','S-1-5-32-544');if($InputFile){$allowed+=@(Get-RuntimeStageCaller)}
@@ -323,7 +415,7 @@ function Invoke-RuntimeStage {
     if($ManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or ([bool]$Manifest -eq [bool]$ManifestPath)){throw 'runtime_stage_manifest_pin_required'}
     $script:RuntimeFailureStage='initialize'
     Initialize-RuntimeStage
-    $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null;$ownedLease=$null;$owned=$null
+    $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null;$ownedLease=$null;$owned=$null;$rearmLease=$null
     try{
         $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
         $script:RuntimeFailureStage='owned_profile'
@@ -331,6 +423,7 @@ function Invoke-RuntimeStage {
         if([bool]$RecoveryAttemptId -ne [bool]$RecoveryReservationSha256 -or
             ($RecoveryAttemptId -and ($OwnedProfile -or $RecoveryAttemptId -cnotmatch '\A[a-f0-9]{64}\z' -or
              $RecoveryReservationSha256 -cnotmatch '\A[a-f0-9]{64}\z'))){throw 'runtime_stage_recovery_scope'}
+        $rearming=Test-RuntimeRearmMode ([bool]$RecoveryAttemptId) $RearmAttemptId $RearmPredecessorArgsSha256 $RecoveryAttemptId
         if($RecoveryAttemptId){
             $identityName=[HaRuntimeStageV1.Rules]::ServiceName($RecoveryAttemptId)
             $script:RuntimeRecoverySpec=[pscustomobject]@{ServiceSid=[HaRuntimeStageV1.Rules]::ServiceSid($identityName)}
@@ -387,7 +480,8 @@ function Invoke-RuntimeStage {
         try{$stage=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),32768)}finally{$reader.Dispose()}
         if($recovering){
             Assert-RecoveryRuntimeReceipt $stage $spec
-            Assert-RecoveryRuntimeStopped $root $spec
+            if($rearming){$rearmLease=Open-RearmRuntimeStopped $root $spec $RearmPredecessorArgsSha256 ([HaRuntimeStageV1.Rules]::Text($stage,'ownership_receipt_sha256'))}
+            else{Assert-RecoveryRuntimeStopped $root $spec}
         }else{Assert-RuntimeStageParentManifest $stage $spec $owned}
         $script:RuntimeFailureStage='archive'
         $zipPath=Join-Path $root 'runtime.zip';$zipFile=Read-RuntimeStageInput $zipPath $root 1073741824
@@ -402,6 +496,7 @@ function Invoke-RuntimeStage {
         $intent=@{manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;runtime_id=$id}
         if($null -ne $owned){$ownedLease.AssertCurrent();$intent.owned_profile_sha256=$OwnedProfileSha256;$intent.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256}
         if($recovering){$intent.recovery_attempt_id=$spec.RecoveryAttempt;$intent.reservation_receipt_sha256=$spec.ReservationHash}
+        if($rearming){$intent.rearm_attempt_id=$RearmAttemptId;$intent.predecessor_args_sha256=$RearmPredecessorArgsSha256}
         $script:RuntimeFailureStage='journal'
         Write-RuntimeStageEvent $journal 'intent' $intent $true
         $script:RuntimeFailureStage='extract'
@@ -429,13 +524,16 @@ function Invoke-RuntimeStage {
         $receipt=[ordered]@{scope='private_code_stage_only';schema_version=1;native_stage=$true;inventory_version=1;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;runtime_id=$id;file_count=$count;readonly=$true;native_imports_verified=$true;python_version='3.13.17';psycopg_version='3.3.8';tzdata_version='2026.2';host_staged=$spec.HostStaged;SCM_registered=$false;group_changed=$false;namespace_changed=$false;VM_changed=$false;authority_issued=$false}
         if($null -ne $owned){$ownedLease.AssertCurrent();$receipt.schema_version=2;$receipt.owned_profile_sha256=$OwnedProfileSha256;$receipt.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256;$receipt.reservation_receipt_sha256=$owned.reservation_receipt_sha256}
         if($recovering){
-            Assert-RecoveryRuntimeStopped $root $spec
+            if($rearming){Assert-RearmRuntimeStopped $root $spec $rearmLease}
+            else{Assert-RecoveryRuntimeStopped $root $spec}
             $receipt.schema_version=3;$receipt.recovery_attempt_id=$spec.RecoveryAttempt
             $receipt.reservation_receipt_sha256=$spec.ReservationHash
+            if($rearming){$receipt.schema_version=4;$receipt.rearm_attempt_id=$RearmAttemptId;$receipt.predecessor_args_sha256=$RearmPredecessorArgsSha256}
         }
         Write-RuntimeStageEvent $journal 'sealed_code_stage' @{file_count=$count;native_code_only=$true;SCM_registered=$false;authority_issued=$false}
         $receipt|ConvertTo-Json -Compress
     }finally{
+        if($null -ne $rearmLease){foreach($file in $rearmLease.Opened){$file.Dispose()}}
         if($null -ne $archive){$archive.Dispose()};if($null -ne $zipFile){$zipFile.Dispose()};if($null -ne $stageFile){$stageFile.Dispose()};if($null -ne $manifestFile){$manifestFile.Dispose()}
         if($null -ne $ownedLease){$ownedLease.Dispose()};$script:RuntimeOwnedSpec=$null;$script:RuntimeOwnedRoot=''
         $script:RuntimeRecoverySpec=$null;$script:RuntimeRecoveryRoot=''
