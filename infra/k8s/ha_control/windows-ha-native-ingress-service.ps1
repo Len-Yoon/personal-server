@@ -47,6 +47,14 @@ function Invoke-Sc([string[]]$Arguments){
     return ($result -join "`n")
 }
 
+function New-NativeFrontendService([string]$Name,[string]$Image){
+    $result=Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
+        Name=$Name;DisplayName=$Name;PathName=$Image;ServiceType=16;ErrorControl=1;
+        StartMode='Manual';StartName='LocalSystem'
+    } -ErrorAction Stop
+    Require ($result.ReturnValue -eq 0)
+}
+
 function Assert-PrivatePath([string]$Path){
     [TrustedStoppedV1.Contract]::LocalPath($Path)
     $entry=Get-Item -LiteralPath $Path -Force
@@ -464,7 +472,7 @@ try{
         Assert-PrivatePath $authority
         [TrustedStoppedV1.NewPrivate]::File((Join-Path $authority 'intent.json'),$intent,'',$true)
         foreach($name in $images.Keys){
-            $null=Invoke-Sc -Arguments @('create',$name,'binPath=',$images[$name],'start=','demand','type=','own','error=','normal','obj=','LocalSystem')
+            New-NativeFrontendService $name $images[$name]
             $created+=@($name)
             $null=Invoke-Sc -Arguments @('sdset',$name,'O:BAG:SYD:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)')
             $service=Service-Facts $name $images[$name]

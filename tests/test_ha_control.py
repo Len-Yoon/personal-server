@@ -42,6 +42,42 @@ class WindowsNativeIngressTests(unittest.TestCase):
         }
         return native.render_candidate(source, **(inputs | options))
 
+    def test_service_create_preserves_quoted_image_in_structured_cim_arguments(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for service creation validation")
+        command = r'''
+$e=$null;$t=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$t,[ref]$e)
+if($e.Count){throw 'parser'}
+foreach($name in @('Require','New-NativeFrontendService')){
+ $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$false)
+ if($null -eq $node){throw 'missing_function'}
+ . ([scriptblock]::Create($node.Extent.Text))
+}
+$script:code=0;$script:observed=$null
+function Invoke-CimMethod($ClassName,$MethodName,$Arguments,$ErrorAction){
+ if($ClassName -cne 'Win32_Service' -or $MethodName -cne 'Create' -or $ErrorAction -cne 'Stop'){throw 'cim_method'}
+ $script:observed=$Arguments
+ return [pscustomobject]@{ReturnValue=$script:code}
+}
+$image='"C:\Program Files\Caddy\caddy.exe" run --config "C:\ProgramData\Caddy\config.json"'
+New-NativeFrontendService 'N100HA_fixture_caddy' $image
+if($observed.Count -ne 7 -or $observed.Name -cne 'N100HA_fixture_caddy' -or
+ $observed.DisplayName -cne 'N100HA_fixture_caddy' -or $observed.PathName -cne $image -or
+ $observed.ServiceType -ne 16 -or $observed.ErrorControl -ne 1 -or
+ $observed.StartMode -cne 'Manual' -or $observed.StartName -cne 'LocalSystem'){throw 'cim_fields'}
+$script:code=5;$blocked=$false
+try{New-NativeFrontendService 'N100HA_fixture_caddy' $image}catch{
+ if($_.Exception.Message -cne 'native_frontend_rejected'){throw};$blocked=$true
+}
+if(-not $blocked){throw 'nonzero_accepted'}
+exit 0
+'''
+        environment = os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1")}
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=environment, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_frontend_adapter_requires_guard_and_bound_service_states(self):
         windows = MagicMock()
         arguments = dict(script_path=r"C:\ProgramData\Reviewed\windows-ha-native-ingress-service.ps1",
