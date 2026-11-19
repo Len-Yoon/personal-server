@@ -2073,6 +2073,96 @@ class PGControlTests(unittest.TestCase):
 
 
 class InitialLeaseServiceTests(unittest.TestCase):
+    def test_first_publication_independent_reads_start_together_with_one_deadline(self):
+        from threading import Barrier
+        from ha_control import initial_lease_service as service
+        barrier=Barrier(2);deadlines=[]
+        deadline=time.monotonic()+2
+        def fresh(limit):
+            deadlines.append(limit);barrier.wait(timeout=1)
+            return True
+        for _ in range(3):
+            self.assertTrue(service._recovery_boundary(fresh,fresh,deadline))
+        self.assertEqual(deadlines,[deadline]*6)
+
+    def test_first_publication_failure_drains_the_other_read_without_authorizing_writes(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from ha_control import initial_lease_service as service
+        for failed_side in ('held','legacy'):
+            started=Event();release=Event();drained=Event()
+            write=MagicMock();publish=MagicMock()
+            def failing(limit):
+                self.assertTrue(started.wait(1))
+                raise TransitionBlocked('synthetic_proof_rejected')
+            def pending(limit):
+                started.set();self.assertTrue(release.wait(2));drained.set()
+                return True
+            def boundary():
+                service._recovery_boundary(failing if failed_side=='held' else pending,
+                    failing if failed_side=='legacy' else pending,time.monotonic()+3)
+                write();publish()
+            with ThreadPoolExecutor(max_workers=1) as caller:
+                result=caller.submit(boundary)
+                self.assertTrue(started.wait(1))
+                self.assertFalse(result.done());self.assertFalse(drained.is_set())
+                release.set()
+                with self.assertRaisesRegex(TransitionBlocked,'synthetic_proof_rejected'):
+                    result.result(timeout=2)
+            self.assertTrue(drained.is_set());write.assert_not_called();publish.assert_not_called()
+
+    def test_first_publication_positive_reads_that_finish_late_cannot_authorize_writes(self):
+        from ha_control import initial_lease_service as service
+        write=MagicMock();publish=MagicMock()
+        with patch.object(service.time,'monotonic',return_value=4.0):
+            with self.assertRaisesRegex(TransitionBlocked,'initial_service_proof_deadline_exceeded'):
+                service._recovery_boundary(lambda deadline:True,lambda deadline:True,4.0)
+                write();publish()
+        write.assert_not_called();publish.assert_not_called()
+
+    def test_first_publication_requires_both_explicit_positive_reads(self):
+        from ha_control import initial_lease_service as service
+        for held,legacy in ((None,True),(True,None)):
+            with self.assertRaises(TransitionBlocked):
+                service._recovery_boundary(lambda deadline:held,lambda deadline:legacy,time.monotonic()+2)
+
+    def test_only_prepublication_boundaries_parallelize_and_renewal_keeps_original_path(self):
+        from contextlib import contextmanager
+        from ha_control import initial_lease_service as service
+        admission=SimpleNamespace(assert_held=MagicMock(return_value=True),publish=MagicMock())
+        @contextmanager
+        def admitted(*args):yield admission
+        observer=SimpleNamespace(assert_intent=MagicMock(),recovery_admission=admitted,
+            assert_legacy_closed=MagicMock(return_value=True),assert_exclusion_held=MagicMock(return_value=True))
+        lease=SimpleNamespace(proof_started=None,revoke=MagicMock(return_value=True))
+        def factory(backend,closure,*,assert_exclusion_held):
+            def opened(state):
+                lease.proof_started=time.monotonic()
+                for read in (closure,assert_exclusion_held,closure):
+                    self.assertTrue(read(state,lease.proof_started+service.INITIAL_PROOF_SECONDS))
+                return 'f'*64
+            def renewed(state):
+                admission.publish.assert_called_once()
+                self.assertTrue(closure(state,time.monotonic()+1))
+                self.assertTrue(assert_exclusion_held(state,time.monotonic()+1))
+                raise TransitionBlocked('synthetic_renewal_stop')
+            lease.open=opened;lease.renew=renewed
+            return lease
+        with tempfile.TemporaryDirectory() as folder:
+            backend=SimpleNamespace(plan={'cluster':'synthetic'},plan_path=Path(folder)/'plan.json')
+            journal=Path(folder)/'journal/controller-state.json';journal.parent.mkdir()
+            with patch.object(service,'_recovery_predecessor',return_value={'attempt_id':'1'*64}), \
+                 patch.object(service,'InitialPgLeaseRecovery',side_effect=factory), \
+                 patch.object(service,'_recovery_boundary',wraps=service._recovery_boundary) as parallel, \
+                 patch.object(service.time,'sleep'):
+                with self.assertRaisesRegex(TransitionBlocked,'synthetic_renewal_stop'):
+                    service._serve(backend,journal,observer,{},recovering=True)
+                self.assertEqual(parallel.call_count,3)
+        self.assertEqual(admission.assert_held.call_count,3)
+        self.assertEqual(observer.assert_legacy_closed.call_count,3)
+        self.assertEqual(observer.assert_exclusion_held.call_count,2)
+        lease.revoke.assert_called_once()
+
     def test_windows_first_save_budget_includes_slow_fsync_and_native_age_includes_io(self):
         from ha_control import controller
         clock=[1.0];anchor=1_800_000_000_000_000_000
@@ -2666,7 +2756,7 @@ exit 0
                                  ('initial-wsl-cutover-recovery', 'lease_lost', 'initial_recovery_admission_unverified'))
                 with self.assertRaisesRegex(TransitionBlocked, 'initial_service_reconciliation_required'):
                     service.serve_initial_recovery(backend, journal, observer)
-        observer.assert_legacy_closed.assert_not_called()
+        observer.assert_legacy_closed.assert_called_once()
         lease.renew.assert_not_called()
 
     def test_recovery_predecessor_rejects_unexpected_or_duplicate_pinned_fields(self):

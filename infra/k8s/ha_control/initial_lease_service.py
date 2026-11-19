@@ -1,5 +1,6 @@
 """Durable Windows service lifecycle for the first A write lease."""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 import hashlib
 import json
@@ -208,6 +209,22 @@ def _request_recovery_proof(client, deadline, failure):
     if time.monotonic() >= deadline:
         raise TransitionBlocked(failure)
     return observed
+
+
+def _recovery_boundary(assert_held, observe, deadline):
+    """Join two independent fresh reads within the caller's unchanged budget."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        held = pool.submit(assert_held, deadline)
+        legacy = pool.submit(observe, deadline)
+        # Exiting the executor drains both reads even when either one fails.
+        if held.result() is not True:
+            raise TransitionBlocked('initial_recovery_admission_unverified')
+        observed = legacy.result()
+        if observed is not True:
+            raise TransitionBlocked('initial_legacy_closure_required')
+    if time.monotonic() >= deadline:
+        raise TransitionBlocked('initial_service_proof_deadline_exceeded')
+    return True
 
 
 class _HeldRecoveryAdmission:
@@ -478,18 +495,17 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
 
         first_publication = False
 
-        def assert_admission(deadline):
+        def boundary(observe, deadline):
             if recovery is not None and not first_publication:
-                if admission_handle.assert_held(deadline) is not True:
-                    raise TransitionBlocked('initial_recovery_admission_unverified')
+                return _recovery_boundary(admission_handle.assert_held,
+                    lambda limit: observe(handoff, limit), deadline)
+            return observe(handoff, deadline)
 
         def closure(_, deadline):
-            assert_admission(deadline)
-            return observer.assert_legacy_closed(handoff, deadline)
+            return boundary(observer.assert_legacy_closed, deadline)
 
         def exclusion(_, deadline):
-            assert_admission(deadline)
-            return observer.assert_exclusion_held(handoff, deadline)
+            return boundary(observer.assert_exclusion_held, deadline)
 
         journal.save(stable | {'phase': 'opening', 'sequence': 0})
         lease_type = InitialPgLeaseUnpublishedRecovery if unpublished is not None else ((InitialPgLeasePostbootAfterUnpublished if after_unpublished(postboot) else InitialPgLeasePostboot) if postboot is not None else (InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease)))
