@@ -338,7 +338,7 @@ class WindowsActivationLease:
         return bridge._digest(bridge._bytes({"challenge_sha256": challenge_sha256, "predecessor": prior,
                                             "guest_hold_readback_sha256": readback}))
 
-    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None, unpublished=None):
+    def verify_recovery_publication(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None, unpublished=None, predecessor_terminal=None):
         """Require the same protected Windows heartbeat around the paired database read."""
         error = "native_initial_recovery_publication_unconfirmed"
         bridge._need(type(recovery) is dict and set(recovery) == {
@@ -379,6 +379,19 @@ class WindowsActivationLease:
                                 'RearmPredecessorTerminalSha256': checked['predecessor_terminal_sha256'],
                                 'RearmPredecessorBindingSha256': checked['predecessor_binding_sha256'],
                                 'RearmPredecessorArgsSha256': checked['predecessor_args_sha256']}
+        if unpublished is not None or postboot is not None:
+            from .initial_unpublished import derive_predecessor
+            selected=unpublished if unpublished is not None else postboot
+            derive_predecessor(predecessor_terminal,selected['predecessor_terminal_sha256'],published=postboot is not None)
+            prior=json.loads(predecessor_terminal)
+            bridge._need(prior['recovery']==recovery
+                and prior['attempt_id']==self.custody.binding.attempt_id
+                and prior['legacy_plan_sha256']==self.custody.binding.plan_sha256,error)
+            if postboot is not None:
+                from .initial_postboot import after_unpublished
+                bridge._need(after_unpublished(postboot)==(prior['kind']=='initial-wsl-cutover-unpublished'),error)
+        else:
+            bridge._need(predecessor_terminal is None,error)
         binding = self.custody.binding
         challenge = secrets.token_hex(32)
         source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {
@@ -408,7 +421,7 @@ class WindowsActivationLease:
         bridge._remaining(deadline)
         return bridge._digest(bridge._bytes({"challenge": challenge, "windows": before, "postgres_sha256": paired}))
 
-    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None, unpublished=None):
+    def verify_recovery_continuity(self, powershell, recovery, deadline, *, observe_pair, assert_guard, rearm=None, postboot=None, unpublished=None, predecessor_terminal=None):
         """Bind a current paired lease to the same continuously serving recovery process.
 
         The first publication remains subject to verify_recovery_publication.
@@ -458,6 +471,19 @@ class WindowsActivationLease:
                                 'RearmPredecessorTerminalSha256': checked['predecessor_terminal_sha256'],
                                 'RearmPredecessorBindingSha256': checked['predecessor_binding_sha256'],
                                 'RearmPredecessorArgsSha256': checked['predecessor_args_sha256']}
+        if unpublished is not None or postboot is not None:
+            from .initial_unpublished import derive_predecessor
+            selected=unpublished if unpublished is not None else postboot
+            derive_predecessor(predecessor_terminal,selected['predecessor_terminal_sha256'],published=postboot is not None)
+            prior=json.loads(predecessor_terminal)
+            bridge._need(prior['recovery']==recovery
+                and prior['attempt_id']==self.custody.binding.attempt_id
+                and prior['legacy_plan_sha256']==self.custody.binding.plan_sha256,error)
+            if postboot is not None:
+                from .initial_postboot import after_unpublished
+                bridge._need(after_unpublished(postboot)==(prior['kind']=='initial-wsl-cutover-unpublished'),error)
+        else:
+            bridge._need(predecessor_terminal is None,error)
         binding = self.custody.binding
         challenge = secrets.token_hex(32)
         source = fixed_script('windows-ha-cutover-live-authority.ps1', self.custody.live_sha256, {

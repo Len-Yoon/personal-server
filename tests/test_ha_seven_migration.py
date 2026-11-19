@@ -1207,14 +1207,22 @@ class NativeGuestLiveTests(unittest.TestCase):
             observed['authority'][2]=7
             with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
                 live.observe_rearmed_a_lease(pins,postgres,**rearm_options)
-            from tests.test_ha_postboot import envelope
-            postboot_options=options|{'postboot':envelope(),'postboot_plan_sha256':'d'*64}
-            for wrong in (4,6,7,9):
-                observed['authority'][2]=wrong
-                with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
-                    live.observe_postboot_a_lease(pins,postgres,**postboot_options)
-            observed['authority'][2]=8
-            self.assertRegex(live.observe_postboot_a_lease(pins,postgres,**postboot_options),r'^[a-f0-9]{64}$')
+            from tests.test_ha_postboot import PostbootSealTests
+            plan,files=PostbootSealTests().fixture()
+            prior=json.loads(files['postboot-predecessor-state.json'])
+            prior.update(attempt_id=pins.attempt_id,legacy_plan_sha256=pins.plan_sha256,
+                recovery=prior['recovery']|{'attempt_id':options['recovery_attempt_id']})
+            prior['rearm']['attempt_id']='9'*64
+            raw=json.dumps(prior).encode()
+            envelope=plan['initial_recovery_postboot']|{'predecessor_terminal_sha256':sha(raw)}
+            postboot_options=options|{'postboot':envelope,'postboot_plan_sha256':'d'*64}
+            with patch.object(live.runtime,'_read',return_value=raw):
+                for wrong in (4,6,7,9):
+                    observed['authority'][2]=wrong
+                    with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
+                        live.observe_postboot_a_lease(pins,postgres,**postboot_options)
+                observed['authority'][2]=8
+                self.assertRegex(live.observe_postboot_a_lease(pins,postgres,**postboot_options),r'^[a-f0-9]{64}$')
             for old_method,old_options in ((live.observe_recovered_a_lease,options),(live.observe_rearmed_a_lease,rearm_options)):
                 with self.assertRaisesRegex(TransitionBlocked,'guest_live_pg_binding_unconfirmed'):
                     old_method(pins,postgres,**old_options)

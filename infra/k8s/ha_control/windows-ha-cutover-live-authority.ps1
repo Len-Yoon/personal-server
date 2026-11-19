@@ -50,6 +50,84 @@ function Get-Digest([string]$Value) {
     finally { $sha.Dispose() }
 }
 
+function Get-InitialPredecessorNumbers([byte[]]$Raw,[string]$ExpectedSha,[bool]$Published){
+    $bad='initial_service_predecessor_numbers'
+    if($null -eq $Raw -or $Raw.Length -lt 1 -or $Raw.Length -gt 65536 -or $ExpectedSha -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}
+    $h=[Security.Cryptography.SHA256]::Create()
+    try{$pin=[BitConverter]::ToString($h.ComputeHash($Raw)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}
+    if($pin -cne $ExpectedSha){throw $bad}
+    # Reuse the existing strict parser: duplicate/escaped duplicate keys and non-integer JSON numbers fail closed.
+    if(-not ('N100InitialPredecessorJsonV1.Json' -as [type])){Add-Type -TypeDefinition @'
+using System;using System.Text;using System.Collections.Generic;
+namespace N100InitialPredecessorJsonV1 {
+ public static class Json {
+  sealed class Parser {
+   readonly string text; int at; int nodes;
+   public Parser(string s){text=s;}
+   void White(){while(at<text.Length&&(text[at]==' '||text[at]=='\r'||text[at]=='\n'||text[at]=='\t'))at++;}
+   void Need(bool ok){if(!ok)throw new InvalidOperationException("runtime_stage_json_rejected");}
+   string String(){
+    Need(at<text.Length&&text[at++]=='"');var b=new StringBuilder();bool done=false;
+    while(at<text.Length){char c=text[at++];if(c=='"'){done=true;break;}
+     if(c=='\\'){Need(at<text.Length);c=text[at++];if(c=='u'){Need(at+4<=text.Length);int value=0;
+       for(int i=0;i<4;i++){char h=text[at++];int n=h>='0'&&h<='9'?h-'0':h>='a'&&h<='f'?h-'a'+10:h>='A'&&h<='F'?h-'A'+10:-1;Need(n>=0);value=value*16+n;}c=(char)value;
+      }else Need(c=='"'||c=='\\'||c=='/');}
+     Need(c>=32&&c<=126);b.Append(c);Need(b.Length<=4096);
+    }Need(done);return b.ToString();
+   }
+   object Value(int depth){
+    Need(depth<=8&&++nodes<=65536);White();Need(at<text.Length);char c=text[at];
+    if(c=='"')return String();
+    if(c=='{'){at++;White();var result=new Dictionary<string,object>(StringComparer.Ordinal);
+     if(at<text.Length&&text[at]=='}'){at++;return result;}
+     while(true){White();string key=String();Need(key.Length>0&&key.Length<=200&&!result.ContainsKey(key));White();Need(at<text.Length&&text[at++]==':');result.Add(key,Value(depth+1));White();Need(at<text.Length);char end=text[at++];if(end=='}')return result;Need(end==',');}
+    }
+    if(c=='['){at++;White();var values=new List<object>();if(at<text.Length&&text[at]==']'){at++;return values;}
+     while(true){Need(values.Count<8192);values.Add(Value(depth+1));White();Need(at<text.Length);char end=text[at++];if(end==']')return values;Need(end==',');}}
+    foreach(string word in new string[]{"true","false","null"})if(at+word.Length<=text.Length&&System.String.CompareOrdinal(text,at,word,0,word.Length)==0){at+=word.Length;return word=="null"?null:(object)(word=="true");}
+    int start=at;if(c=='-')at++;Need(at<text.Length&&text[at]>='0'&&text[at]<='9');
+    if(text[at]=='0')at++;else while(at<text.Length&&text[at]>='0'&&text[at]<='9')at++;
+    long integer;Need(Int64.TryParse(text.Substring(start,at-start),System.Globalization.NumberStyles.AllowLeadingSign,System.Globalization.CultureInfo.InvariantCulture,out integer));return integer;
+   }
+   public object Parse(){object value=Value(0);White();Need(at==text.Length);return value;}
+  }
+  public static Dictionary<string,object> Object(string text,int maximum){
+   if(text==null||text.Length>maximum||Encoding.UTF8.GetByteCount(text)>maximum)throw new InvalidOperationException("runtime_stage_json_size");
+   object value=new Parser(text).Parse();var result=value as Dictionary<string,object>;if(result==null)throw new InvalidOperationException("runtime_stage_json_object_required");return result;
+  }
+ }
+}
+'@ -ErrorAction Stop}
+    $text=[Text.UTF8Encoding]::new($false,$true).GetString($Raw)
+    $null=[N100InitialPredecessorJsonV1.Json]::Object($text,65536);$v=ConvertFrom-Json $text
+    $names=@($v.PSObject.Properties.Name)
+    if($v.kind -isnot [string] -or $v.kind -cnotin @('initial-wsl-cutover-rearm','initial-wsl-cutover-unpublished')){throw $bad}
+    $field=if($v.kind -ceq 'initial-wsl-cutover-rearm'){'rearm'}else{'unpublished'}
+    $expected=@('schema_version','kind','generation','attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256','controller_plan_sha256','recovery','revision','phase','sequence',$field)
+    $hasFailure='failure_code' -cin $names;if($hasFailure){$expected+=@('failure_code')}
+    if((@($names|Sort-Object -CaseSensitive) -join ',') -cne (@($expected|Sort-Object -CaseSensitive) -join ',')){throw $bad}
+    foreach($key in @('schema_version','generation','revision','sequence')){if($v.$key -isnot [int] -and $v.$key -isnot [long]){throw $bad}}
+    if($v.schema_version -ne 1 -or $v.generation -ne 1 -or $v.sequence -lt 0 -or $v.phase -isnot [string] -or $v.phase -cnotin @('lease_lost','local_revoke_observed')){throw $bad}
+    foreach($key in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256','controller_plan_sha256')){if($v.$key -isnot [string] -or $v.$key -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}}
+    if((@($v.recovery.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256'){throw $bad}
+    foreach($key in @('attempt_id','predecessor_service_sha256','predecessor_terminal_sha256')){if($v.recovery.$key -isnot [string] -or $v.recovery.$key -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}}
+    $scope=$v.$field
+    $scopeKeys=@('schema_version','attempt_id','closure_mode','predecessor_args_sha256','predecessor_terminal_sha256')
+    if($field -ceq 'rearm'){$scopeKeys+=@('predecessor_binding_sha256')}else{$scopeKeys+=@('predecessor_plan_sha256','predecessor_seal_sha256')}
+    if((@($scope.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne (@($scopeKeys|Sort-Object -CaseSensitive) -join ',') -or ($scope.schema_version -isnot [int] -and $scope.schema_version -isnot [long]) -or $scope.schema_version -ne 1 -or $scope.closure_mode -isnot [string] -or $scope.closure_mode -cne 'windows-offline-v1'){throw $bad}
+    foreach($key in $scopeKeys){if($key -notin @('schema_version','closure_mode') -and ($scope.$key -isnot [string] -or $scope.$key -cnotmatch '\A[a-f0-9]{64}\z')){throw $bad}}
+    $r=[long]$v.revision
+    if(($field -ceq 'rearm' -and $r -ne 6) -or ($field -ceq 'unpublished' -and ($r -lt 8 -or $r -gt 2147483644 -or ($r % 2) -ne 0))){throw $bad}
+    if($hasFailure -and ($v.failure_code -isnot [string] -or $v.failure_code -cnotmatch '\A[a-z][a-z0-9_]{0,95}\z')){throw $bad}
+    if($Published){if($v.sequence -lt 1){throw $bad}}else{
+        if(-not $hasFailure){throw $bad}
+        $journal=$v.sequence -eq 1 -and $v.phase -ceq 'local_revoke_observed' -and $v.failure_code -ceq 'controller_journal_not_durable'
+        $timeout=$field -ceq 'unpublished' -and $v.sequence -eq 0 -and $v.phase -ceq 'lease_lost' -and $v.failure_code -ceq 'legacy_pipe_response_timeout_postcommit'
+        if(-not ($journal -or $timeout)){throw $bad}
+    }
+    return [pscustomobject]@{closed=($r+1);opened=($r+2);revoked=($r+3);terminal=$v}
+}
+
 function Read-Scope([string]$Path, [string[]]$Owners, [switch]$Immutable) {
     if ($Path -cnotmatch '\A[A-Za-z]:\\[A-Za-z0-9_.\\-]+\z' -or $Path -match '\\\.\.?(\\|$)') { throw 'live_authority_path' }
     $entry = Get-Item -LiteralPath $Path -Force
@@ -417,6 +495,17 @@ try {
         $plan.service_created_ticks -cnotmatch '\A[1-9][0-9]{1,19}\z' -or
         ($plan.service_pid -isnot [int] -and $plan.service_pid -isnot [long]) -or $plan.service_pid -lt 1 -or
         -not $plan.state_path.EndsWith('\journal\controller-state.json',[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
+    $expectedRevision=if($rearming){6}else{4}
+    if($unpublished -or $postboot){
+        $root=[IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($plan.state_path))
+        $leaf=if($unpublished){'unpublished-predecessor-state.json'}else{'postboot-predecessor-state.json'}
+        $pin=if($unpublished){$UnpublishedPredecessorTerminalSha256}else{$PostbootPredecessorTerminalSha256}
+        $prior=Read-Scope (Join-Path $root $leaf) $admins -Immutable
+        $numbers=Get-InitialPredecessorNumbers ([Text.UTF8Encoding]::new($false,$true).GetBytes($prior.raw)) $pin $postboot
+        if($postboot -and (($postbootUnpublished -and $numbers.terminal.kind -cne 'initial-wsl-cutover-unpublished') -or (-not $postbootUnpublished -and $numbers.terminal.kind -cne 'initial-wsl-cutover-rearm'))){throw 'live_authority_postboot_scope'}
+        $expectedRevision=$numbers.opened
+    }
+
     $identity = [Security.Principal.NTAccount]::new('NT SERVICE',$plan.service_name).Translate([Security.Principal.SecurityIdentifier]).Value
     if ($recovering -and $plan.service_name -cne ('N100HA_' + $RecoveryAttemptId.Substring(0,24) + '_controller')) {
         throw 'live_authority_recovery_scope'
@@ -510,7 +599,7 @@ try {
                 }
             }
             if (($names -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256' -or
-                $record.revision -ne $(if($postbootUnpublished){10}elseif($unpublished){8}elseif($postboot){8}elseif($rearming){6}else{4}) -or ($record.proof_elapsed_ms -isnot [int] -and
+                $record.revision -ne $expectedRevision -or ($record.proof_elapsed_ms -isnot [int] -and
                     $record.proof_elapsed_ms -isnot [long] -and $record.proof_elapsed_ms -isnot [double] -and $record.proof_elapsed_ms -isnot [decimal]) -or
                 [double]::IsNaN([double]$record.proof_elapsed_ms) -or
                 $record.recovery.attempt_id -cne $RecoveryAttemptId -or

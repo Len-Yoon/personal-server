@@ -1,4 +1,5 @@
 """Bounded pre-save stop and immutable postboot-only admission; never edits the original hold."""
+import json
 import os
 import time
 from . import native_guest_worker as worker, native_stdio_bridge as wire
@@ -22,8 +23,32 @@ def current(request):
         request.args['protected_inventory_sha256'],None,(hold['container_contracts'],request.args['protected_inventory_sha256']))
     return raw,hold,contract,protected
 
+def closed_revision(request,args=None):
+    args=request.args if args is None else args
+    if 'predecessor_unpublished_attempt_id' not in args:
+        return 7
+    from .initial_unpublished import derive_predecessor
+    plan_pin=args['predecessor_plan_sha256']
+    worker._need(wire._hash(plan_pin),ERROR)
+    # This is the CURRENT published writer's terminal after close, not the
+    # older terminal used to start that writer. Both copies are CreateNew,
+    # independent regular ROOT-owned 0400 files (runtime._read rejects links).
+    raw=worker.runtime._read(worker.ROOT/('predecessor-plan-'+plan_pin+'.json'),0,{0o400},limit=65536)
+    pin=wire._digest(raw)
+    worker._need(worker.runtime._read(worker.ROOT/('predecessor-terminal-'+pin+'.json'),0,{0o400},limit=65536)==raw,ERROR)
+    revision=derive_predecessor(raw,pin,published=True)[0]
+    prior=json.loads(raw)
+    worker._need(prior['kind']=='initial-wsl-cutover-unpublished'
+        and prior['controller_plan_sha256']==plan_pin
+        and prior['unpublished']['attempt_id']==args['predecessor_unpublished_attempt_id']
+        and prior['recovery']['attempt_id']==args['recovery_attempt_id']
+        and prior['attempt_id']==request.binding.attempt_id
+        and prior['legacy_plan_sha256']==request.binding.plan_sha256,ERROR)
+    return revision
+
+
 def stop(request, assert_closed):
-    """Caller must freshly prove the full closed-seven A/B pair at every boundary.
+    """Caller must freshly prove the exact derived closed A/B pair at every boundary.
 
     This includes current catalog/sync/replay and the entire unresolved effects
     ledger: only the original exact two quarantined car entries may remain.
@@ -32,7 +57,7 @@ def stop(request, assert_closed):
     """
     worker._need(request.verb in {wire.GUEST_QUIESCE_INITIAL_POSTBOOT,wire.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED} and callable(assert_closed),ERROR)
     args=request.args
-    closed_revision=9 if request.verb==wire.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED else 7
+    expected_closed=closed_revision(request)
     with worker._guest_mutation_descriptor():
         raw,hold,initial,protected=current(request)
         intent_path,done_path=paths(request,args['postboot_attempt_id'])
@@ -40,7 +65,7 @@ def stop(request, assert_closed):
         def check(boundary):
             deadline=time.monotonic()+wire.ACTIVATION_GUEST_CHECK_SECONDS
             current(request)
-            challenge=wire._digest(wire._bytes(worker._scope(request)|{'args':args,'boundary':boundary,'closed_revision':closed_revision}))
+            challenge=wire._digest(wire._bytes(worker._scope(request)|{'args':args,'boundary':boundary,'closed_revision':expected_closed}))
             proof=assert_closed(challenge,boundary)
             worker._need(wire._hash(proof) and time.monotonic()<deadline,ERROR)
             current(request)
@@ -59,7 +84,7 @@ def stop(request, assert_closed):
         worker._need(all(record['running'] is False for record in contracts.values()),ERROR)
         receipt=wire._bytes({'schema_version':1,'binding':request.binding.fields(),'args':args,
             'hold_sha256':wire._digest(raw),'containers':hold['containers'],'container_contracts':contracts,
-            'protected_inventory_sha256':protected,'closed_revision':closed_revision,'closed_proof_sha256':proof})
+            'protected_inventory_sha256':protected,'closed_revision':expected_closed,'closed_proof_sha256':proof})
         worker.runtime._write(done_path,receipt)
         observe(request,args['postboot_attempt_id'],wire._digest(receipt))
         return wire.Receipt('PASS',wire._digest(receipt))
@@ -78,7 +103,7 @@ def observe(request, attempt, expected, *, require_stopped=True):
         and all(record['args'].get(key)==request.args[key] for key in (*wire.INITIAL_RECOVERY_ARGS,'hold_sha256'))
         and record['hold_sha256']==wire._digest(holdraw) and record['containers']==hold['containers']
         and record['protected_inventory_sha256']==protected and type(record['closed_revision']) is int
-        and record['closed_revision']==(9 if 'predecessor_unpublished_attempt_id' in record['args'] else 7) and wire._hash(record['closed_proof_sha256'])
+        and record['closed_revision']==closed_revision(request,record['args']) and wire._hash(record['closed_proof_sha256'])
         and type(record['container_contracts']) is dict
         and set(record['container_contracts'])==set(hold['containers']),ERROR)
     if require_stopped:

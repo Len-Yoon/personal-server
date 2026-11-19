@@ -221,6 +221,84 @@ function Seal-HaInitialRearmPredecessor([string]$PlanPath,[string]$PlanSha256){
     }finally{foreach($handle in $held){$handle.Dispose()}}
 }
 
+function Get-InitialPredecessorNumbers([byte[]]$Raw,[string]$ExpectedSha,[bool]$Published){
+    $bad='initial_service_predecessor_numbers'
+    if($null -eq $Raw -or $Raw.Length -lt 1 -or $Raw.Length -gt 65536 -or $ExpectedSha -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}
+    $h=[Security.Cryptography.SHA256]::Create()
+    try{$pin=[BitConverter]::ToString($h.ComputeHash($Raw)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}
+    if($pin -cne $ExpectedSha){throw $bad}
+    # Reuse the existing strict parser: duplicate/escaped duplicate keys and non-integer JSON numbers fail closed.
+    if(-not ('N100InitialPredecessorJsonV1.Json' -as [type])){Add-Type -TypeDefinition @'
+using System;using System.Text;using System.Collections.Generic;
+namespace N100InitialPredecessorJsonV1 {
+ public static class Json {
+  sealed class Parser {
+   readonly string text; int at; int nodes;
+   public Parser(string s){text=s;}
+   void White(){while(at<text.Length&&(text[at]==' '||text[at]=='\r'||text[at]=='\n'||text[at]=='\t'))at++;}
+   void Need(bool ok){if(!ok)throw new InvalidOperationException("runtime_stage_json_rejected");}
+   string String(){
+    Need(at<text.Length&&text[at++]=='"');var b=new StringBuilder();bool done=false;
+    while(at<text.Length){char c=text[at++];if(c=='"'){done=true;break;}
+     if(c=='\\'){Need(at<text.Length);c=text[at++];if(c=='u'){Need(at+4<=text.Length);int value=0;
+       for(int i=0;i<4;i++){char h=text[at++];int n=h>='0'&&h<='9'?h-'0':h>='a'&&h<='f'?h-'a'+10:h>='A'&&h<='F'?h-'A'+10:-1;Need(n>=0);value=value*16+n;}c=(char)value;
+      }else Need(c=='"'||c=='\\'||c=='/');}
+     Need(c>=32&&c<=126);b.Append(c);Need(b.Length<=4096);
+    }Need(done);return b.ToString();
+   }
+   object Value(int depth){
+    Need(depth<=8&&++nodes<=65536);White();Need(at<text.Length);char c=text[at];
+    if(c=='"')return String();
+    if(c=='{'){at++;White();var result=new Dictionary<string,object>(StringComparer.Ordinal);
+     if(at<text.Length&&text[at]=='}'){at++;return result;}
+     while(true){White();string key=String();Need(key.Length>0&&key.Length<=200&&!result.ContainsKey(key));White();Need(at<text.Length&&text[at++]==':');result.Add(key,Value(depth+1));White();Need(at<text.Length);char end=text[at++];if(end=='}')return result;Need(end==',');}
+    }
+    if(c=='['){at++;White();var values=new List<object>();if(at<text.Length&&text[at]==']'){at++;return values;}
+     while(true){Need(values.Count<8192);values.Add(Value(depth+1));White();Need(at<text.Length);char end=text[at++];if(end==']')return values;Need(end==',');}}
+    foreach(string word in new string[]{"true","false","null"})if(at+word.Length<=text.Length&&System.String.CompareOrdinal(text,at,word,0,word.Length)==0){at+=word.Length;return word=="null"?null:(object)(word=="true");}
+    int start=at;if(c=='-')at++;Need(at<text.Length&&text[at]>='0'&&text[at]<='9');
+    if(text[at]=='0')at++;else while(at<text.Length&&text[at]>='0'&&text[at]<='9')at++;
+    long integer;Need(Int64.TryParse(text.Substring(start,at-start),System.Globalization.NumberStyles.AllowLeadingSign,System.Globalization.CultureInfo.InvariantCulture,out integer));return integer;
+   }
+   public object Parse(){object value=Value(0);White();Need(at==text.Length);return value;}
+  }
+  public static Dictionary<string,object> Object(string text,int maximum){
+   if(text==null||text.Length>maximum||Encoding.UTF8.GetByteCount(text)>maximum)throw new InvalidOperationException("runtime_stage_json_size");
+   object value=new Parser(text).Parse();var result=value as Dictionary<string,object>;if(result==null)throw new InvalidOperationException("runtime_stage_json_object_required");return result;
+  }
+ }
+}
+'@ -ErrorAction Stop}
+    $text=[Text.UTF8Encoding]::new($false,$true).GetString($Raw)
+    $null=[N100InitialPredecessorJsonV1.Json]::Object($text,65536);$v=ConvertFrom-Json $text
+    $names=@($v.PSObject.Properties.Name)
+    if($v.kind -isnot [string] -or $v.kind -cnotin @('initial-wsl-cutover-rearm','initial-wsl-cutover-unpublished')){throw $bad}
+    $field=if($v.kind -ceq 'initial-wsl-cutover-rearm'){'rearm'}else{'unpublished'}
+    $expected=@('schema_version','kind','generation','attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256','controller_plan_sha256','recovery','revision','phase','sequence',$field)
+    $hasFailure='failure_code' -cin $names;if($hasFailure){$expected+=@('failure_code')}
+    if((@($names|Sort-Object -CaseSensitive) -join ',') -cne (@($expected|Sort-Object -CaseSensitive) -join ',')){throw $bad}
+    foreach($key in @('schema_version','generation','revision','sequence')){if($v.$key -isnot [int] -and $v.$key -isnot [long]){throw $bad}}
+    if($v.schema_version -ne 1 -or $v.generation -ne 1 -or $v.sequence -lt 0 -or $v.phase -isnot [string] -or $v.phase -cnotin @('lease_lost','local_revoke_observed')){throw $bad}
+    foreach($key in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256','controller_plan_sha256')){if($v.$key -isnot [string] -or $v.$key -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}}
+    if((@($v.recovery.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'attempt_id,predecessor_service_sha256,predecessor_terminal_sha256'){throw $bad}
+    foreach($key in @('attempt_id','predecessor_service_sha256','predecessor_terminal_sha256')){if($v.recovery.$key -isnot [string] -or $v.recovery.$key -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}}
+    $scope=$v.$field
+    $scopeKeys=@('schema_version','attempt_id','closure_mode','predecessor_args_sha256','predecessor_terminal_sha256')
+    if($field -ceq 'rearm'){$scopeKeys+=@('predecessor_binding_sha256')}else{$scopeKeys+=@('predecessor_plan_sha256','predecessor_seal_sha256')}
+    if((@($scope.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne (@($scopeKeys|Sort-Object -CaseSensitive) -join ',') -or ($scope.schema_version -isnot [int] -and $scope.schema_version -isnot [long]) -or $scope.schema_version -ne 1 -or $scope.closure_mode -isnot [string] -or $scope.closure_mode -cne 'windows-offline-v1'){throw $bad}
+    foreach($key in $scopeKeys){if($key -notin @('schema_version','closure_mode') -and ($scope.$key -isnot [string] -or $scope.$key -cnotmatch '\A[a-f0-9]{64}\z')){throw $bad}}
+    $r=[long]$v.revision
+    if(($field -ceq 'rearm' -and $r -ne 6) -or ($field -ceq 'unpublished' -and ($r -lt 8 -or $r -gt 2147483644 -or ($r % 2) -ne 0))){throw $bad}
+    if($hasFailure -and ($v.failure_code -isnot [string] -or $v.failure_code -cnotmatch '\A[a-z][a-z0-9_]{0,95}\z')){throw $bad}
+    if($Published){if($v.sequence -lt 1){throw $bad}}else{
+        if(-not $hasFailure){throw $bad}
+        $journal=$v.sequence -eq 1 -and $v.phase -ceq 'local_revoke_observed' -and $v.failure_code -ceq 'controller_journal_not_durable'
+        $timeout=$field -ceq 'unpublished' -and $v.sequence -eq 0 -and $v.phase -ceq 'lease_lost' -and $v.failure_code -ceq 'legacy_pipe_response_timeout_postcommit'
+        if(-not ($journal -or $timeout)){throw $bad}
+    }
+    return [pscustomobject]@{closed=($r+1);opened=($r+2);revoked=($r+3);terminal=$v}
+}
+
 function Assert-UnpublishedTcbPath([string]$Path){
     $node=Get-Item -LiteralPath $Path -Force
     while($null -ne $node){
@@ -274,28 +352,28 @@ function Assert-UnpublishedEnvelope($Value){
     foreach($key in $keys){if($key -notin @('schema_version','closure_mode') -and ($Value.$key -isnot [string] -or $Value.$key -cnotmatch $hashPattern)){throw 'initial_service_unpublished_scope'}}
 }
 function Assert-UnpublishedPrior($Plan,$Old,$Terminal,$Value){
-    if($Old.source_commit -isnot [string]){throw 'initial_service_unpublished_scope'}
-    foreach($key in @('kind','phase','failure_code')){if($Terminal.$key -isnot [string]){throw 'initial_service_unpublished_scope'}}
-    foreach($key in @('controller_plan_sha256','attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
-        if($Terminal.$key -isnot [string] -or $Terminal.$key -cnotmatch $hashPattern){throw 'initial_service_unpublished_scope'}
+    $raw=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $Terminal -Depth 12 -Compress))
+    $h=[Security.Cryptography.SHA256]::Create();try{$pin=[BitConverter]::ToString($h.ComputeHash($raw)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}
+    $numbers=Get-InitialPredecessorNumbers $raw $pin $false
+    $field=if($Terminal.kind -ceq 'initial-wsl-cutover-rearm'){'rearm'}else{'unpublished'}
+    $oldField=if($field -ceq 'rearm'){'initial_recovery_rearm'}else{'initial_unpublished_recovery'}
+    $other=if($field -ceq 'rearm'){'initial_unpublished_recovery'}else{'initial_recovery_rearm'}
+    foreach($key in @('service_name','service_sid','service_image_sha256')){
+        if($Old.windows_enforced.$key -isnot [string] -or $Old.windows_enforced.$key -cne $Plan.windows_enforced.$key){throw 'initial_service_unpublished_scope'}
     }
-    if($Old.source_commit -cne '7cdb958bd2db88d60be40336d5d7a172a94f4115' -or
-       'initial_recovery_postboot' -cin $Old.PSObject.Properties.Name -or 'initial_unpublished_recovery' -cin $Old.PSObject.Properties.Name -or
-       'initial_recovery_rearm' -cnotin $Old.PSObject.Properties.Name -or
-       ($Terminal.schema_version -isnot [int] -and $Terminal.schema_version -isnot [long]) -or $Terminal.schema_version -ne 1 -or
-       ($Terminal.generation -isnot [int] -and $Terminal.generation -isnot [long]) -or $Terminal.generation -ne 1 -or
-       $Terminal.kind -cne 'initial-wsl-cutover-rearm' -or ($Terminal.revision -isnot [long] -and $Terminal.revision -isnot [int]) -or $Terminal.revision -ne 6 -or
-       ($Terminal.sequence -isnot [long] -and $Terminal.sequence -isnot [int]) -or $Terminal.sequence -ne 1 -or
-       $Terminal.phase -cne 'local_revoke_observed' -or $Terminal.failure_code -cne 'controller_journal_not_durable' -or
+    if($Old.installation_id -isnot [string] -or $Old.installation_id -cnotmatch '\A[a-f0-9]{64}\z' -or $Old.installation_id -cne $Plan.installation_id -or
+       $Old.source_commit -isnot [string] -or $Old.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+       ($field -ceq 'rearm' -and $Old.source_commit -cne '7cdb958bd2db88d60be40336d5d7a172a94f4115') -or
+       'initial_recovery_postboot' -cin $Old.PSObject.Properties.Name -or $other -cin $Old.PSObject.Properties.Name -or $oldField -cnotin $Old.PSObject.Properties.Name -or
        $Terminal.controller_plan_sha256 -cne $Value.predecessor_plan_sha256 -or
-       (ConvertTo-Json $Terminal.rearm -Compress) -cne (ConvertTo-Json $Old.initial_recovery_rearm -Compress) -or
+       (ConvertTo-Json $Terminal.$field -Compress) -cne (ConvertTo-Json $Old.$oldField -Compress) -or
        (ConvertTo-Json $Terminal.recovery -Compress) -cne (ConvertTo-Json $Plan.initial_cutover_recovery -Compress) -or
        (ConvertTo-Json $Old.initial_cutover_recovery -Compress) -cne (ConvertTo-Json $Plan.initial_cutover_recovery -Compress) -or
        (ConvertTo-Json $Old.initial_cutover_handoff -Compress) -cne (ConvertTo-Json $Plan.initial_cutover_handoff -Compress) -or
        $Old.windows_initial_observer.windows_boot_sha256 -cne $Plan.windows_initial_observer.windows_boot_sha256 -or
        $Old.windows_recovery_observers.guest_boot_sha256 -cne $Plan.windows_recovery_observers.guest_boot_sha256 -or
        $Old.windows_recovery_observers.hold_sha256 -cne $Plan.windows_recovery_observers.hold_sha256 -or
-       $Value.attempt_id -in @($Old.initial_recovery_rearm.attempt_id,$Plan.initial_cutover_recovery.attempt_id,$Plan.initial_cutover_handoff.attempt_id)){
+       $Value.attempt_id -in @($Old.$oldField.attempt_id,$Plan.initial_cutover_recovery.attempt_id,$Plan.initial_cutover_handoff.attempt_id)){
         throw 'initial_service_unpublished_scope'
     }
     foreach($key in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
@@ -342,6 +420,18 @@ function Write-UnpublishedSeal([string]$Path,$Record,[string]$ServiceSid){
     $file=[IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough,$security)
     try{$file.Write($raw,0,$raw.Length);$file.Flush($true)}finally{$file.Dispose()}
 }
+function Assert-UnpublishedPriorApproval($Old,$Approval,[string]$PlanPin){
+    if((@($Approval.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'action,authority_kind,installation_id,installed_at,plan_sha256,schema_version,source_commit' -or
+       ($Approval.schema_version -isnot [int] -and $Approval.schema_version -isnot [long]) -or $Approval.schema_version -ne 1){throw 'initial_service_unpublished_approval'}
+    foreach($key in @('action','authority_kind','installation_id','installed_at','plan_sha256','source_commit')){if($Approval.$key -isnot [string]){throw 'initial_service_unpublished_approval'}}
+    $action=if('initial_unpublished_recovery' -cin $Old.PSObject.Properties.Name){'ha-recover-unpublished-initial-writer'}else{'ha-rearm-initial-writer'}
+    if($Approval.action -cne $action -or $Approval.authority_kind -cne 'installed-runtime' -or
+       $Approval.installation_id -cnotmatch '\A[a-f0-9]{64}\z' -or $Approval.installation_id -cne $Old.installation_id -or
+       $Approval.plan_sha256 -cne $PlanPin -or $Approval.source_commit -cne $Old.source_commit -or $Approval.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+       $Approval.installed_at -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\z' -or
+       [DateTimeOffset]::Parse($Approval.installed_at,[Globalization.CultureInfo]::InvariantCulture) -ge [DateTimeOffset]::UtcNow){throw 'initial_service_unpublished_approval'}
+}
+
 function Seal-HaInitialUnpublishedAcceptance([string]$PlanPath,[string]$PlanSha256){
     Assert-UnpublishedTcbPath $PlanPath
     $plan=Read-PinnedJson $PlanPath $PlanSha256;$r=$plan.initial_unpublished_recovery;Assert-UnpublishedEnvelope $r
@@ -365,14 +455,26 @@ function Seal-HaInitialUnpublishedAcceptance([string]$PlanPath,[string]$PlanSha2
     if($argsPin -cne $r.predecessor_args_sha256){throw 'initial_service_unpublished_scope'}
     $rows=([Text.UTF8Encoding]::new($false,$true).GetString($argsRaw)).Split([char]10)
     if($rows.Count -ne 14 -or $rows[7] -cnotmatch '\Aplan_path=[A-Za-z]:\\[A-Za-z0-9_.\\-]+\z' -or $rows[8] -cne ('plan_sha256='+$r.predecessor_plan_sha256)){throw 'initial_service_unpublished_scope'}
-    $oldPlanPath=$rows[7].Substring(10);$oldRoot=[IO.Path]::GetDirectoryName($oldPlanPath)
+    $settings=@{};$keys=@('format','service_name','service_sid','python_path','python_sha256','launcher_path','launcher_sha256','plan_path','plan_sha256','approval_path','approval_sha256','mode','host_sha256')
+    if($rows[-1] -cne '' -or ([Text.UTF8Encoding]::new($false,$true).GetString($argsRaw)).Contains([char]13)){throw 'initial_service_unpublished_scope'}
+    for($i=0;$i -lt $keys.Count;$i++){$prefix=$keys[$i]+'=';if(-not $rows[$i].StartsWith($prefix,[StringComparison]::Ordinal)){throw 'initial_service_unpublished_scope'};$settings[$keys[$i]]=$rows[$i].Substring($prefix.Length)}
+    if($settings.format -cne 'enforced-service-v1' -or $settings.mode -cne 'serve' -or $settings.service_name -cne $service.Name -or $settings.service_sid -cne $plan.windows_enforced.service_sid -or $settings.host_sha256 -cne $old.windows_enforced.service_image_sha256 -or $settings.approval_sha256 -cnotmatch $hashPattern){throw 'initial_service_unpublished_scope'}
+    $oldPlanPath=$settings.plan_path;$oldRoot=[IO.Path]::GetDirectoryName($oldPlanPath)
+    Assert-UnpublishedTcbPath $settings.approval_path
+    $oldApproval=Read-PinnedJson $settings.approval_path $settings.approval_sha256
+    Assert-UnpublishedPriorApproval $old $oldApproval $r.predecessor_plan_sha256
+    Assert-UnpublishedTcbPath $settings.python_path;Assert-Executable $settings.python_path $settings.python_sha256
+    if([string](Get-AuthenticodeSignature -LiteralPath $settings.python_path).Status -cne 'Valid'){throw 'initial_service_unpublished_runtime_signature'}
+    Assert-UnpublishedTcbPath $settings.launcher_path
+    if((Get-FileHash -LiteralPath $settings.launcher_path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $settings.launcher_sha256){throw 'initial_service_unpublished_runtime_pin'}
     $bindingPath=Join-Path $oldRoot ('initial-recovery-service-'+$plan.initial_cutover_recovery.attempt_id+'.json')
     if($bindingPath -cne $old.initial_service_start.binding_path){throw 'initial_service_unpublished_scope'}
     Assert-UnpublishedBindingAbsent $bindingPath
     $held=[Collections.Generic.List[IDisposable]]::new()
     try{
         foreach($entry in @(@{path=$actualArgs;pin=$r.predecessor_args_sha256},@{path=$oldPlanPath;pin=$r.predecessor_plan_sha256},
-                           @{path=(Join-Path $oldRoot 'journal\controller-state.json');pin=$r.predecessor_terminal_sha256})){
+                           @{path=(Join-Path $oldRoot 'journal\controller-state.json');pin=$r.predecessor_terminal_sha256},
+                           @{path=$settings.approval_path;pin=$settings.approval_sha256},@{path=$settings.python_path;pin=$settings.python_sha256},@{path=$settings.launcher_path;pin=$settings.launcher_sha256})){
             $item=Get-Item -LiteralPath $entry.path -Force
             if($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'initial_service_unpublished_scope'}
             for($parent=$item.Directory;$null -ne $parent;$parent=$parent.Parent){if($parent.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'initial_service_unpublished_scope'}}
@@ -422,7 +524,8 @@ function Assert-PostbootSealedPredecessor($Plan,[string]$Root){
     $resume=Read-PinnedJson $resumePath $resumePin
     $tagged='predecessor_kind' -cin $r.PSObject.Properties.Name
     $priorKind=if($tagged){'initial-wsl-cutover-unpublished'}else{'initial-wsl-cutover-rearm'}
-    $priorRevision=if($tagged){8}else{6};$closedRevision=if($tagged){9}else{7}
+    $numbers=Get-InitialPredecessorNumbers ([IO.File]::ReadAllBytes((Join-Path $Root 'postboot-predecessor-state.json'))) $r.predecessor_terminal_sha256 $true
+    $priorRevision=$numbers.closed-1;$closedRevision=$numbers.closed
     $newboot=$Plan.windows_initial_observer.windows_boot_sha256
     $planPin=(Get-FileHash -LiteralPath (Join-Path $Root 'plan.json') -Algorithm SHA256).Hash.ToLowerInvariant()
     if($newboot -ceq $r.previous_windows_boot_sha256 -or $pre.windows_boot_sha256 -cne $r.previous_windows_boot_sha256 -or
@@ -1024,7 +1127,14 @@ try {
     $unpublished='initial_unpublished_recovery' -cin $plan.PSObject.Properties.Name
     $postbootUnpublished=$postboot -and ('predecessor_kind' -cin $plan.initial_recovery_postboot.PSObject.Properties.Name)
     if($unpublished -and ($postboot -or $rearming)){throw 'initial_service_unpublished_scope'}
-    $expectedRevision=if($postbootUnpublished){10}elseif($unpublished -or $postboot){8}elseif($rearming){6}else{4}
+    $expectedRevision=if($rearming){6}else{4}
+    if($unpublished -or $postboot){
+        $r=if($unpublished){$plan.initial_unpublished_recovery}else{$plan.initial_recovery_postboot}
+        $leaf=if($unpublished){'unpublished-predecessor-state.json'}else{'postboot-predecessor-state.json'}
+        $predecessorPath=Join-Path ([IO.Path]::GetDirectoryName($PlanPath)) $leaf;Assert-UnpublishedTcbPath $predecessorPath
+        $numbers=Get-InitialPredecessorNumbers ([IO.File]::ReadAllBytes($predecessorPath)) $r.predecessor_terminal_sha256 $postboot
+        $expectedRevision=$numbers.opened
+    }
     $action = if($unpublished){'ha-recover-unpublished-initial-writer'}elseif($postboot){'ha-resume-initial-writer'}elseif($rearming){'ha-rearm-initial-writer'}elseif($recovering){'ha-recover-initial-writer'}else{'ha-initial-wsl-cutover'}
     if ($recovering) {
         Assert-RecoveryStartScope $plan $approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath (

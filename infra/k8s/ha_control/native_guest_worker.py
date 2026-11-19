@@ -11,6 +11,7 @@ from datetime import timezone
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import stat
@@ -503,11 +504,28 @@ def observe_unpublished_predecessor(request):
         raw,hold,contracts,protected=current(request)
         _need(all(row['running'] is False and row['started_at']==hold['container_contracts'][role]['started_at']
                   for role,row in contracts.items()),'guest_unpublished_predecessor_unconfirmed')
+        error='guest_unpublished_predecessor_unconfirmed'
+        from .initial_unpublished import derive_predecessor
+        plan_pin=request.args['predecessor_plan_sha256']
+        terminal=runtime._read(ROOT/('predecessor-plan-'+plan_pin+'.json'),0,{0o400},limit=65536)
+        terminal_pin=_digest(terminal)
+        _need(runtime._read(ROOT/('predecessor-terminal-'+terminal_pin+'.json'),0,{0o400},limit=65536)==terminal,error)
+        derive_predecessor(terminal,terminal_pin,published=False)
+        prior=json.loads(terminal)
+        field='rearm' if prior['kind']=='initial-wsl-cutover-rearm' else 'unpublished'
+        _need(prior['controller_plan_sha256']==plan_pin
+              and prior[field]['attempt_id']==request.args['predecessor_rearm_attempt_id']
+              and prior['recovery']['attempt_id']==request.args['recovery_attempt_id']
+              and prior['attempt_id']==request.binding.attempt_id
+              and prior['legacy_plan_sha256']==request.binding.plan_sha256
+              and request.args['unpublished_attempt_id'] not in {
+                  prior[field]['attempt_id'],request.args['recovery_attempt_id'],request.binding.attempt_id},error)
         stage=ROOT/request.binding.attempt_id
-        prefix='rearm-'+request.args['predecessor_rearm_attempt_id']+'-start-'
-        _need(not any(path.name.startswith(prefix) for path in stage.iterdir()),'guest_unpublished_predecessor_unconfirmed')
+        _need(not any(re.match(r'^(?:recovery|rearm|unpublished|postboot)-[a-f0-9]{64}-start-',path.name)
+                      for path in stage.iterdir()),error)
         return Receipt('PASS',_digest(_bytes(_scope(request)|{'args':request.args,'hold_sha256':_digest(raw),
-            'containers':contracts,'protected_inventory_sha256':protected,'app_start_intent_absent':True})))
+            'predecessor_terminal_sha256':terminal_pin,'containers':contracts,
+            'protected_inventory_sha256':protected,'app_start_intent_absent':True})))
 
 
 def observe_initial_recovery_hold(request):

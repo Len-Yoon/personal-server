@@ -1912,7 +1912,7 @@ $hashPattern='\A[a-f0-9]{64}\z'
 $e=$null;$t=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($env:START_SOURCE,[ref]$t,[ref]$e)
 if($e.Count){throw 'parser'}
-foreach($f in $ast.EndBlock.Statements){if($f -is [Management.Automation.Language.FunctionDefinitionAst] -and $f.Name -in @('Assert-UnpublishedEnvelope','Assert-UnpublishedPrior','Assert-UnpublishedPreSeal','Assert-PostbootEnvelope')){. ([scriptblock]::Create($f.Extent.Text))}}
+foreach($f in $ast.EndBlock.Statements){if($f -is [Management.Automation.Language.FunctionDefinitionAst] -and $f.Name -in @('Get-InitialPredecessorNumbers','Assert-UnpublishedEnvelope','Assert-UnpublishedPrior','Assert-UnpublishedPriorApproval','Assert-UnpublishedPreSeal','Assert-PostbootEnvelope')){. ([scriptblock]::Create($f.Extent.Text))}}
 function Rejected([scriptblock]$Check){try{&$Check;throw 'accepted_negative'}catch{if($_.Exception.Message -eq 'accepted_negative'){throw}}}
 ''' + body
         result = subprocess.run([runtime, '-NoProfile', '-NonInteractive', '-Command', script],
@@ -1945,15 +1945,59 @@ $p.predecessor_kind='unknown';Rejected {Assert-PostbootEnvelope $p}
         self.powershell(r'''
 $handoff=[pscustomobject]@{attempt_id=('1'*64);legacy_plan_sha256=('2'*64);restore_receipt_sha256=('3'*64);activation_intent_sha256=('4'*64)}
 $recovery=[pscustomobject]@{attempt_id=('5'*64);predecessor_service_sha256=('6'*64);predecessor_terminal_sha256=('7'*64)}
-$old=[pscustomobject]@{source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115';initial_recovery_rearm=[pscustomobject]@{attempt_id=('8'*64)};initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('9'*64)};windows_recovery_observers=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64)}}
+$old=[pscustomobject]@{source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115';initial_recovery_rearm=[pscustomobject]@{schema_version=1;attempt_id=('8'*64);closure_mode='windows-offline-v1';predecessor_terminal_sha256=('a'*64);predecessor_binding_sha256=('b'*64);predecessor_args_sha256=('c'*64)};initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('9'*64)};windows_recovery_observers=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64)}}
 $plan=[pscustomobject]@{initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=$old.windows_initial_observer;windows_recovery_observers=$old.windows_recovery_observers}
+$old|Add-Member installation_id ('f'*64);$old|Add-Member windows_enforced ([pscustomobject]@{service_name='owned';service_sid='S-1-5-80-1-2-3-4-5';service_image_sha256=('e'*64)});$plan|Add-Member installation_id $old.installation_id;$plan|Add-Member windows_enforced $old.windows_enforced
 $r=[pscustomobject]@{attempt_id=('c'*64);predecessor_plan_sha256=('d'*64)}
 $terminal=[pscustomobject]@{schema_version=1;generation=1;kind='initial-wsl-cutover-rearm';revision=6;sequence=1;phase='local_revoke_observed';failure_code='controller_journal_not_durable';controller_plan_sha256=('d'*64);rearm=$old.initial_recovery_rearm;recovery=$recovery;attempt_id=$handoff.attempt_id;legacy_plan_sha256=$handoff.legacy_plan_sha256;restore_receipt_sha256=$handoff.restore_receipt_sha256;activation_intent_sha256=$handoff.activation_intent_sha256}
 Assert-UnpublishedPrior $plan $old $terminal $r
 foreach($pair in @(@('revision',8),@('sequence',2),@('phase','lease_lost'),@('failure_code','other'))){$key=$pair[0];$prior=$terminal.$key;$terminal.$key=$pair[1];Rejected {Assert-UnpublishedPrior $plan $old $terminal $r};$terminal.$key=$prior}
 $old.source_commit='0'*40;Rejected {Assert-UnpublishedPrior $plan $old $terminal $r};$old.source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115'
 $plan.windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('0'*64)};Rejected {Assert-UnpublishedPrior $plan $old $terminal $r}
+$plan.windows_initial_observer=$old.windows_initial_observer
+$old.source_commit='87ba9acb55e64c694cce54a5e6458d0e86ce3877';$old.PSObject.Properties.Remove('initial_recovery_rearm')
+$old|Add-Member initial_unpublished_recovery ([pscustomobject]@{schema_version=1;attempt_id=('8'*64);closure_mode='windows-offline-v1';predecessor_terminal_sha256=('a'*64);predecessor_plan_sha256=('b'*64);predecessor_args_sha256=('c'*64);predecessor_seal_sha256=('d'*64)})
+$terminal.PSObject.Properties.Remove('rearm');$terminal|Add-Member unpublished $old.initial_unpublished_recovery
+$terminal.kind='initial-wsl-cutover-unpublished';$terminal.revision=8;$terminal.sequence=0;$terminal.phase='lease_lost';$terminal.failure_code='legacy_pipe_response_timeout_postcommit'
+Assert-UnpublishedPrior $plan $old $terminal $r
+$old|Add-Member initial_recovery_postboot ([pscustomobject]@{});Rejected {Assert-UnpublishedPrior $plan $old $terminal $r}
+
 ''')
+
+    def test_raw_predecessor_derives_bounded_numbers_and_rejects_forgery(self):
+        self.powershell(r'''
+function Raw($v){return ,[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $v -Depth 12 -Compress))}
+function Pin([byte[]]$raw){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($raw)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+$scope=[pscustomobject]@{schema_version=1;attempt_id=('8'*64);closure_mode='windows-offline-v1';predecessor_terminal_sha256=('a'*64);predecessor_plan_sha256=('b'*64);predecessor_args_sha256=('c'*64);predecessor_seal_sha256=('d'*64)}
+$t=[pscustomobject]@{schema_version=1;generation=1;kind='initial-wsl-cutover-unpublished';revision=8;sequence=0;phase='lease_lost';failure_code='legacy_pipe_response_timeout_postcommit';controller_plan_sha256=('e'*64);unpublished=$scope;recovery=[pscustomobject]@{attempt_id=('5'*64);predecessor_service_sha256=('6'*64);predecessor_terminal_sha256=('7'*64)};attempt_id=('1'*64);legacy_plan_sha256=('2'*64);restore_receipt_sha256=('3'*64);activation_intent_sha256=('4'*64)}
+$raw=Raw $t;$pin=Pin $raw;$n=Get-InitialPredecessorNumbers $raw $pin $false
+if($n.closed -ne 9 -or $n.opened -ne 10 -or $n.revoked -ne 11){throw 'derived_numbers'}
+Rejected {Get-InitialPredecessorNumbers $raw ('f'*64) $false}
+Rejected {Get-InitialPredecessorNumbers $raw $pin $true}
+foreach($r in @(9,7,2147483646,$true)){$t.revision=$r;$raw=Raw $t;Rejected {Get-InitialPredecessorNumbers $raw (Pin $raw) $false}}
+$t.revision=8;$t.sequence=1;$t.phase='local_revoke_observed';$t.failure_code='controller_journal_not_durable';$raw=Raw $t
+$n=Get-InitialPredecessorNumbers $raw (Pin $raw) $true;if($n.opened -ne 10){throw 'published_numbers'}
+$t.revision=10;$raw=Raw $t;$n=Get-InitialPredecessorNumbers $raw (Pin $raw) $false;if($n.opened -ne 12){throw 'next_numbers'}
+$t.revision=8;$t|Add-Member caller_revision 12;$raw=Raw $t;Rejected {Get-InitialPredecessorNumbers $raw (Pin $raw) $false};$t.PSObject.Properties.Remove('caller_revision')
+$raw=Raw $t;$text=[Text.UTF8Encoding]::new($false).GetString($raw)
+foreach($replacement in @('"revision":8,"revision":10','"revision":8,"\u0072evision":10')){$duplicate=[Text.UTF8Encoding]::new($false).GetBytes($text.Replace('"revision":8',$replacement));Rejected {Get-InitialPredecessorNumbers $duplicate (Pin $duplicate) $false}}
+$scope.closure_mode=@('windows-offline-v1');$raw=Raw $t;Rejected {Get-InitialPredecessorNumbers $raw (Pin $raw) $false}
+''')
+
+    def test_old_approval_binds_exact_installed_runtime(self):
+        self.powershell(r'''
+$old=[pscustomobject]@{source_commit=('a'*40);installation_id=('b'*64);initial_unpublished_recovery=[pscustomobject]@{}}
+$a=[pscustomobject]@{schema_version=1;action='ha-recover-unpublished-initial-writer';authority_kind='installed-runtime';installation_id=$old.installation_id;source_commit=$old.source_commit;plan_sha256=('c'*64);installed_at='2020-01-01T00:00:00Z'}
+Assert-UnpublishedPriorApproval $old $a ('c'*64)
+foreach($key in @('source_commit','installation_id','plan_sha256','action','authority_kind')){$value=$a.$key;$a.$key='wrong';Rejected {Assert-UnpublishedPriorApproval $old $a ('c'*64)};$a.$key=$value}
+$a.plan_sha256=@('c'*64);Rejected {Assert-UnpublishedPriorApproval $old $a ('c'*64)}
+''')
+
+    def test_both_native_gates_share_exact_raw_derivation(self):
+        start=(ROOT/'infra/k8s/ha_control/windows-ha-start-initial-service.ps1').read_text()
+        live=(ROOT/'infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1').read_text()
+        self.assertEqual(start.split('function Get-InitialPredecessorNumbers',1)[1].split('function Assert-UnpublishedTcbPath',1)[0],
+                         live.split('function Get-InitialPredecessorNumbers',1)[1].split('function Read-Scope',1)[0])
 
     def test_windows_gate_sources_parse_and_use_fixed_typed_branches(self):
         runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)

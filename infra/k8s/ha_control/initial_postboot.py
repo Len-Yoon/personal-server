@@ -43,11 +43,12 @@ def validate_seal(plan, plan_pin, files):
     from .initial_pg_lease import rearm_scope
     value = scope(plan)
     recovered=after_unpublished(value)
-    closed_revision=9 if recovered else 7
-    prior_revision=8 if recovered else 6
+    need(set(files) == set(FILES))
+    from .initial_unpublished import derive_predecessor
+    closed_revision,_,_=derive_predecessor(files[FILES[0]],value['predecessor_terminal_sha256'],published=True)
+    prior_revision=closed_revision-1
     prior_kind='initial-wsl-cutover-unpublished' if recovered else 'initial-wsl-cutover-rearm'
     prior_field='unpublished' if recovered else 'rearm'
-    need(set(files) == set(FILES))
     for name, key in zip(FILES[:4], ('predecessor_terminal_sha256', 'predecessor_binding_sha256',
                                    'predecessor_args_sha256', 'predecessor_seal_sha256')):
         need(_digest(files[name]) == value[key])

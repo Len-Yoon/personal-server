@@ -489,9 +489,13 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             if rearm is not None:
                 stable.update(kind='initial-wsl-cutover-rearm', rearm=rearm, revision=6)
             if postboot is not None:
-                stable.update(kind='initial-wsl-cutover-postboot-unpublished' if after_unpublished(postboot) else 'initial-wsl-cutover-postboot', postboot=postboot, revision=10 if after_unpublished(postboot) else 8)
+                from .initial_unpublished import derive_predecessor
+                revision=derive_predecessor(backend.fence_adapter._predecessor_terminal,postboot['predecessor_terminal_sha256'],published=True)[1]
+                stable.update(kind='initial-wsl-cutover-postboot-unpublished' if after_unpublished(postboot) else 'initial-wsl-cutover-postboot', postboot=postboot, revision=revision)
             if unpublished is not None:
-                stable.update(kind=UNPUBLISHED_KIND,unpublished=unpublished,revision=8)
+                from .initial_unpublished import derive_predecessor
+                revision=derive_predecessor(backend.fence_adapter._predecessor_terminal,unpublished['predecessor_terminal_sha256'],published=False)[1]
+                stable.update(kind=UNPUBLISHED_KIND,unpublished=unpublished,revision=revision)
 
         first_publication = False
 

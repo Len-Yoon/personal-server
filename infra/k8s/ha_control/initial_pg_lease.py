@@ -705,6 +705,7 @@ class InitialPgLeasePostboot(InitialPgLeaseRecovery):
     _open_revision = 8
     _revoked_revision = 9
     _allow_postboot = True
+    _unpublished_predecessor = False
 
     def _bind(self, state):
         from .initial_postboot import scope
@@ -712,18 +713,32 @@ class InitialPgLeasePostboot(InitialPgLeaseRecovery):
         super()._bind(state)
         selected = scope(self.backend.plan)
         from .initial_postboot import after_unpublished
-        if after_unpublished(selected) != (self._open_revision == 10):
+        if after_unpublished(selected)!=self._unpublished_predecessor:
             _deny('initial_postboot_scope_unverified')
+        raw=getattr(self.backend.fence_adapter,'_predecessor_terminal',None)
+        from .initial_unpublished import derive_predecessor
+        revisions=derive_predecessor(raw,selected['predecessor_terminal_sha256'],published=True)
+        import json
+        if after_unpublished(selected)!=(json.loads(raw)['kind']=='initial-wsl-cutover-unpublished'):
+            _deny('initial_postboot_scope_unverified')
+        self._set_predecessor_revisions(raw,revisions)
         if previous is not None and previous != selected:
             _deny('initial_postboot_scope_unverified')
         self.postboot = selected
+
+    def _set_predecessor_revisions(self,raw,revisions):
+        previous=getattr(self,'_terminal_bytes',None)
+        if previous is not None and previous!=raw:
+            _deny('initial_postboot_scope_unverified')
+        self._terminal_bytes=raw
+        self._closed_revision,self._open_revision,self._revoked_revision=revisions
 
     def _probe_prefix(self):
         return 'postboot-a:' + self.postboot['attempt_id'] + ':'
 
 
 class InitialPgLeaseUnpublishedRecovery(InitialPgLeaseRecovery):
-    """The sole failed 7cdb first publication: exact closed 7, open 8, revoke 9."""
+    """Continue only the exact sealed, unpublished same-A predecessor."""
     from .initial_unpublished import ACTION as _approval_action
     _closed_revision = 7
     _open_revision = 8
@@ -737,6 +752,13 @@ class InitialPgLeaseUnpublishedRecovery(InitialPgLeaseRecovery):
         selected=scope(self.backend.plan)
         if previous is not None and previous!=selected:
             _deny('initial_unpublished_scope_unverified')
+        from .initial_unpublished import derive_predecessor
+        raw=getattr(self.backend.fence_adapter,'_predecessor_terminal',None)
+        revisions=derive_predecessor(raw,selected['predecessor_terminal_sha256'],published=False)
+        if getattr(self,'_terminal_bytes',raw)!=raw:
+            _deny('initial_unpublished_scope_unverified')
+        self._terminal_bytes=raw
+        self._closed_revision,self._open_revision,self._revoked_revision=revisions
         self.unpublished=selected
 
     def _probe_prefix(self):
@@ -744,7 +766,8 @@ class InitialPgLeaseUnpublishedRecovery(InitialPgLeaseRecovery):
 
 
 class InitialPgLeasePostbootAfterUnpublished(InitialPgLeasePostboot):
-    """Only published retry-eight may cross the Windows reboot: 9 -> 10 -> 11."""
+    """Derive the reboot successor from an actually published unpublished-recovery writer."""
     _closed_revision = 9
     _open_revision = 10
     _revoked_revision = 11
+    _unpublished_predecessor = True

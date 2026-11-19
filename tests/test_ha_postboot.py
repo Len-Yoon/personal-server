@@ -36,7 +36,9 @@ class PostbootPgTests(unittest.TestCase):
     def postboot_lease(self):
         callback = self.recovery_lease().assert_legacy_closed
         self.revision = 7
-        self.backend.plan.update(_approval_action=ACTION, initial_recovery_postboot=envelope())
+        plan,files=PostbootSealTests().fixture()
+        self.backend.fence_adapter._predecessor_terminal=files[FILES[0]]
+        self.backend.plan.update(_approval_action=ACTION, initial_recovery_postboot=plan['initial_recovery_postboot'])
         return InitialPgLeasePostboot(self.backend, callback)
 
     def test_fixed_eight_renew_and_nine_revoke_preserve_prior_probes(self):
@@ -238,12 +240,15 @@ class PostbootSealTests(unittest.TestCase):
         holder=fixtures.InitialLeaseServiceTests()
         for change in (None,lambda before,after,pair:after.update(service_incarnation_sha256='0'*64)):
             native,lease,recovery,windows,paired,clock=holder.continuity_fixture(change=change)
+            plan,files=self.fixture();prior=json.loads(files[FILES[0]])
+            prior.update(recovery=recovery,attempt_id=lease.custody.binding.attempt_id,legacy_plan_sha256=lease.custody.binding.plan_sha256)
+            raw=json.dumps(prior).encode();value=envelope();value['predecessor_terminal_sha256']=hashlib.sha256(raw).hexdigest()
             with patch.object(native,'fixed_script',return_value='fixture') as script, \
                  patch.object(native.secrets,'token_hex',return_value='f'*64), \
                  patch.object(native.time,'monotonic',side_effect=lambda:clock[0]):
                 if change is None:
                     self.assertRegex(lease.verify_recovery_continuity(windows,recovery,10.0,observe_pair=paired,
-                        assert_guard=lambda:None,postboot=envelope()),r'^[a-f0-9]{64}$')
+                        assert_guard=lambda:None,postboot=value,predecessor_terminal=raw),r'^[a-f0-9]{64}$')
                     values=script.call_args.args[2]
                     self.assertEqual(values['PostbootAttemptId'],'0'*64)
                     self.assertEqual(values['PostbootPreviousWindowsBootSha256'],'5'*64)
@@ -251,7 +256,7 @@ class PostbootSealTests(unittest.TestCase):
                 else:
                     with self.assertRaises(native.bridge.BridgeRejected):
                         lease.verify_recovery_continuity(windows,recovery,10.0,observe_pair=paired,
-                            assert_guard=lambda:None,postboot=envelope())
+                            assert_guard=lambda:None,postboot=value,predecessor_terminal=raw)
 
     def test_powershell_sources_parse(self):
         runtime=shutil.which('pwsh')
@@ -387,6 +392,42 @@ class UnpublishedSealTests(unittest.TestCase):
         files[unpub.FILES[4]]=encode(dict(schema_version=1,plan_sha256='a'*64,unpublished=value,windows_boot_sha256='0'*64,service=service))
         return plan,files
 
+    def continuation_fixture(self,revision=8):
+        from ha_control import initial_unpublished as unpub,initial_windows_gate as gate
+        old,first=self.fixture()
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        digest=lambda raw:hashlib.sha256(raw).hexdigest()
+        old_raw=encode(old);oldpin=digest(old_raw)
+        prior=json.loads(first[unpub.FILES[0]]);prior.pop('rearm')
+        prior.update(kind=unpub.KIND,revision=revision,sequence=0,phase='lease_lost',
+            failure_code='legacy_pipe_response_timeout_postcommit',unpublished=old['initial_unpublished_recovery'],
+            controller_plan_sha256=oldpin)
+        args=gate._args(first[unpub.FILES[1]]);args['plan_sha256']=oldpin
+        argsraw=''.join(key+'='+args[key]+'\n' for key in gate.ARGS_FIELDS).encode()
+        value=deepcopy(old['initial_unpublished_recovery']);value.update(attempt_id='1'*64,
+            predecessor_terminal_sha256=digest(encode(prior)),predecessor_args_sha256=digest(argsraw),predecessor_plan_sha256=oldpin)
+        seal=json.loads(first[unpub.FILES[3]])
+        for key in ('predecessor_terminal_sha256','predecessor_args_sha256','predecessor_plan_sha256'):seal[key]=value[key]
+        sealraw=encode(seal);value['predecessor_seal_sha256']=digest(sealraw)
+        plan=deepcopy(old);plan['initial_unpublished_recovery']=value
+        acceptance=json.loads(first[unpub.FILES[4]]);acceptance['unpublished']=value
+        files=dict(zip(unpub.FILES,(encode(prior),argsraw,old_raw,sealraw,encode(acceptance))))
+        return plan,files
+
+    def test_actual_failed_unpublished_terminal_continues_without_new_mode_or_revision_field(self):
+        from ha_control import initial_unpublished as unpub
+        for revision in (8,10):
+            plan,files=self.continuation_fixture(revision)
+            self.assertEqual(unpub.validate_seal(plan,'a'*64,files),plan['initial_unpublished_recovery'])
+            self.assertEqual(unpub.derive_predecessor(files[unpub.FILES[0]],plan['initial_unpublished_recovery']['predecessor_terminal_sha256'],published=False),
+                (revision+1,revision+2,revision+3))
+            changed=deepcopy(plan);changed['initial_unpublished_recovery']['revision']=revision+2
+            with self.assertRaises(TransitionBlocked):unpub.scope(changed)
+            for field,wrong in (('binding_absent',False),('windows_boot_sha256','f'*64)):
+                altered=dict(files);seal=json.loads(altered[unpub.FILES[3]]);seal[field]=wrong
+                altered[unpub.FILES[3]]=json.dumps(seal).encode();self.rehash(plan,altered)
+                with self.assertRaises(TransitionBlocked):unpub.validate_seal(plan,'a'*64,altered)
+
     def rehash(self,plan,files):
         from ha_control import initial_unpublished as unpub
         encode=lambda value:json.dumps(value,sort_keys=True).encode()
@@ -439,7 +480,10 @@ class UnpublishedPgTests(unittest.TestCase):
         from ha_control.initial_pg_lease import InitialPgLeaseUnpublishedRecovery
         callback=self.recovery_lease().assert_legacy_closed
         self.revision=7
-        value=UnpublishedSealTests().fixture()[0]['initial_unpublished_recovery']
+        plan,files=UnpublishedSealTests().fixture()
+        from ha_control.initial_unpublished import FILES as UFILES
+        self.backend.fence_adapter._predecessor_terminal=files[UFILES[0]]
+        value=plan['initial_unpublished_recovery']
         self.backend.plan.update(_approval_action=ACTION,initial_unpublished_recovery=value)
         return InitialPgLeaseUnpublishedRecovery(self.backend,callback)
 
@@ -453,6 +497,41 @@ class UnpublishedPgTests(unittest.TestCase):
         self.now+=timedelta(seconds=1);lease.renew(self.state);self.assertTrue(lease.revoke(self.state));self.assertEqual(self.revision,9)
         with self.assertRaises(TransitionBlocked):type(lease)(self.backend,lease.assert_legacy_closed).open(self.state)
 
+    def continuation_lease(self,prior_revision=8):
+        from ha_control import initial_unpublished as unpub
+        from ha_control.initial_pg_lease import InitialPgLeaseUnpublishedRecovery
+        callback=self.recovery_lease().assert_legacy_closed
+        plan,files=UnpublishedSealTests().continuation_fixture(prior_revision)
+        self.revision=prior_revision+1
+        self.backend.fence_adapter._predecessor_terminal=files[unpub.FILES[0]]
+        self.backend.plan.update(_approval_action=unpub.ACTION,initial_unpublished_recovery=plan['initial_unpublished_recovery'])
+        return InitialPgLeaseUnpublishedRecovery(self.backend,callback)
+
+    def test_continuation_opens_only_derived_closed_stamp_and_revokes_only_owned_expiry(self):
+        for prior in (8,10):
+            self.setUp();lease=self.continuation_lease(prior)
+            old={'unpublished-a:older:lease'};self.probes.update(old)
+            lease.open(self.state);self.assertEqual(self.revision,prior+2);self.assertTrue(old<=self.probes)
+            foreign=type(lease)(self.backend,lease.assert_legacy_closed)
+            self.assertFalse(foreign.revoke(self.state))
+            with self.assertRaises(TransitionBlocked):foreign.renew(self.state)
+            self.now+=timedelta(seconds=1);lease.renew(self.state)
+            self.assertTrue(lease.revoke(self.state));self.assertEqual(self.revision,prior+3)
+        for wrong in (7,8,10,11):
+            self.setUp();lease=self.continuation_lease();self.revision=wrong
+            with self.assertRaises(TransitionBlocked):lease.open(self.state)
+            self.assertFalse(self.opened)
+
+    def test_changed_or_missing_terminal_bytes_cannot_choose_or_adopt_a_revision(self):
+        for bad in (None,b'{}',8):
+            self.setUp();lease=self.continuation_lease();self.backend.fence_adapter._predecessor_terminal=bad
+            with self.assertRaises(TransitionBlocked):lease.open(self.state)
+            self.assertFalse(self.opened)
+        self.setUp();lease=self.continuation_lease();lease.open(self.state)
+        raw=self.backend.fence_adapter._predecessor_terminal
+        self.backend.fence_adapter._predecessor_terminal=raw+b' '
+        with self.assertRaises(TransitionBlocked):lease.renew(self.state)
+
     def test_old_modes_and_wrong_closed_revision_refuse_unpublished_field(self):
         for cls in (InitialPgLease,InitialPgLeaseRecovery,InitialPgLeaseRearm,InitialPgLeasePostboot):
             self.setUp();lease=self.unpublished_lease()
@@ -461,11 +540,27 @@ class UnpublishedPgTests(unittest.TestCase):
             self.setUp();lease=self.unpublished_lease();self.revision=revision
             with self.subTest(revision=revision),self.assertRaises(TransitionBlocked):lease.open(self.state)
 
+    def test_published_continuation_reboots_using_same_postboot_type_for_eleven_twelve_thirteen(self):
+        from ha_control.initial_pg_lease import InitialPgLeasePostbootAfterUnpublished
+        callback=self.recovery_lease().assert_legacy_closed
+        plan,files=PostbootAfterUnpublishedSealTests().fixture(10)
+        self.backend.plan.update(_approval_action=ACTION,initial_recovery_postboot=plan['initial_recovery_postboot'])
+        self.backend.fence_adapter._predecessor_terminal=files[FILES[0]]
+        self.revision=11
+        lease=InitialPgLeasePostbootAfterUnpublished(self.backend,callback)
+        lease.open(self.state);self.assertEqual(self.revision,12)
+        self.assertTrue(lease.revoke(self.state));self.assertEqual(self.revision,13)
+
     def test_typed_postboot_after_unpublished_is_only_nine_ten_eleven(self):
         from ha_control.initial_pg_lease import InitialPgLeasePostbootAfterUnpublished
         callback=self.recovery_lease().assert_legacy_closed;self.revision=9
         self.backend.plan['_approval_action']=ACTION
         value=envelope();value['predecessor_kind']='published-unpublished-recovery-v1'
+        oldplan,oldfiles=UnpublishedSealTests().fixture()
+        prior=json.loads(oldfiles['unpublished-predecessor-state.json']);prior.pop('rearm')
+        prior.update(kind='initial-wsl-cutover-unpublished',revision=8,unpublished=oldplan['initial_unpublished_recovery'])
+        raw=json.dumps(prior).encode();value['predecessor_terminal_sha256']=hashlib.sha256(raw).hexdigest()
+        self.backend.fence_adapter._predecessor_terminal=raw
         self.backend.plan['initial_recovery_postboot']=value
         lease=InitialPgLeasePostbootAfterUnpublished(self.backend,callback)
         lease.open(self.state);self.assertEqual(self.revision,10)
@@ -477,35 +572,47 @@ class UnpublishedPgTests(unittest.TestCase):
 
 
 class PostbootAfterUnpublishedSealTests(unittest.TestCase):
-    def test_only_published_retry_eight_and_closed_nine_choose_postboot_ten(self):
+    def fixture(self,revision=8):
         plan,files=PostbootSealTests().fixture()
         encode=lambda value:json.dumps(value,sort_keys=True).encode()
         digest=lambda value:hashlib.sha256(value).hexdigest()
         prior=json.loads(files[FILES[0]]);prior.pop('rearm')
         unpublished=UnpublishedSealTests().fixture()[0]['initial_unpublished_recovery']
         unpublished['attempt_id']='8'*64
-        prior.update(kind='initial-wsl-cutover-unpublished',revision=8,unpublished=unpublished)
+        prior.update(kind='initial-wsl-cutover-unpublished',revision=revision,unpublished=unpublished)
         files[FILES[0]]=encode(prior)
         value=plan['initial_recovery_postboot'];value['predecessor_kind']='published-unpublished-recovery-v1'
         value['predecessor_terminal_sha256']=digest(files[FILES[0]])
-        stopped=json.loads(files[FILES[6]]);stopped['closed_revision']=9
+        stopped=json.loads(files[FILES[6]]);stopped['closed_revision']=revision+1
         stopped['args'].pop('predecessor_rearm_attempt_id')
         stopped['args']['predecessor_unpublished_attempt_id']=unpublished['attempt_id']
         files[FILES[6]]=encode(stopped);stopsha=digest(files[FILES[6]])
-        pre=json.loads(files[FILES[3]]);pre.update(closed_revision=9,postboot_stopped_receipt_sha256=stopsha,
+        pre=json.loads(files[FILES[3]]);pre.update(closed_revision=revision+1,postboot_stopped_receipt_sha256=stopsha,
             predecessor_terminal_sha256=value['predecessor_terminal_sha256'])
         pre['guests']['A']['container_inventory_sha256']=stopsha
         files[FILES[3]]=encode(pre);value['predecessor_seal_sha256']=digest(files[FILES[3]])
-        resumed=json.loads(files[FILES[4]]);resumed.update(closed_revision=9,postboot_stopped_receipt_sha256=stopsha,
+        resumed=json.loads(files[FILES[4]]);resumed.update(closed_revision=revision+1,postboot_stopped_receipt_sha256=stopsha,
             guests=pre['guests'],predecessor_seal_sha256=value['predecessor_seal_sha256'])
         files[FILES[4]]=encode(resumed)
         acceptance=json.loads(files[FILES[5]]);acceptance.update(postboot=value,resume_evidence_sha256=digest(files[FILES[4]]))
         files[FILES[5]]=encode(acceptance)
+        return plan,files
+
+    def test_only_published_retry_eight_and_closed_nine_choose_postboot_ten(self):
+        plan,files=self.fixture();value=plan['initial_recovery_postboot']
         self.assertEqual(validate_seal(plan,'a'*64,files),value)
         changed=deepcopy(plan);changed['initial_recovery_postboot'].pop('predecessor_kind')
         with self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
         changed=deepcopy(plan);changed['initial_recovery_postboot']['predecessor_kind']='arbitrary-revision'
         with self.assertRaises(TransitionBlocked):scope(changed)
+
+
+    def test_same_postboot_tag_uses_real_published_ten_terminal_for_twelve(self):
+        plan,files=self.fixture(10)
+        self.assertEqual(validate_seal(plan,'a'*64,files),plan['initial_recovery_postboot'])
+        changed=dict(files);stopped=json.loads(files[FILES[6]]);stopped['closed_revision']=9
+        changed[FILES[6]]=json.dumps(stopped).encode()
+        with self.assertRaises(TransitionBlocked):validate_seal(plan,'a'*64,changed)
 
 
 class UnpublishedGuestObservationTests(unittest.TestCase):
@@ -518,16 +625,149 @@ class UnpublishedGuestObservationTests(unittest.TestCase):
         args.update(hold_sha256=wire._digest(b'hold'),predecessor_rearm_attempt_id='7'*64,
                     predecessor_plan_sha256='8'*64,unpublished_attempt_id='9'*64)
         request=wire.Request(binding,'A',wire.GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR,1,'a'*64,args)
+
+        _,oldfiles=UnpublishedSealTests().fixture()
+        prior=json.loads(oldfiles['unpublished-predecessor-state.json'])
+        prior.update(controller_plan_sha256=args['predecessor_plan_sha256'],attempt_id=binding.attempt_id,
+            legacy_plan_sha256=binding.plan_sha256,recovery=prior['recovery']|{'attempt_id':args['recovery_attempt_id']})
+        prior['rearm']['attempt_id']=args['predecessor_rearm_attempt_id']
+        terminal=json.dumps(prior).encode()
+
         contracts={role:{'layout_sha256':'b'*64,'running':False,'started_at':'original'} for role in wire.RECOVERY_START_ORDER}
         hold={'container_contracts':deepcopy(contracts)}
         with TemporaryDirectory() as folder,patch.object(worker,'ROOT',Path(folder)), \
              patch.object(worker,'_guest_mutation_descriptor',return_value=nullcontext()), \
-             patch.object(postboot,'current',return_value=(b'hold',hold,contracts,'6'*64)):
+             patch.object(postboot,'current',return_value=(b'hold',hold,contracts,'6'*64)), \
+             patch.object(worker.runtime,'_read',return_value=terminal):
             stage=Path(folder)/binding.attempt_id;stage.mkdir()
             self.assertEqual(worker.handle(request).status,'PASS')
             intent=stage/('rearm-'+'7'*64+'-start-intent.json');intent.touch()
             self.assertEqual(worker.handle(request).status,'UNKNOWN')
+            intent.unlink()
+            intent=stage/('unpublished-'+'7'*64+'-start-intent.json');intent.touch()
+            self.assertEqual(worker.handle(request).status,'UNKNOWN')
             intent.unlink();contracts['book-memo']['started_at']='changed'
             self.assertEqual(worker.handle(request).status,'UNKNOWN')
+
+
+
+
+class ContinuationDerivationTests(unittest.TestCase):
+    def test_only_exact_raw_terminal_bytes_and_bounded_typed_revision_derive(self):
+        from ha_control.initial_unpublished import derive_predecessor
+        plan,files=UnpublishedSealTests().continuation_fixture()
+        raw=files['unpublished-predecessor-state.json'];pin=hashlib.sha256(raw).hexdigest()
+        self.assertEqual(derive_predecessor(raw,pin,published=False),(9,10,11))
+        for wrong in (None,8,True,b'{}',raw+b' '):
+            with self.subTest(wrong=type(wrong)),self.assertRaises(TransitionBlocked):derive_predecessor(wrong,pin,published=False)
+        for field,wrong in (('revision',True),('revision',9),('revision',2147483646),('revision',4),
+            ('sequence',2),('sequence',True),('phase','serving'),('phase','local_revoke_observed'),
+            ('generation',2),('failure_code','legacy_pipe_response_timeout_refresh'),('kind','arbitrary')):
+            prior=json.loads(raw);prior[field]=wrong;bad=json.dumps(prior).encode()
+            with self.subTest(field=field,wrong=wrong),self.assertRaises(TransitionBlocked):
+                derive_predecessor(bad,hashlib.sha256(bad).hexdigest(),published=False)
+        duplicate=raw[:-1]+b',"revision":8}'
+        with self.assertRaises(TransitionBlocked):derive_predecessor(duplicate,hashlib.sha256(duplicate).hexdigest(),published=False)
+
+    def test_published_terminal_can_derive_postboot_but_cannot_be_unpublished_adoption(self):
+        from ha_control.initial_unpublished import derive_predecessor
+        _,files=UnpublishedSealTests().continuation_fixture(10)
+        prior=json.loads(files['unpublished-predecessor-state.json']);prior['sequence']=12
+        raw=json.dumps(prior).encode();pin=hashlib.sha256(raw).hexdigest()
+        self.assertEqual(derive_predecessor(raw,pin,published=True),(11,12,13))
+        with self.assertRaises(TransitionBlocked):derive_predecessor(raw,pin,published=False)
+
+    def test_service_terminal_journal_uses_same_derived_revision_as_the_open_class(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from tempfile import TemporaryDirectory
+        from unittest.mock import MagicMock
+        from ha_control import initial_lease_service as service
+        plan,files=UnpublishedSealTests().continuation_fixture(8)
+        raw=files['unpublished-predecessor-state.json'];prior=json.loads(raw)
+        plan['cluster']='fixture'
+        admission=SimpleNamespace(assert_held=MagicMock(return_value=True),publish=MagicMock())
+        @contextmanager
+        def admitted(*args):yield admission
+        observer=SimpleNamespace(assert_intent=MagicMock(),recovery_admission=admitted)
+        lease=SimpleNamespace(proof_started=service.time.monotonic(),open=MagicMock(return_value='f'*64),
+            renew=MagicMock(side_effect=TransitionBlocked('synthetic_stop')),revoke=MagicMock(return_value=True))
+        handoff={key:prior[key] for key in ('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')}
+        handoff['controller_plan_sha256']='a'*64
+        with TemporaryDirectory() as folder:
+            backend=SimpleNamespace(plan=plan,plan_path=Path(folder)/'plan.json',fence_adapter=SimpleNamespace(
+                _unpublished_verified=plan['initial_unpublished_recovery'],_predecessor_terminal=raw))
+            journal=Path(folder)/'journal/controller-state.json';journal.parent.mkdir()
+            with patch.object(service,'_recovery_predecessor',return_value=prior['recovery']), \
+                 patch.object(service,'InitialPgLeaseUnpublishedRecovery',return_value=lease),patch.object(service.time,'sleep'):
+                with self.assertRaisesRegex(TransitionBlocked,'synthetic_stop'):service._serve(backend,journal,observer,handoff,recovering=True)
+            record=json.loads(journal.read_bytes())
+            self.assertEqual((record['revision'],record['kind'],record['sequence']),(10,'initial-wsl-cutover-unpublished',1))
+            admission.publish.assert_called_once();lease.revoke.assert_called_once()
+
+    def test_sdk_publication_and_continuity_require_actual_hash_bound_terminal_bytes(self):
+        from types import SimpleNamespace
+        from ha_control import native_windows_activation as native
+        plan,files=UnpublishedSealTests().continuation_fixture(8)
+        value=plan['initial_unpublished_recovery'];raw=files['unpublished-predecessor-state.json'];prior=json.loads(raw)
+        custody=SimpleNamespace(binding=SimpleNamespace(plan_sha256=prior['legacy_plan_sha256'],attempt_id=prior['attempt_id']),live_sha256='3'*64)
+        lease=native.WindowsActivationLease(custody,r'C:\fixture\binding.json',
+            {'first_write_proof_sha256':'4'*64,'service_instance_sha256':'5'*64})
+        recovery=prior['recovery']
+        heartbeat={'windows_generation':1,'windows_generation_sha256':'a'*64,'live_lease_sha256':'b'*64}
+        with patch.object(native,'fixed_script',return_value='fixture') as script:
+            self.assertRegex(lease.verify_recovery_publication(lambda *args:heartbeat,recovery,native.time.monotonic()+2,
+                observe_pair=lambda **kwargs:'c'*64,assert_guard=lambda:None,unpublished=value,predecessor_terminal=raw),r'^[a-f0-9]{64}$')
+            self.assertEqual(script.call_args.args[2]['UnpublishedPredecessorTerminalSha256'],hashlib.sha256(raw).hexdigest())
+            for method in (lease.verify_recovery_publication,lease.verify_recovery_continuity):
+                for bad in (None,8,raw+b' '):
+                    with self.subTest(method=method.__name__,bad=type(bad)),self.assertRaises(TransitionBlocked):
+                        method(lambda *args:heartbeat,recovery,native.time.monotonic()+2,observe_pair=lambda **kwargs:'c'*64,
+                            assert_guard=lambda:None,unpublished=value,predecessor_terminal=bad)
+
+    def test_guest_local_database_requires_the_raw_derived_open_stamp(self):
+        from types import SimpleNamespace
+        from datetime import datetime,timezone
+        from ha_control import native_guest_live as live
+        _,files=UnpublishedSealTests().continuation_fixture(8)
+        raw=files['unpublished-predecessor-state.json'];pin=hashlib.sha256(raw).hexdigest()
+        pins=SimpleNamespace(cluster='test',system_id='123',release={'source_commit':'a'*40},plan_sha256='b'*64)
+        pg=SimpleNamespace(peer_ipv4='peer')
+        now=datetime.now(timezone.utc)
+        observed=dict(identity=['postgres','ha','ha_A',False,'123','on','remote_apply','FIRST1(ha_b)','on','on',1],
+            authority=['test',1,10,'A','B',1,['A'],'A','AS',True,True],
+            lease_clock=[now.isoformat(),(now+timedelta(seconds=4)).isoformat()],
+            binding=[['test','123','a'*40,'b'*64,live.runtime.config.BROKER_ROLE]],peers=[['peer','0/10']])
+        with patch.object(live.restore,'_pg',return_value=observed):
+            live._lease(pins,pg,recovery_deadline=live.time.monotonic()+2,unpublished=True,
+                predecessor_terminal=raw,predecessor_sha256=pin)
+            for wrong in (8,9,11):
+                observed['authority'][2]=wrong
+                with self.assertRaises(TransitionBlocked):live._lease(pins,pg,recovery_deadline=live.time.monotonic()+2,
+                    unpublished=True,predecessor_terminal=raw,predecessor_sha256=pin)
+            observed['authority'][2]=10
+            with self.assertRaises(TransitionBlocked):live._lease(pins,pg,recovery_deadline=live.time.monotonic()+2,
+                unpublished=True,predecessor_terminal=raw+b' ',predecessor_sha256=pin)
+
+    def test_before_save_uses_current_published_terminal_and_both_independent_copies(self):
+        from types import SimpleNamespace
+        from ha_control import native_guest_postboot as guest,native_stdio_bridge as wire
+        _,files=UnpublishedSealTests().continuation_fixture(10)
+        prior=json.loads(files['unpublished-predecessor-state.json']);prior['sequence']=12
+        raw=json.dumps(prior).encode();pin=hashlib.sha256(raw).hexdigest()
+        args={'predecessor_plan_sha256':prior['controller_plan_sha256'],
+            'predecessor_unpublished_attempt_id':prior['unpublished']['attempt_id'],
+            'recovery_attempt_id':prior['recovery']['attempt_id']}
+        binding=wire.Binding(prior['legacy_plan_sha256'],prior['attempt_id'],'3'*64,'4'*64,'5'*64)
+        request=SimpleNamespace(args=args,binding=binding)
+        with patch.object(guest.worker.runtime,'_read',return_value=raw) as read:
+            self.assertEqual(guest.closed_revision(request),11)
+            self.assertEqual([call.args[0].name for call in read.call_args_list],[
+                'predecessor-plan-'+prior['controller_plan_sha256']+'.json','predecessor-terminal-'+pin+'.json'])
+            self.assertTrue(all(call.args[1:]==(0,{0o400}) for call in read.call_args_list))
+        for field in ('predecessor_plan_sha256','predecessor_unpublished_attempt_id'):
+            changed=SimpleNamespace(args=args|{field:'f'*64},binding=binding)
+            with patch.object(guest.worker.runtime,'_read',return_value=raw),self.assertRaises(TransitionBlocked):guest.closed_revision(changed)
+        with patch.object(guest.worker.runtime,'_read',side_effect=(raw,raw+b' ')),self.assertRaises(TransitionBlocked):guest.closed_revision(request)
 
 if __name__=='__main__':unittest.main()

@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import partial
 import http.client
+import json
 import math
 import os
 from pathlib import Path
@@ -72,7 +73,7 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False, unpublished=False, postboot_after_unpublished=False):
+def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False, unpublished=False, postboot_after_unpublished=False, predecessor_terminal=None, predecessor_sha256=None):
     _need(sum(bool(v) for v in (rearmed,postboot,unpublished,postboot_after_unpublished))<=1
           and (not (unpublished or postboot_after_unpublished) or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
     _need(not (rearmed and postboot) and (not postboot or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
@@ -80,7 +81,15 @@ def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=F
     _need(recovery_deadline is None or generation is None, "guest_live_pg_binding_unconfirmed")
     if generation is None:
         primary, partner, epoch, timeline = "A", "B", 1, 1
-        revision = 10 if postboot_after_unpublished else (8 if postboot or unpublished else (6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2)))
+        if postboot or unpublished or postboot_after_unpublished:
+            from .initial_unpublished import derive_predecessor
+            revision=derive_predecessor(predecessor_terminal,predecessor_sha256,published=not unpublished)[1]
+            if not unpublished:
+                _need((json.loads(predecessor_terminal)['kind']=='initial-wsl-cutover-unpublished')==postboot_after_unpublished,
+                    'guest_live_pg_binding_unconfirmed')
+        else:
+            _need(predecessor_terminal is None and predecessor_sha256 is None,"guest_live_pg_binding_unconfirmed")
+            revision=6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2)
     else:
         generation.validate()
         primary, partner = generation.primary, generation.partner
@@ -169,9 +178,27 @@ def observe_rearmed_a_lease(pins, postgres, *, recovery_attempt_id, rearm, rearm
         'challenge_sha256': challenge_sha256, 'postgres': observed}))
 
 
+def _predecessor_terminal(envelope,pins,recovery_attempt_id):
+    """Existing operator stages two independent ROOT-owned files, never links."""
+    from .native_guest_worker import ROOT
+    pin=envelope['predecessor_terminal_sha256']
+    _need(runtime._match(runtime.SHA,pin),'guest_live_pg_binding_unconfirmed')
+    path=ROOT/('predecessor-terminal-'+pin+'.json')
+    raw=runtime._read(path,0,{0o400},limit=65536)
+    from .initial_unpublished import derive_predecessor
+    derive_predecessor(raw,pin,published='predecessor_binding_sha256' in envelope)
+    prior=json.loads(raw)
+    _need(prior['recovery']['attempt_id']==recovery_attempt_id
+          and prior['attempt_id']==pins.attempt_id and prior['legacy_plan_sha256']==pins.plan_sha256
+          and ('predecessor_plan_sha256' not in envelope
+               or prior['controller_plan_sha256']==envelope['predecessor_plan_sha256']),
+          'guest_live_pg_binding_unconfirmed')
+    return raw
+
+
 def observe_unpublished_a_lease(pins, postgres, *, recovery_attempt_id, unpublished, unpublished_plan_sha256,
                             challenge_sha256, deadline, minimum_remaining_seconds=1):
-    """Read exact revision eight after the separately authenticated native unpublished proof."""
+    """Read the raw-terminal-derived stamp after native unpublished proof."""
     from .initial_unpublished import scope as unpublished_scope
     checked = unpublished_scope({'initial_unpublished_recovery': unpublished,
                            'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
@@ -189,7 +216,8 @@ def observe_unpublished_a_lease(pins, postgres, *, recovery_attempt_id, unpublis
           and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
           and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
-    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, unpublished=True)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, unpublished=True,
+        predecessor_terminal=_predecessor_terminal(checked,pins,recovery_attempt_id),predecessor_sha256=checked['predecessor_terminal_sha256'])
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
           and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
           and time.monotonic() < deadline, error)
@@ -200,7 +228,7 @@ def observe_unpublished_a_lease(pins, postgres, *, recovery_attempt_id, unpublis
 
 def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, postboot_plan_sha256,
                             challenge_sha256, deadline, minimum_remaining_seconds=1):
-    """Read exact revision eight after the separately authenticated native postboot proof."""
+    """Read the raw-terminal-derived stamp after native postboot proof."""
     from .initial_postboot import scope
     checked = scope({'initial_recovery_postboot': postboot,
                            'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
@@ -221,7 +249,8 @@ def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, p
     from .initial_postboot import after_unpublished
     retry_predecessor=after_unpublished(checked)
     observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline,
-        postboot=not retry_predecessor,postboot_after_unpublished=retry_predecessor)
+        postboot=not retry_predecessor,postboot_after_unpublished=retry_predecessor,
+        predecessor_terminal=_predecessor_terminal(checked,pins,recovery_attempt_id),predecessor_sha256=checked['predecessor_terminal_sha256'])
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
           and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
           and time.monotonic() < deadline, error)

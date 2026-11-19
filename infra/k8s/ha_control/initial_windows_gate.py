@@ -476,12 +476,14 @@ class InitialWindowsGate:
                     verified = _validate(plan_raw, approval_raw, settings, sid, datetime.now(timezone.utc))
                 except (OSError, ValueError, TypeError, KeyError, RecursionError, AttributeError):
                     _need(False)
+                self._predecessor_terminal=None
                 self._unpublished_verified=None
                 if 'initial_unpublished_recovery' in verified[0]:
                     from .initial_unpublished import FILES as UNPUBLISHED_FILES, validate_seal as validate_unpublished
                     snapshots={name:stack.enter_context(native.protected_file(
                         self.plan_path.with_name(name),1048576,private_reader=sid)) for name in UNPUBLISHED_FILES}
                     self._unpublished_verified=validate_unpublished(verified[0],verified[1],snapshots)
+                    self._predecessor_terminal=snapshots[UNPUBLISHED_FILES[0]]
                 self._postboot_stopped_sha256 = None
                 self._postboot_verified = None
                 if 'initial_recovery_postboot' in verified[0]:
@@ -489,6 +491,7 @@ class InitialWindowsGate:
                     snapshots = {name: stack.enter_context(native.protected_file(
                         self.plan_path.with_name(name), 65536, private_reader=sid)) for name in FILES}
                     self._postboot_verified = validate_seal(verified[0], verified[1], snapshots)
+                    self._predecessor_terminal=snapshots[FILES[0]]
                     self._postboot_stopped_sha256 = _decode(snapshots['postboot-resume-evidence.json'])['postboot_stopped_receipt_sha256']
                 self._rearm_verified = None
                 if 'initial_recovery_rearm' in verified[0]:
@@ -502,6 +505,7 @@ class InitialWindowsGate:
                 try:
                     yield
                 finally:
+                    self._predecessor_terminal=None
                     self._unpublished_verified=None
                     self._postboot_stopped_sha256 = None
                     self._postboot_verified = None
