@@ -393,10 +393,20 @@ def start_initial_recovery(request, assert_windows_current):
                   (("rearm-" + args["rearm"]["attempt_id"]) if rearming else ("recovery-" + args["recovery_attempt_id"]))) + "-start-"
         intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                  for name in ("intent", "progress", "done"))
+        resume = None
+        if unpublished:
+            from . import initial_app_resume
+            if os.path.lexists(initial_app_resume.path(request)):
+                resume = initial_app_resume.load(request, raw, hold, prepared, active)
+                prefix = resume[2]
+                intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
+                                                         for name in ("intent", "progress", "done"))
         _need(not any(os.path.lexists(path) for path in (intent_path, progress_path, done_path)), error)
         containers = hold["containers"]
         _need(set(containers) == set(RECOVERY_START_ORDER), error)
         baseline = (hold["container_contracts"], args["protected_inventory_sha256"])
+        if resume is not None:
+            baseline = (resume[1]['container_contracts'], resume[1]['protected_inventory_sha256'])
         if postboot:
             from .native_guest_postboot import observe
             stopped = observe(request,args['postboot']['attempt_id'],args['postboot_stopped_receipt_sha256'])
@@ -412,6 +422,8 @@ def start_initial_recovery(request, assert_windows_current):
         started = set()
 
         def unchanged():
+            if resume is not None:
+                initial_app_resume.preserved(request, resume[0], resume[1], hold, active)
             _need(_read_initial_recovery_hold(request)[:2] == (raw, hold), error)
             _assert_car_route_blocked(request, raw, prepared, active)
             _need(all(_digest(runtime._read(path, 0, {0o444})) == pin
@@ -420,6 +432,9 @@ def start_initial_recovery(request, assert_windows_current):
                                                       None, baseline)
             _need(all(contract[role]["started_at"] != baseline[0][role]["started_at"]
                       for role in started), error)
+            if resume is not None:
+                _need(all(contract[role]["started_at"] == baseline[0][role]["started_at"]
+                          for role in containers if role not in started), error)
             current = runtime._inventory()
             _need(all(current[value["container_id"]]["State"]["Running"] is (role in started)
                       for role, value in containers.items()), error)
@@ -428,6 +443,8 @@ def start_initial_recovery(request, assert_windows_current):
             deadline = time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS
             unchanged()
             challenge_scope = {"request": _scope(request), "hold_sha256": args["hold_sha256"], "boundary": boundary}
+            if resume is not None:
+                challenge_scope['resume_authorization_sha256'] = _digest(resume[0])
             if unpublished:
                 challenge_scope.update(unpublished=args["unpublished"],unpublished_plan_sha256=args["unpublished_plan_sha256"])
             if postboot:
@@ -455,9 +472,12 @@ def start_initial_recovery(request, assert_windows_current):
             _need(time.monotonic() < deadline, error)
 
         proof, deadline = check("recovery_start_intent")
-        intent = _bytes({"schema_version": 1, "status": "INTENT", **_scope(request), "args": args,
+        intent_record = {"schema_version": 1, "status": "INTENT", **_scope(request), "args": args,
                          "containers": containers, "authority_files": active["authority_files"],
-                         "proof": proof, "automatic_retry_permitted": False})
+                         "proof": proof, "automatic_retry_permitted": False}
+        if resume is not None:
+            intent_record["resume_authorization_sha256"] = _digest(resume[0])
+        intent = _bytes(intent_record)
         fresh(deadline)
         runtime._write(intent_path, intent)
         context, leaf = activation._tls(prepared)
