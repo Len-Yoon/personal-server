@@ -1,4 +1,7 @@
+import hashlib
+import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -1284,6 +1287,61 @@ class WindowsBootstrapTests(unittest.TestCase):
             runtime.index("resolve_youtube_memo_caddy_upstream"),
             runtime.index("up -d --build --no-deps caddy"),
         )
+
+
+class WindowsVmBootTests(unittest.TestCase):
+    def test_boot_only_starts_enrolled_guests_in_standby_first_order(self):
+        pwsh = shutil.which('pwsh')
+        self.assertIsNotNone(pwsh, 'PowerShell is required for the Windows boot script contract')
+        startup = ROOT / 'infra/k8s/ha_control/windows-vm-boot.ps1'
+        test_script = r'''
+param([string]$Startup, [string]$PinA, [string]$PinB)
+$ErrorActionPreference = 'Stop'
+$first = [guid]'00000000-0000-0000-0000-000000000001'
+$second = [guid]'00000000-0000-0000-0000-000000000002'
+$unrelated = [guid]'00000000-0000-0000-0000-000000000003'
+$inventory = @(
+    [pscustomobject]@{Id=$first;Generation=2;AutomaticStartAction='Nothing';AutomaticStopAction='TurnOff';State='Off'}
+    [pscustomobject]@{Id=$second;Generation=2;AutomaticStartAction='Nothing';AutomaticStopAction='TurnOff';State='Saved'}
+    [pscustomobject]@{Id=$unrelated;Generation=2;AutomaticStartAction='Nothing';AutomaticStopAction='TurnOff';State='Off'}
+)
+$calls = [Collections.Generic.List[string]]::new()
+function Get-VM {
+    [CmdletBinding()] param([guid]$Id)
+    if ($PSBoundParameters.ContainsKey('Id')) { $inventory | Where-Object Id -eq $Id }
+    else { $inventory }
+}
+function Start-VM {
+    [CmdletBinding()] param($VM)
+    $calls.Add($VM.Id.ToString())
+    $VM.State = 'Running'
+}
+$observed = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB | ConvertFrom-Json
+if ($observed.mode -ne 'observe' -or $calls.Count -ne 0) { throw 'observe_must_not_start' }
+try {
+    & $Startup -VmAIdSha256 $PinA -VmBIdSha256 ('0'*64) -StartGuests | Out-Null
+    throw 'missing_guest_was_accepted'
+} catch {
+    if ($_.Exception.Message -ne 'n100_boot_vm_identity_unverified') { throw }
+}
+if ($calls.Count -ne 0) { throw 'started_before_validating_both_guests' }
+$result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | ConvertFrom-Json
+& $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | Out-Null
+@{calls=@($calls.ToArray()); unrelated=$inventory[2].State; result=$result}|ConvertTo-Json -Depth 4 -Compress
+'''
+        pins = [hashlib.sha256(f'00000000-0000-0000-0000-{i:012d}'.encode()).hexdigest()
+                for i in (1, 2)]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / 'test-vm-boot.ps1'
+            fixture.write_text(test_script)
+            result = subprocess.run([pwsh, '-NoProfile', '-NonInteractive', '-File', str(fixture),
+                                     str(startup), *pins], capture_output=True, text=True, timeout=25)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads(result.stdout)
+        self.assertEqual([x[-1] for x in state['calls']], ['2', '1'])
+        self.assertEqual(state['unrelated'], 'Off')
+        self.assertEqual(state['result'], {'a':'Running','b':'Running','mode':'guests_started',
+                                          'database_authority':'separate_admission_required'})
 
 
 if __name__ == "__main__":
