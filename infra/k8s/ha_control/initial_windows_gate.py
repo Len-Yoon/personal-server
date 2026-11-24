@@ -491,6 +491,10 @@ class InitialWindowsGate:
                     snapshots = {name: stack.enter_context(native.protected_file(
                         self.plan_path.with_name(name), 65536, private_reader=sid)) for name in files_for(verified[0])}
                     self._postboot_verified = validate_seal(verified[0], verified[1], snapshots)
+                    if 'successor_service_image_sha256' in self._postboot_verified:
+                        image_path_sha256 = _digest(f'"{host}"'.encode('utf-8'))
+                        _need(settings['host_sha256'] == self._postboot_verified['successor_service_image_sha256']
+                              and image_path_sha256 == self._postboot_verified['successor_service_image_path_sha256'])
                     self._predecessor_terminal=snapshots[FILES[0]]
                     self._postboot_stopped_sha256 = _decode(snapshots['postboot-resume-evidence.json'])['postboot_stopped_receipt_sha256']
                 self._rearm_verified = None

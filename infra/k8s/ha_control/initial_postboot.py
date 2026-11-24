@@ -13,6 +13,8 @@ SAMEBOOT_KIND='published-postboot-sameboot-v1'
 RESUME_KIND='initial-wsl-cutover-postboot-resume'
 SAMEBOOT_FIELDS={'predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'}
 CARRYOVER_FIELD = 'carryover_receipt_sha256'
+TRANSITION_FIELDS = {'previous_service_image_sha256', 'successor_service_image_sha256',
+                     'successor_service_image_path_sha256'}
 
 def sameboot(value):
     return type(value) is dict and value.get('predecessor_kind')==SAMEBOOT_KIND
@@ -41,12 +43,15 @@ def scope(plan):
     value = plan.get('initial_recovery_postboot')
     need(not {'initial_recovery_rearm','initial_unpublished_recovery'} & plan.keys() and type(value) is dict
          and (set(value)==FIELDS or (set(value)==FIELDS|{'predecessor_kind'} and after_unpublished(value))
-              or (set(value) in (FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS, FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS|{CARRYOVER_FIELD}) and sameboot(value)))
+              or (set(value) in (FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS, FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS|{CARRYOVER_FIELD},
+                                  FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS|{CARRYOVER_FIELD}|TRANSITION_FIELDS) and sameboot(value)))
          and type(value['schema_version']) is int and value['schema_version'] == 1
          and value['closure_mode'] == 'windows-offline-v1'
          and all(type(value[key]) is str and SHA.fullmatch(value[key])
                  for key in (FIELDS-{'schema_version','closure_mode'}) | (SAMEBOOT_FIELDS if sameboot(value) else set()))
          and (CARRYOVER_FIELD not in value or (type(value[CARRYOVER_FIELD]) is str and SHA.fullmatch(value[CARRYOVER_FIELD])))
+         and all(type(value[key]) is str and SHA.fullmatch(value[key]) for key in TRANSITION_FIELDS & value.keys())
+         and (not TRANSITION_FIELDS & value.keys() or value['previous_service_image_sha256']!=value['successor_service_image_sha256'])
          and (not sameboot(value) or value['attempt_id']!=value['stopped_attempt_id'])
          and type(plan.get('initial_cutover_recovery')) is dict
          and value['attempt_id'] not in {plan['initial_cutover_recovery'].get('attempt_id'),
@@ -242,10 +247,16 @@ def _validate_sameboot(plan,plan_pin,files,value):
     need(value['stopped_attempt_id']==stopped_attempt(previous)
          and (not sameboot(previous) or value['stopped_receipt_sha256']==previous['stopped_receipt_sha256']))
     identity=plan['windows_enforced'];old_identity=old['windows_enforced']
+    transition=bool(TRANSITION_FIELDS & value.keys())
+    need((transition and value['previous_service_image_sha256']==old_identity['service_image_sha256']
+          and value['successor_service_image_sha256']==identity['service_image_sha256']
+          and value['successor_service_image_path_sha256']==plan['initial_service_start']['service_image_path_sha256']
+          and value['successor_service_image_path_sha256']!=old['initial_service_start']['service_image_path_sha256'])
+         or (not transition and identity['service_image_sha256']==old_identity['service_image_sha256']))
     boot=plan['windows_initial_observer']['windows_boot_sha256']
     need(type(boot) is str and SHA.fullmatch(boot) and boot==value['previous_windows_boot_sha256']
          and old['windows_initial_observer']['windows_boot_sha256']==boot
-         and all(identity[key]==old_identity[key] for key in ('service_name','service_sid','service_image_sha256'))
+         and all(identity[key]==old_identity[key] for key in ('service_name','service_sid'))
          and old['windows_recovery_observers']['hold_sha256']==plan['windows_recovery_observers']['hold_sha256']
          and old['windows_recovery_observers']['guest_boot_sha256']==plan['windows_recovery_observers']['guest_boot_sha256'])
     keys={'attempt_id','controller_plan_sha256','first_write_proof_sha256','legacy_plan_sha256',
@@ -254,7 +265,7 @@ def _validate_sameboot(plan,plan_pin,files,value):
          and binding['controller_plan_sha256']==settings['plan_sha256']==value['predecessor_plan_sha256']
          and binding['legacy_plan_sha256']==prior['legacy_plan_sha256'] and binding['attempt_id']==prior['attempt_id']
          and binding['service_name']==settings['service_name']==identity['service_name']
-         and settings['service_sid']==identity['service_sid'] and settings['host_sha256']==identity['service_image_sha256']
+         and settings['service_sid']==identity['service_sid'] and settings['host_sha256']==old_identity['service_image_sha256']
          and type(binding['service_pid']) is int and binding['service_pid']>0
          and type(binding['service_created_ticks']) is str and re.fullmatch('[1-9][0-9]{0,19}',binding['service_created_ticks'])
          and all(type(binding[key]) is str and SHA.fullmatch(binding[key]) for key in (

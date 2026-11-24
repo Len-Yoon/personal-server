@@ -29,6 +29,9 @@ param(
     [string]$PostbootStoppedAttemptId,
     [string]$PostbootStoppedReceiptSha256,
     [string]$PostbootCarryoverReceiptSha256,
+    [string]$PostbootPreviousServiceImageSha256,
+    [string]$PostbootSuccessorServiceImageSha256,
+    [string]$PostbootSuccessorServiceImagePathSha256,
     [string]$WriterReleaseHostSha256,
     [string]$ReleasedWriterTerminalSha256,
     [switch]$RecoveryContinuity,
@@ -130,6 +133,12 @@ namespace N100InitialPredecessorJsonV1 {
         }
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
         if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
+        $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
+        if(@($transitionKeys|Where-Object {$_ -cin $scope.PSObject.Properties.Name}).Count){
+            if(-not $same -or 'carryover_receipt_sha256' -cnotin $scope.PSObject.Properties.Name -or
+               $scope.previous_service_image_sha256 -ceq $scope.successor_service_image_sha256){throw $bad}
+            $scopeKeys+=$transitionKeys
+        }
         $expectedKind=if($same){'initial-wsl-cutover-postboot-resume'}elseif($tag){'initial-wsl-cutover-postboot-unpublished'}else{'initial-wsl-cutover-postboot'}
         if($v.kind -cne $expectedKind){throw $bad}
     }
@@ -462,6 +471,14 @@ try {
     if($postbootTagged -and (-not $postboot -or -not ($postbootUnpublished -or $postbootResume))){throw 'live_authority_postboot_scope'}
     $resumePins=@($PostbootPredecessorPlanSha256,$PostbootStoppedAttemptId,$PostbootStoppedReceiptSha256)
     $hasCarryover=$PSBoundParameters.ContainsKey('PostbootCarryoverReceiptSha256')
+    $imageParameters=@('PostbootPreviousServiceImageSha256','PostbootSuccessorServiceImageSha256','PostbootSuccessorServiceImagePathSha256')
+    $imageSupplied=@($imageParameters|Where-Object {$PSBoundParameters.ContainsKey($_)})
+    $imageTransition=$imageSupplied.Count -ne 0
+    if($imageTransition -and (-not $postbootResume -or -not $hasCarryover -or $imageSupplied.Count -ne 3 -or
+       @($imageSupplied|Where-Object {$PSBoundParameters[$_] -cnotmatch $pattern}).Count -ne 0 -or
+       $PostbootPreviousServiceImageSha256 -ceq $PostbootSuccessorServiceImageSha256)){
+        throw 'live_authority_postboot_scope'
+    }
     if($hasCarryover -and (-not $postbootResume -or $PostbootCarryoverReceiptSha256 -cnotmatch $pattern)){
         throw 'live_authority_postboot_scope'
     }
@@ -553,6 +570,10 @@ try {
     }
     # Bind directly to the validated service key instead of enumerating Win32_Service.
     $service = Find-BoundService $plan
+    if($imageTransition -and ($plan.service_image_path_sha256 -cne $PostbootSuccessorServiceImagePathSha256 -or
+       (Get-FileHash -LiteralPath $service.PathName.Trim('"') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $PostbootSuccessorServiceImageSha256)){
+        throw 'live_authority_postboot_scope'
+    }
     if ($cooperativeRelease) {
         $hostPath=$service.PathName.Trim('"')
         if($service.StartName -ine ('NT SERVICE\'+$plan.service_name) -or $service.ServiceType -cne 'Own Process' -or
@@ -602,7 +623,8 @@ try {
         }
         if($postboot -or $unpublished -or $rearming){
             $null=Get-InitialPredecessorNumbers ([Text.UTF8Encoding]::new($false,$true).GetBytes($terminal.raw)) $ReleasedWriterTerminalSha256 $true
-            if($postboot -and $hasCarryover -ne ('carryover_receipt_sha256' -cin $record.postboot.PSObject.Properties.Name)){
+            if($postboot -and (($hasCarryover -ne ('carryover_receipt_sha256' -cin $record.postboot.PSObject.Properties.Name)) -or
+               ($imageTransition -ne ('previous_service_image_sha256' -cin $record.postboot.PSObject.Properties.Name)))){
                 throw 'writer_release_terminal_unconfirmed'
             }
             $scopeField=if($postboot){'postboot'}elseif($unpublished){'unpublished'}else{'rearm'}
@@ -763,6 +785,11 @@ try {
             if($postbootTagged){$expected.predecessor_kind=$PostbootPredecessorKind}
             if($postbootResume){$expected.predecessor_plan_sha256=$PostbootPredecessorPlanSha256;$expected.stopped_attempt_id=$PostbootStoppedAttemptId;$expected.stopped_receipt_sha256=$PostbootStoppedReceiptSha256}
             if($hasCarryover){$expected.carryover_receipt_sha256=$PostbootCarryoverReceiptSha256}
+            if($imageTransition){
+                $expected.previous_service_image_sha256=$PostbootPreviousServiceImageSha256
+                $expected.successor_service_image_sha256=$PostbootSuccessorServiceImageSha256
+                $expected.successor_service_image_path_sha256=$PostbootSuccessorServiceImagePathSha256
+            }
             $names=@($record.postboot.PSObject.Properties.Name|Sort-Object -CaseSensitive)
             if(($names -join ',') -cne (@($expected.Keys|Sort-Object -CaseSensitive) -join ',') -or
                ($record.postboot.schema_version -isnot [int] -and $record.postboot.schema_version -isnot [long]) -or $record.postboot.schema_version -ne 1){throw 'live_authority_postboot_scope'}

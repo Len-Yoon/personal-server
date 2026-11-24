@@ -13,6 +13,8 @@ param(
     [string]$ExpectedActivationIntentSha256,
     [string]$RecoveryAttemptId,
     [string]$RecoveryReservationSha256,
+    [switch]$ArmPostbootHost,
+    [string]$ClosedPairProofSha256,
     [switch]$StartTransition,
     [switch]$VerifyPreparedTransition,
     [switch]$PublishTransitionArgs,
@@ -82,10 +84,15 @@ function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$Res
     if($receipt.ownership_receipt_sha256 -cnotmatch $hashPattern -or
         $receipt.service_config_sha256 -cnotmatch $hashPattern){throw 'initial_service_recovery_scope'}
     $ownership=Read-PinnedJson (Join-Path $root 'namespace-service-ownership.json') $receipt.ownership_receipt_sha256
+    $reservationImage=$Plan.windows_enforced.service_image_sha256
+    if($postboot -and 'previous_service_image_sha256' -cin $Plan.initial_recovery_postboot.PSObject.Properties.Name){
+        Assert-PostbootEnvelope $Plan.initial_recovery_postboot
+        $reservationImage=$Plan.initial_recovery_postboot.previous_service_image_sha256
+    }
     if($ownership.format -cne 'ha-owned-recovery-service-v1' -or
         $ownership.installation_id -cne $Plan.installation_id -or $ownership.recovery_attempt_id -cne $Attempt -or
         $ownership.service_name -cne $Name -or $ownership.service_sid -cne $Plan.windows_enforced.service_sid -or
-        $ownership.service_image_sha256 -cne $Plan.windows_enforced.service_image_sha256 -or
+        $ownership.service_image_sha256 -cne $reservationImage -or
         $ownership.service_config_sha256 -cne $receipt.service_config_sha256 -or
         $ownership.predecessor_service_sha256 -cne $recovery.predecessor_service_sha256 -or
         $ownership.predecessor_terminal_sha256 -cne $recovery.predecessor_terminal_sha256 -or
@@ -295,6 +302,12 @@ namespace N100InitialPredecessorJsonV1 {
         }
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
         if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
+        $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
+        if($same -and @($transitionKeys|Where-Object {$_ -cin $scope.PSObject.Properties.Name}).Count -gt 0){
+            if('carryover_receipt_sha256' -cnotin $scope.PSObject.Properties.Name -or
+               $scope.previous_service_image_sha256 -ceq $scope.successor_service_image_sha256){throw $bad}
+            $scopeKeys+=$transitionKeys
+        }
         $expectedKind=if($same){'initial-wsl-cutover-postboot-resume'}elseif($tag){'initial-wsl-cutover-postboot-unpublished'}else{'initial-wsl-cutover-postboot'}
         if($v.kind -cne $expectedKind){throw $bad}
     }
@@ -519,6 +532,13 @@ function Assert-PostbootEnvelope($Postboot){
         if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and 'carryover_receipt_sha256' -cin $Postboot.PSObject.Properties.Name){
             $keys+=@('carryover_receipt_sha256')
         }
+        $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
+        if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and
+           @($transitionKeys|Where-Object {$_ -cin $Postboot.PSObject.Properties.Name}).Count -gt 0){
+            if('carryover_receipt_sha256' -cnotin $Postboot.PSObject.Properties.Name -or
+               $Postboot.previous_service_image_sha256 -ceq $Postboot.successor_service_image_sha256){throw 'initial_service_postboot_scope'}
+            $keys+=$transitionKeys
+        }
         $keys=@($keys|Sort-Object -CaseSensitive)
     }
     if((@($Postboot.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne ($keys -join ',') -or
@@ -599,10 +619,18 @@ function Assert-SamebootPostbootInputs($Plan,[string]$Root,$Terminal,$Binding,$P
        (@($Resume.observed.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'A,B' -or $Resume.observed.A -cne 'Running' -or $Resume.observed.B -cne 'Running'){
         throw 'initial_service_postboot_scope'
     }
-    foreach($key in @('service_name','service_sid','service_image_sha256')){if($old.windows_enforced.$key -cne $Plan.windows_enforced.$key){throw 'initial_service_postboot_scope'}}
+    foreach($key in @('service_name','service_sid')){if($old.windows_enforced.$key -cne $Plan.windows_enforced.$key){throw 'initial_service_postboot_scope'}}
+    $transition='previous_service_image_sha256' -cin $r.PSObject.Properties.Name
+    if($transition){
+        if($r.previous_service_image_sha256 -cne $old.windows_enforced.service_image_sha256 -or
+           $r.successor_service_image_sha256 -cne $Plan.windows_enforced.service_image_sha256 -or
+           $r.successor_service_image_path_sha256 -cne $Plan.initial_service_start.service_image_path_sha256 -or
+           $r.successor_service_image_path_sha256 -ceq $Binding.service_image_path_sha256 -or
+           $Binding.service_image_path_sha256 -cne $old.initial_service_start.service_image_path_sha256){throw 'initial_service_postboot_scope'}
+    }elseif($old.windows_enforced.service_image_sha256 -cne $Plan.windows_enforced.service_image_sha256){throw 'initial_service_postboot_scope'}
 }
 
-function Seal-HaInitialPostbootAcceptance([string]$PlanPath,[string]$PlanSha256){
+function Seal-HaInitialPostbootAcceptance([string]$PlanPath,[string]$PlanSha256,[switch]$AllowExistingSeal){
     $plan=Read-PinnedJson $PlanPath $PlanSha256
     $r=$plan.initial_recovery_postboot
     Assert-PostbootEnvelope $r
@@ -616,7 +644,17 @@ function Seal-HaInitialPostbootAcceptance([string]$PlanPath,[string]$PlanSha256)
        $service.Name -cne $binding.service_name -or $service.StartName -ine ('NT SERVICE\'+$service.Name) -or
        $service.ServiceType -cne 'Own Process' -or $service.DesktopInteract -or
        $service.PathName -cnotmatch '\A"[^"\r\n]+"\z'){throw 'initial_service_rearm_scope'}
-    Assert-Executable $service.PathName.Trim('"') $plan.windows_enforced.service_image_sha256
+    $predecessorImagePin=$plan.windows_enforced.service_image_sha256
+    if('previous_service_image_sha256' -cin $r.PSObject.Properties.Name){
+        $previousPlan=Read-PinnedJson (Join-Path $root 'postboot-predecessor-plan.json') $r.predecessor_plan_sha256
+        if($r.previous_service_image_sha256 -cne $previousPlan.windows_enforced.service_image_sha256 -or
+           $r.successor_service_image_sha256 -cne $plan.windows_enforced.service_image_sha256 -or
+           $r.successor_service_image_path_sha256 -cne $plan.initial_service_start.service_image_path_sha256 -or
+           $r.successor_service_image_path_sha256 -ceq $binding.service_image_path_sha256 -or
+           $binding.service_image_path_sha256 -cne $previousPlan.initial_service_start.service_image_path_sha256){throw 'initial_service_postboot_scope'}
+        $predecessorImagePin=$r.previous_service_image_sha256
+    }
+    Assert-Executable $service.PathName.Trim('"') $predecessorImagePin
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$image=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($service.PathName))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     if($image -cne $binding.service_image_path_sha256){throw 'initial_service_rearm_scope'}
@@ -646,7 +684,7 @@ function Seal-HaInitialPostbootAcceptance([string]$PlanPath,[string]$PlanSha256)
         if($previousArgs.format -cne 'enforced-service-v1' -or $previousArgs.mode -cne 'serve' -or
            $previousArgs.service_name -cne $service.Name -or $previousArgs.service_sid -cne $plan.windows_enforced.service_sid -or
            $previousArgs.plan_sha256 -cne $binding.controller_plan_sha256 -or
-           $previousArgs.host_sha256 -cne $plan.windows_enforced.service_image_sha256){throw 'initial_service_rearm_scope'}
+           $previousArgs.host_sha256 -cne $predecessorImagePin){throw 'initial_service_rearm_scope'}
         $oldRoot=[IO.Path]::GetDirectoryName($previousArgs.plan_path)
         if($binding.state_path -cne (Join-Path $oldRoot 'journal\controller-state.json')){throw 'initial_service_rearm_scope'}
         $actualBinding=Join-Path $oldRoot ('initial-recovery-service-'+$plan.initial_cutover_recovery.attempt_id+'.json')
@@ -687,9 +725,17 @@ function Seal-HaInitialPostbootAcceptance([string]$PlanPath,[string]$PlanSha256)
     $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($plan.windows_enforced.service_sid),'Read','Allow'))
     $path=Join-Path $root 'postboot-acceptance-seal.json'
     $raw=[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $receipt -Depth 8 -Compress))
-    $file=[IO.FileStream]::new($path,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]'WriteData,Synchronize',
-        [IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough,$security)
-    try{$file.Write($raw,0,$raw.Length);$file.Flush($true)}finally{$file.Dispose()}
+    if($AllowExistingSeal -and (Test-Path -LiteralPath $path)){
+        Assert-UnpublishedTcbPath $path
+        $hasher=[Security.Cryptography.SHA256]::Create()
+        try{$expected=[BitConverter]::ToString($hasher.ComputeHash($raw)).Replace('-','').ToLowerInvariant()}
+        finally{$hasher.Dispose()}
+        $null=Read-PinnedJson $path $expected
+    }else{
+        $file=[IO.FileStream]::new($path,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]'WriteData,Synchronize',
+            [IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough,$security)
+        try{$file.Write($raw,0,$raw.Length);$file.Flush($true)}finally{$file.Dispose()}
+    }
     Assert-PostbootSealedPredecessor $plan $root
     }finally{foreach($handle in $held){$handle.Dispose()}}
 }
@@ -1144,6 +1190,95 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     } finally { $commandLock.Dispose() }
 }
 
+function Arm-SamebootSuccessorHost($Plan,$Approval,$Current){
+    $r=$Plan.initial_recovery_postboot
+    Assert-PostbootEnvelope $r
+    if($r.predecessor_kind -cne 'published-postboot-sameboot-v1' -or
+       'successor_service_image_sha256' -cnotin $r.PSObject.Properties.Name -or
+       $ServiceHostSha256 -cne $r.successor_service_image_sha256 -or
+       $Plan.windows_enforced.service_image_sha256 -cne $ServiceHostSha256 -or
+       $Plan.initial_service_start.service_image_path_sha256 -cne $r.successor_service_image_path_sha256 -or
+       $BindingPath -cne $Plan.initial_service_start.binding_path -or
+       $Plan.initial_cutover_handoff.activation_intent_sha256 -cne $ExpectedActivationIntentSha256 -or
+       $Approval.plan_sha256 -cne $PlanSha256 -or $Approval.source_commit -cne $Plan.source_commit -or
+       $Approval.installation_id -cne $Plan.installation_id){throw 'initial_service_host_handoff'}
+
+    $root=[IO.Path]::GetDirectoryName($PlanPath)
+    $journal=Get-Item -LiteralPath (Join-Path $root 'journal') -Force
+    if($PlanPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z' -or
+       $BindingPath -cne (Join-Path $root ('initial-recovery-service-'+$RecoveryAttemptId+'.json')) -or
+       $journal -isnot [IO.DirectoryInfo] -or ($journal.Attributes -band [IO.FileAttributes]::ReparsePoint)){
+        throw 'initial_service_host_handoff'
+    }
+    $pre=Read-PinnedJson (Join-Path $root 'postboot-predecessor-seal.json') $r.predecessor_seal_sha256
+    $resumePath=Join-Path $root 'postboot-resume-evidence.json'
+    Assert-UnpublishedTcbPath $resumePath
+    $resume=Read-PinnedJson $resumePath ((Get-FileHash -LiteralPath $resumePath -Algorithm SHA256).Hash.ToLowerInvariant())
+    if($pre.closed_pair_sha256 -cne $ClosedPairProofSha256 -or $resume.closed_pair_sha256 -cne $ClosedPairProofSha256 -or
+       $resume.plan_sha256 -cne $PlanSha256 -or $resume.closed_revision -ne $pre.closed_revision){
+        throw 'initial_service_host_handoff'
+    }
+
+    $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $serviceRoot=Join-Path $parent ('N100HA_'+$RecoveryAttemptId.Substring(0,24))
+    $hostPath=Join-Path $serviceRoot ('postboot-'+$r.attempt_id+'\host\windows-service-host.exe')
+    Assert-RecoveryStartScope $Plan $Approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath $parent
+    Assert-UnpublishedTcbPath $hostPath
+    Assert-Executable $hostPath $ServiceHostSha256
+    $target='"'+$hostPath+'"'
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try{$pathHash=[BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($target))).Replace('-','').ToLowerInvariant()}
+    finally{$hasher.Dispose()}
+    if($pathHash -cne $r.successor_service_image_path_sha256 -or
+       (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetDirectoryName($hostPath)) 'service.args')) -or
+       (Test-Path -LiteralPath $BindingPath) -or
+       (Test-Path -LiteralPath (Join-Path $root 'journal\controller-state.json'))){
+        throw 'initial_service_host_handoff'
+    }
+
+    Assert-Executable $ScmVerifierPath $Plan.initial_service_start.scm_verifier_sha256
+    $scmSource=[IO.File]::ReadAllBytes($ScmVerifierPath)
+    $hasher=[Security.Cryptography.SHA256]::Create()
+    try{$verifierPin=[BitConverter]::ToString($hasher.ComputeHash($scmSource)).Replace('-','').ToLowerInvariant()}
+    finally{$hasher.Dispose()}
+    if($verifierPin -cne $Plan.initial_service_start.scm_verifier_sha256 -or ('TrustedStoppedV1.Native' -as [type])){
+        throw 'initial_service_scm_verifier_pin'
+    }
+    Add-Type -TypeDefinition ([Text.UTF8Encoding]::new($false,$true).GetString($scmSource)) -ErrorAction Stop
+    $lockPath=Join-Path $serviceRoot ($ServiceName+'.postboot-host.lock')
+    $lockAcl=[Security.AccessControl.FileSecurity]::new()
+    $lockAcl.SetAccessRuleProtection($true,$false)
+    $lockAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach($sid in @('S-1-5-18','S-1-5-32-544')){
+        $lockAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid),'FullControl','Allow'))
+    }
+    $armLock=[IO.FileStream]::new($lockPath,[IO.FileMode]::CreateNew,
+        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize,Delete',[IO.FileShare]::None,4096,
+        [IO.FileOptions]::DeleteOnClose,$lockAcl)
+    $scm=[TrustedStoppedV1.Native]::new()
+    try{
+        [TrustedStoppedV1.Contract]::Inputs($RecoveryAttemptId,$ServiceName,$hostPath)
+        $scm.OpenForRead($ServiceName)
+        $prior=$scm.Read($ServiceName)
+        if($prior.Start -ne 4 -or $prior.Image -cne $Current.PathName){throw 'initial_service_host_handoff'}
+        # Verify the same service shape while accounting for its disabled start mode.
+        $prior.Start=3
+        [TrustedStoppedV1.Contract]::Verify($prior,$ServiceName,$Current.PathName)
+        Seal-HaInitialPostbootAcceptance $PlanPath $PlanSha256 -AllowExistingSeal
+        Assert-RecoveryPredecessorStopped $Plan $root
+        $confirmed=Get-CimInstance Win32_Service -Filter ("Name='"+$ServiceName+"'") -OperationTimeoutSec 5
+        if($confirmed.State -cne 'Stopped' -or $confirmed.StartMode -cne 'Disabled' -or $confirmed.ProcessId -ne 0 -or
+           $confirmed.PathName -cne $Current.PathName -or $confirmed.StartName -cne $Current.StartName){
+            throw 'initial_service_host_handoff'
+        }
+        $changed=Invoke-CimMethod -InputObject $confirmed -MethodName Change -Arguments @{PathName=$target;StartMode='Manual'} -ErrorAction Stop
+        if($changed.ReturnValue -ne 0){throw 'initial_service_host_handoff_unconfirmed'}
+        [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$target)
+    }finally{$scm.Dispose();$armLock.Dispose()}
+    [ordered]@{host_handoff_armed=$true;plan_sha256=$PlanSha256;service_image_path_sha256=$pathHash;service_started=$false}|ConvertTo-Json -Compress
+}
+
 try {
     $rejoin = $RejoinMode -ne ''
     $transition = $rejoin -or $PublishTransitionArgs -or $VerifyPreparedTransition -or $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
@@ -1151,6 +1286,8 @@ try {
     if ($rejoin) { $modes++ }
     $recovering=[bool]$RecoveryAttemptId -or [bool]$RecoveryReservationSha256
     if (-not $Go -or $modes -gt 1 -or
+        ($ArmPostbootHost -and ($transition -or -not $recovering -or $ClosedPairProofSha256 -cnotmatch $hashPattern)) -or
+        (-not $ArmPostbootHost -and $ClosedPairProofSha256 -cne '') -or
         ($recovering -and ($transition -or $RecoveryAttemptId -cnotmatch $hashPattern -or
                            $RecoveryReservationSha256 -cnotmatch $hashPattern)) -or
         ($PublishTransitionArgs -and $PreviousArgsSha256 -cnotmatch $hashPattern) -or
@@ -1173,15 +1310,16 @@ try {
     if ($null -eq $current -or $current.Name -cne $ServiceName -or
         (($ObserveTransition -or $StopTransition) -and ($current.State -cne 'Running' -or $current.ProcessId -lt 1)) -or
         (-not ($ObserveTransition -or $StopTransition) -and ($current.State -cne 'Stopped' -or $current.ProcessId -ne 0)) -or
-        $current.StartMode -cne 'Manual' -or $current.ServiceType -cne 'Own Process' -or
+        $current.StartMode -cne $(if($ArmPostbootHost){'Disabled'}else{'Manual'}) -or $current.ServiceType -cne 'Own Process' -or
         $current.DesktopInteract -or
         $current.StartName -cne ('NT SERVICE\' + $ServiceName) -or $current.PathName -cnotmatch '\A"[^"\r\n]+"\z') {
         throw 'initial_service_baseline_changed'
     }
     $hostPath = $current.PathName.Substring(1,$current.PathName.Length - 2)
-    Assert-Executable $hostPath $ServiceHostSha256
     $plan = Read-PinnedJson $PlanPath $PlanSha256
     $approval = Read-PinnedJson $ApprovalPath $ApprovalSha256
+    if($ArmPostbootHost){Arm-SamebootSuccessorHost $plan $approval $current;return}
+    Assert-Executable $hostPath $ServiceHostSha256
     if ($transition) {
         Start-PreparedTransitionService $current $hostPath $plan $approval
         return

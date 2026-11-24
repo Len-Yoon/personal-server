@@ -859,6 +859,56 @@ class SamebootPostbootSealTests(unittest.TestCase):
         files[FILES[5]]=encode(acceptance)
         with self.assertRaises(TransitionBlocked):validate_seal(plan,'a'*64,files)
 
+    def transition_fixture(self):
+        plan,files=self.fixture()
+        value=plan['initial_recovery_postboot']
+        value.update(previous_service_image_sha256=plan['windows_enforced']['service_image_sha256'],
+            successor_service_image_sha256='9a'*32,successor_service_image_path_sha256='9b'*32,
+            carryover_receipt_sha256=value['stopped_receipt_sha256'])
+        plan['windows_enforced']['service_image_sha256']=value['successor_service_image_sha256']
+        plan['initial_service_start']['service_image_path_sha256']=value['successor_service_image_path_sha256']
+        resumed=json.loads(files[FILES[4]])
+        resumed['guest_observation_sha256']['A']=value['carryover_receipt_sha256']
+        files[FILES[4]]=json.dumps(resumed,sort_keys=True).encode()
+        acceptance=json.loads(files[FILES[5]]);acceptance['postboot']=value
+        acceptance['resume_evidence_sha256']=hashlib.sha256(files[FILES[4]]).hexdigest()
+        files[FILES[5]]=json.dumps(acceptance,sort_keys=True).encode()
+        return plan,files
+
+    def test_version_transition_binds_old_and_new_images_and_keeps_native_old_seal(self):
+        plan,files=self.transition_fixture()
+        value=plan['initial_recovery_postboot']
+        self.assertEqual(validate_seal(plan,'a'*64,files),value)
+        old=json.loads(files['postboot-predecessor-plan.json'])
+        self.assertEqual(old['windows_enforced']['service_image_sha256'],value['previous_service_image_sha256'])
+        self.assertNotEqual(old['windows_enforced']['service_image_sha256'],plan['windows_enforced']['service_image_sha256'])
+        self.assertEqual(json.loads(files[FILES[5]])['service'],json.loads(files[FILES[3]])['service'])
+        self.assertEqual(json.loads(files[FILES[6]])['closed_revision'],11)
+        self.assertEqual(json.loads(files[FILES[3]])['closed_revision'],13)
+
+    def test_version_transition_requires_complete_distinct_pins_and_carryover(self):
+        from ha_control.initial_postboot import TRANSITION_FIELDS
+        plan,files=self.transition_fixture()
+        for key in TRANSITION_FIELDS|{'carryover_receipt_sha256'}:
+            changed=deepcopy(plan);changed['initial_recovery_postboot'].pop(key)
+            with self.subTest(key=key),self.assertRaises(TransitionBlocked):scope(changed)
+        changed=deepcopy(plan)
+        changed['initial_recovery_postboot']['successor_service_image_sha256']=changed['initial_recovery_postboot']['previous_service_image_sha256']
+        with self.assertRaises(TransitionBlocked):scope(changed)
+        for key in TRANSITION_FIELDS:
+            changed=deepcopy(plan);changed['initial_recovery_postboot'][key]='fa'*32
+            with self.subTest(key=key),self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
+        for key in ('service_name','service_sid'):
+            changed=deepcopy(plan);changed['windows_enforced'][key]+='changed'
+            with self.subTest(key=key),self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
+        changed=deepcopy(plan);changed['initial_recovery_postboot'].pop('previous_service_image_sha256')
+        changed['initial_recovery_postboot'].pop('successor_service_image_sha256')
+        changed['initial_recovery_postboot'].pop('successor_service_image_path_sha256')
+        with self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
+        legacy=PostbootSealTests().fixture()[0]
+        legacy['initial_recovery_postboot'].update({key:plan['initial_recovery_postboot'][key] for key in TRANSITION_FIELDS})
+        with self.assertRaises(TransitionBlocked):scope(legacy)
+
     def test_same_boot_closed_thirteen_and_original_closed_eleven_are_separate(self):
         from ha_control.initial_unpublished import derive_predecessor
         plan,files=self.fixture()
@@ -928,23 +978,29 @@ class SamebootPostbootSealTests(unittest.TestCase):
             self.assertEqual(values['PostbootPredecessorPlanSha256'],value['predecessor_plan_sha256'])
 
     def test_postboot_acceptance_holds_configured_stopped_receipt_on_executed_path(self):
+        self.exercise_postboot_acceptance()
+
+    def test_version_transition_acceptance_holds_old_binary_and_stopped_custody(self):
+        self.exercise_postboot_acceptance(transitioning=True)
+
+    def exercise_postboot_acceptance(self,transitioning=False):
         from tempfile import TemporaryDirectory
         runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)
-        plan,files=self.fixture();value=plan['initial_recovery_postboot']
+        plan,files=(self.transition_fixture() if transitioning else self.fixture());value=plan['initial_recovery_postboot']
         old=json.loads(files['postboot-predecessor-plan.json']);binding=json.loads(files[FILES[1]])
         source=ROOT/'infra/k8s/ha_control/windows-ha-start-initial-service.ps1'
         with TemporaryDirectory() as folder:
             base=Path(folder);host=base/'host';host.mkdir()
             args=files[FILES[2]].decode().splitlines()
             changes={'plan_path':str(base/'prior'/'plan.json'),'service_name':plan['windows_enforced']['service_name'],
-                     'service_sid':plan['windows_enforced']['service_sid'],'host_sha256':plan['windows_enforced']['service_image_sha256']}
+                     'service_sid':plan['windows_enforced']['service_sid'],'host_sha256':old['windows_enforced']['service_image_sha256']}
             args=[key+'='+changes.get(key,val) for key,val in (line.split('=',1) for line in args)]
             raw=('\n'.join(args)+'\n').encode();(host/'service.args').write_bytes(raw)
             (base/'postboot-predecessor-args.txt').write_bytes(raw)
             value['predecessor_args_sha256']=hashlib.sha256(raw).hexdigest()
             binding['state_path']=str(base/'prior'/'journal'/'controller-state.json')
             fixture=base/'fixture.json'
-            fixture.write_text(json.dumps({'plan':plan,'binding':binding,'terminal':json.loads(files[FILES[0]])}))
+            fixture.write_text(json.dumps({'plan':plan,'old':old,'binding':binding,'terminal':json.loads(files[FILES[0]])}))
             script=base/'exercise.ps1'
             script.write_text(r"""$ErrorActionPreference='Stop'
 $fixture=ConvertFrom-Json ([IO.File]::ReadAllText($args[0]))
@@ -954,13 +1010,14 @@ $fixtureService=[pscustomobject]@{Name=$fixture.plan.windows_enforced.service_na
     PathName=('"'+(Join-Path $root 'host/host.exe')+'"')}
 function FixtureDigest([string]$text){$h=[Security.Cryptography.SHA256]::Create();try{[BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 $fixture.binding.service_image_path_sha256=FixtureDigest $fixtureService.PathName
+$fixture.old.initial_service_start.service_image_path_sha256=$fixture.binding.service_image_path_sha256
 $boot=[datetime]::Parse('2026-11-20T00:00:00Z').ToUniversalTime()
 $fixture.plan.windows_initial_observer.windows_boot_sha256=FixtureDigest ($boot.Ticks.ToString())
 $script:checked=[Collections.Generic.List[string]]::new()
 function Assert-UnpublishedTcbPath([string]$Path){$script:checked.Add($Path)}
-function Assert-Executable([string]$Path,[string]$Pin){}
+function Assert-Executable([string]$Path,[string]$Pin){if($Pin -cne $fixture.old.windows_enforced.service_image_sha256){throw 'fixture_wrong_predecessor_binary'}}
 function Get-CimInstance([string]$ClassName,[string]$Filter,[int]$OperationTimeoutSec){if($ClassName -ceq 'Win32_OperatingSystem'){return [pscustomobject]@{LastBootUpTime=$boot}};return $fixtureService}
-function Read-PinnedJson([string]$Path,[string]$Pin){if($Path -ceq $planPath){return $fixture.plan};if($Path.EndsWith('postboot-predecessor-binding.json')){return $fixture.binding};if($Path.EndsWith('postboot-predecessor-state.json')){return $fixture.terminal};throw 'fixture_unexpected_read'}
+function Read-PinnedJson([string]$Path,[string]$Pin){if($Path -ceq $planPath){return $fixture.plan};if($Path.EndsWith('postboot-predecessor-plan.json')){return $fixture.old};if($Path.EndsWith('postboot-predecessor-binding.json')){return $fixture.binding};if($Path.EndsWith('postboot-predecessor-state.json')){return $fixture.terminal};throw 'fixture_unexpected_read'}
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($args[1],[ref]$tokens,[ref]$errors)
 foreach($name in @('Assert-PostbootEnvelope','Seal-HaInitialPostbootAcceptance')){
     $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
@@ -985,7 +1042,10 @@ Seal-HaInitialPostbootAcceptance $planPath ('a'*64)
         from ha_control.initial_unpublished import derive_predecessor
         runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)
         _,files=self.fixture();prior=json.loads(files[FILES[0]])
-        variants=[prior,prior|{'revision':True},prior|{'revision':13},prior|{'sequence':0},
+        transition_plan,_=self.transition_fixture()
+        transitioned=deepcopy(prior);transitioned['kind']='initial-wsl-cutover-postboot-resume'
+        transitioned['postboot']=transition_plan['initial_recovery_postboot']
+        variants=[prior,transitioned,prior|{'revision':True},prior|{'revision':13},prior|{'sequence':0},
                   prior|{'kind':'initial-wsl-cutover-unpublished'},prior|{'extra':'1'*64}]
         changed=deepcopy(prior);changed['postboot']['predecessor_kind']='published-postboot-sameboot-v1';variants.append(changed)
         with TemporaryDirectory() as folder:
@@ -1001,7 +1061,7 @@ Seal-HaInitialPostbootAcceptance $planPath ('a'*64)
                         "$r|Select-Object closed,opened,revoked|ConvertTo-Json -Compress}catch{exit 3}")
                     result=subprocess.run([runtime,'-NoProfile','-Command',command],capture_output=True,text=True)
                     with self.subTest(source=filename,index=index):
-                        if index==0:
+                        if index<2:
                             self.assertEqual(result.returncode,0,result.stderr)
                             self.assertEqual(json.loads(result.stdout),dict(zip(('closed','opened','revoked'),derive_predecessor(raw,pin,published=True))))
                         else:self.assertEqual(result.returncode,3,result.stderr)
