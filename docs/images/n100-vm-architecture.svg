@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1000" viewBox="0 0 1400 1000"
+     role="img" aria-labelledby="title description" xml:lang="ko">
+  <title id="title">N100 개인 서버 운영 구조</title>
+  <desc id="description">외부 HTTPS 요청은 Windows의 Cloudflare Tunnel과 Caddy를 거쳐 Linux VM A의 공개 앱에 도달한다. VM A에서 앱 일곱 개와 내부 브로커를 실행하며 A의 PostgreSQL에만 쓰기를 허용한다. VM B의 PostgreSQL은 동기 복제 대기 상태다. Windows 쓰기 권한 서비스는 VM 격리 상태를 확인한다. 두 VM은 하나의 N100을 공유하고 전원 재기동 후 자동 복구는 미검증이다.</desc>
+  <defs>
+    <marker id="https" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="authority" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="replication" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#047857"/>
+    </marker>
+    <style>
+      text { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", sans-serif; fill: #182840; }
+      .title { font-size: 39px; font-weight: 750; }
+      .host { font-size: 27px; font-weight: 700; }
+      .heading { font-size: 27px; font-weight: 700; }
+      .box-title { font-size: 25px; font-weight: 700; }
+      .body { font-size: 22px; }
+      .note { font-size: 20px; fill: #42536c; }
+      .blue { fill: #1e40af; }
+      .purple { fill: #6b21a8; }
+      .green { fill: #065f46; }
+      .https-wire { fill: none; stroke: #1d4ed8; stroke-width: 3.5; marker-end: url(#https); }
+      .authority-wire { fill: none; stroke: #7c3aed; stroke-width: 3.5; stroke-dasharray: 8 5; marker-end: url(#authority); }
+      .replication-wire { fill: none; stroke: #047857; stroke-width: 3.5; marker-end: url(#replication); }
+    </style>
+  </defs>
+
+  <rect width="1400" height="1000" fill="#f2f5fa"/>
+  <text class="title" x="55" y="58">N100 개인 서버 운영 구조</text>
+  <text class="note" x="1345" y="56" text-anchor="end">2026-11-24 운영 검증 기준</text>
+
+  <rect x="54" y="84" width="318" height="53" rx="13" fill="#dbeafe" stroke="#93b5f4" stroke-width="2"/>
+  <text class="box-title blue" x="213" y="118" text-anchor="middle">외부 사용자 · HTTPS</text>
+
+  <rect x="45" y="157" width="1310" height="762" rx="25" fill="#fff" stroke="#a9b9d0" stroke-width="2"/>
+  <text class="host" x="420" y="193">Intel N100 물리 호스트</text>
+  <text class="note" x="1325" y="192" text-anchor="end">CPU · 메모리 · 스토리지 공유</text>
+
+  <rect x="65" y="212" width="1270" height="169" rx="18" fill="#edf3ff" stroke="#bacaf0" stroke-width="2"/>
+  <text class="heading" x="90" y="249">Windows</text>
+  <text class="note" x="1305" y="246" text-anchor="end">외부 접속 및 쓰기 권한 확인</text>
+
+  <rect x="90" y="267" width="304" height="91" rx="12" fill="#fff" stroke="#bed0f2"/>
+  <text class="box-title" x="109" y="301">Cloudflare Tunnel</text>
+  <text class="body" x="109" y="333">공개 HTTPS 요청 수신</text>
+
+  <rect x="455" y="267" width="310" height="91" rx="12" fill="#fff" stroke="#bed0f2"/>
+  <text class="box-title" x="474" y="301">Caddy</text>
+  <text class="body" x="474" y="333">도메인별로 VM 앱에 전달</text>
+
+  <rect x="859" y="267" width="451" height="91" rx="12" fill="#faf5ff" stroke="#d4b7ef"/>
+  <text class="box-title purple" x="878" y="301">쓰기 권한 서비스</text>
+  <text class="body" x="878" y="333">격리·DB 상태 확인 및 A 권한 발급</text>
+
+  <path class="https-wire" d="M242 137V267"/>
+  <path class="https-wire" d="M394 311H455"/>
+
+  <text class="heading" x="66" y="423">Hyper-V · Linux VM</text>
+  <rect x="65" y="446" width="873" height="447" rx="18" fill="#f3f8ff" stroke="#b1c6ec" stroke-width="2"/>
+  <rect x="988" y="446" width="347" height="447" rx="18" fill="#eefaf5" stroke="#91c9b1" stroke-width="2"/>
+
+  <text class="heading" x="90" y="486">VM A · 운영</text>
+  <text class="note" x="908" y="484" text-anchor="end">앱 7개와 DB 쓰기</text>
+  <text class="heading green" x="1012" y="486">VM B · 대기</text>
+  <text class="note" x="1012" y="524">정상 운영에서는 앱과</text>
+  <text class="note" x="1012" y="552">쓰기 권한을 A에 배치</text>
+
+  <rect x="94" y="523" width="814" height="176" rx="13" fill="#fff" stroke="#bed0f2"/>
+  <path d="M510 540V681" stroke="#dce5f3" stroke-width="2"/>
+  <text class="box-title blue" x="116" y="563">공개 웹 앱</text>
+  <text class="body" x="116" y="607">Portal · 뉴스 수집기</text>
+  <text class="body" x="116" y="647">Book Memo · YouTube Memo</text>
+  <text class="box-title" x="535" y="563">연동 및 운영 작업</text>
+  <text class="body" x="535" y="607">차량관리 · System Agent</text>
+  <text class="body" x="535" y="647">HomeOps 실행기</text>
+
+  <rect x="94" y="763" width="220" height="83" rx="12" fill="#fff" stroke="#bed0f2"/>
+  <text class="box-title" x="109" y="796">내부 브로커</text>
+  <text class="note" x="109" y="826">앱 실행을 지원</text>
+
+  <rect x="345" y="763" width="305" height="83" rx="12" fill="#e7f0ff" stroke="#8cafea"/>
+  <text class="box-title blue" x="361" y="796">PostgreSQL A</text>
+  <text class="body" x="361" y="826">읽기·쓰기 허용</text>
+
+  <rect x="695" y="763" width="213" height="83" rx="12" fill="#faf5ff" stroke="#d4b7ef"/>
+  <text class="box-title purple" x="711" y="796">격리 확인</text>
+  <text class="note" x="711" y="826">운영 포트 974</text>
+
+  <rect x="1012" y="650" width="297" height="196" rx="14" fill="#fff" stroke="#abd6c4"/>
+  <text class="box-title green" x="1032" y="698">PostgreSQL B</text>
+  <text class="body" x="1032" y="738">동기 복제 대기</text>
+  <text class="note" x="1032" y="776">쓰기 폐쇄 유지</text>
+
+  <path class="https-wire" d="M610 358V406H325V523"/>
+  <text class="note blue" x="345" y="430">공개 웹 요청</text>
+  <path class="authority-wire" d="M1086 358V403H960V727H601V763"/>
+  <path class="authority-wire" d="M960 727V803H908"/>
+  <text class="note purple" x="654" y="718">검증 후 A에만 쓰기 허용</text>
+  <path d="M497 699V763" stroke="#293950" stroke-width="3"/>
+  <path d="M491 754 497 763 503 754" fill="none" stroke="#293950" stroke-width="3"/>
+  <text class="note" x="403" y="737">DB 접근</text>
+  <path class="replication-wire" d="M497 846V873H1158V846"/>
+  <text class="note green" x="665" y="865">PostgreSQL 동기 복제 · A → B</text>
+
+  <rect x="45" y="936" width="1310" height="47" rx="12" fill="#fff6e5" stroke="#ead09d"/>
+  <text class="body" x="70" y="967">물리 호스트 장애는 양쪽 VM에 영향 · 전원 재기동 후 자동 복구는 확인 필요</text>
+</svg>

@@ -6,15 +6,9 @@ Intel N100 한 대에서 Portal을 포함한 개인 서비스 7개를 운영합�
 
 ## 운영 구조
 
-```mermaid
-flowchart LR
-    Client["외부 사용자"] --> Tunnel["Windows · Cloudflare Tunnel"]
-    Tunnel --> Caddy["Windows · Caddy"]
-    Caddy --> Apps["VM A · Portal 등 웹 서비스"]
-    Apps --> Primary["VM A · PostgreSQL 읽기·쓰기"]
-    Primary -->|동기 복제| Standby["VM B · PostgreSQL 대기"]
-    Windows["Windows · 쓰기 권한 서비스"] -->|A에만 쓰기 허용| Primary
-```
+[![N100 운영 구조도. Windows 외부 진입, VM A 운영 앱과 쓰기 권한, VM B 동기 대기](docs/images/n100-vm-architecture.svg)](docs/images/n100-vm-architecture.svg)
+
+파란선은 외부 웹 요청, 보라색 점선은 격리 및 쓰기 권한 확인, 초록선은 PostgreSQL 동기 복제 경로입니다. 구조도를 누르면 원본 크기로 볼 수 있습니다.
 
 | 위치 | 담당 |
 |---|---|
@@ -38,6 +32,74 @@ flowchart LR
 | Book Memo · YouTube Memo | 책과 영상 메모 검색·저장 |
 | 차량관리 | 차량 상태·정비 기록과 연동 작업 |
 | System Agent · HomeOps | 시스템 상태 조회와 허용된 운영 작업 |
+
+## 주요 화면
+
+아래는 기존 실제 서비스 캡처입니다. 기능을 보여주는 화면이며, 시각·수치·상태는 촬영 당시 기준입니다. [이미지 출처와 촬영 범위](docs/images/README.md)
+
+### Portal · 서비스 허브와 전체 검색
+
+서비스를 한곳에서 찾아 열 수 있고, 뉴스·책·영상의 검색 대상을 고를 수 있습니다.
+
+![Portal 서비스 카드와 전체 검색 대상 선택](docs/images/portal-dashboard.png)
+
+<details>
+<summary>뉴스 허브 · 수집 상태와 주제별 기사</summary>
+
+마지막 정상 수집 시각을 확인하고, 세계 경제·IT·AI 등 주제별 기사로 이동하거나 기사를 보관할 수 있습니다.
+
+![뉴스 허브의 수집 최신성과 주제별 뉴스](docs/images/news-hub.png)
+
+</details>
+
+<details>
+<summary>Book Memo · 도서 검색과 목차 선택</summary>
+
+YES24에서 책을 검색하고 책과 메모를 관리합니다. 목차 미리보기에서는 필요한 항목을 골라 저장할 수 있습니다.
+
+![Book Memo의 YES24 검색과 가져오기·내보내기](docs/images/book-memo.png)
+
+![Book Memo의 목차 미리보기와 항목 선택](docs/images/book-toc-preview.png)
+
+</details>
+
+<details>
+<summary>YouTube Memo · 영상과 메모 관리</summary>
+
+영상을 등록하고 저장 목록과 메모를 관리합니다. 로그인 후 영상과 메모를 저장하거나 가져오기·내보내기를 사용할 수 있습니다.
+
+![YouTube Memo의 영상 등록과 저장 목록](docs/images/youtube-memo.png)
+
+</details>
+
+<details>
+<summary>파일함 · 업로드, 검색, 이동 및 휴지통</summary>
+
+Portal에서 로그인한 뒤 파일을 업로드·검색·정렬·이동할 수 있습니다. 화면은 개인 파일을 제외한 도구 영역입니다.
+
+![Portal 파일함의 업로드·검색·파일 정리 도구](docs/images/file-manager.png)
+
+</details>
+
+<details>
+<summary>관리자 화면 · 서버 상태와 백업 기록</summary>
+
+서버 자원과 서비스 상태를 확인할 수 있습니다. 백업 화면은 확인 가능한 백업·복원 기록을 보여줍니다. 아래 수치와 백업 상태는 이전 촬영 시점의 값입니다.
+
+![관리자 화면의 서버 자원과 서비스 상태](docs/images/admin-status.png)
+
+![관리자 화면의 서비스별 백업 및 복원 기록](docs/images/admin-backup-status.png)
+
+</details>
+
+<details>
+<summary>차량관리 · 운행 및 정비 알림 예시</summary>
+
+차량 운행 기록과 주행거리, 소모품 정비 안내를 제공합니다. 이미지는 과거 Telegram 알림 예시입니다.
+
+![차량관리 Telegram 운행 및 정비 알림](docs/images/car-care-telegram-status.png)
+
+</details>
 
 ## 검증
 
