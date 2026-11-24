@@ -560,7 +560,7 @@ class InitialAppResumeTests(unittest.TestCase):
                              set(w.RECOVERY_START_ORDER[:3]))
 
 
-    def prepare_successor_carryover(self):
+    def prepare_successor_carryover(self, *, numbered_attempts=1):
         from ha_control import native_guest_postboot as postboot
         original_prepare = self.prepare_sameboot_request
         def prepare():
@@ -580,18 +580,26 @@ class InitialAppResumeTests(unittest.TestCase):
             self.intent_path.write_bytes(self.intent)
         self.prepare_sameboot_request = prepare
         self.prepare_numbered_request()
-        auth = self.attest_numbered()
-        self.failed_boundary = 'recovery_after:book-memo'
-        with self.assertRaises(TransitionBlocked):
-            w.start_initial_recovery(self.request, self.windows)
-        head = self.continuation_stem + 'attempt-0001-'
-        self.successor_history = {'authorization_sha256': auth['authorization_sha256'],
-            'intent_sha256': wire._digest((self.stage/(head+'intent.json')).read_bytes()),
-            'progress_sha256': {'progress-ha-broker.json': wire._digest((self.stage/(head+'progress-ha-broker.json')).read_bytes())}}
+        previous = self.prior_attempt
+        for index in range(1, numbered_attempts + 1):
+            auth = self.attest_numbered(lineage=previous)
+            self.failed_boundary = ('recovery_before:ha-broker' if index == resume.MAX_NUMBERED_ATTEMPTS
+                                    else 'recovery_after:book-memo')
+            with self.assertRaises(TransitionBlocked):
+                w.start_initial_recovery(self.request, self.windows)
+            head = self.continuation_stem + f'attempt-{index:04d}-'
+            progress = self.stage / (head + 'progress-ha-broker.json')
+            previous = {'authorization_sha256': auth['authorization_sha256'],
+                'intent_sha256': wire._digest((self.stage / (head + 'intent.json')).read_bytes()),
+                'progress_sha256': {'progress-ha-broker.json': wire._digest(progress.read_bytes())}
+                if progress.is_file() else {}}
+            if index < numbered_attempts:
+                self.request = replace(self.request, sequence=self.request.sequence + 1, nonce=f'{index:064x}')
+        self.successor_history = previous
         self.old_request = self.request
         successor = self.request.args['postboot'] | {'attempt_id': 'd'*64,
             'predecessor_plan_sha256': wire._digest(self.old_plan_raw)}
-        self.request = replace(self.request, nonce='f'*64, sequence=8,
+        self.request = replace(self.request, nonce='f'*64, sequence=self.request.sequence + 1,
             args=self.request.args | {'postboot': successor, 'postboot_plan_sha256': 'e'*64})
         self.failed_boundary = None
         self.commands.clear()
@@ -654,6 +662,100 @@ class InitialAppResumeTests(unittest.TestCase):
             postboot.attest_carryover(new, predecessor_plan_raw=self.old_plan_raw+b' ',
                 predecessor_request=self.old_request, history=self.successor_history)
         self.assertFalse(postboot.carryover_path(new, 'c'*64).exists())
+
+    def carryover_cli_inputs(self, *, numbered_attempts=1):
+        import io
+        postboot = self.prepare_successor_carryover(numbered_attempts=numbered_attempts)
+        target = postboot.carryover_path(self.request, 'd'*64)
+        target.unlink()
+        pending = replace(self.request, args=self.request.args | {'postboot_plan_sha256': postboot.DRAFT_PIN,
+            'postboot': self.request.args['postboot'] | {'carryover_receipt_sha256': postboot.DRAFT_PIN,
+                'predecessor_seal_sha256': postboot.DRAFT_PIN}})
+        values = {'request': wire._bytes(w._scope(pending) | {'args': pending.args}),
+            'predecessor-request': wire._bytes(w._scope(self.old_request) | {'args': self.old_request.args}),
+            'predecessor-plan': self.old_plan_raw, 'history': wire._bytes(self.successor_history)}
+        argv = []
+        for name, body in values.items():
+            path = self.root / ('cli-' + name + '.json')
+            path.write_bytes(body); path.chmod(0o400)
+            argv += ['--' + name, str(path), '--' + name + '-sha256', wire._digest(body)]
+        return postboot, target, argv, io.StringIO(), io.StringIO()
+
+    def test_carryover_root_cli_authenticates_exact_files_and_preserves_records(self):
+        postboot, target, argv, stdout, stderr = self.carryover_cli_inputs(numbered_attempts=8)
+        with patch.object(postboot.os, 'geteuid', return_value=0), patch('sys.stdout', stdout), patch('sys.stderr', stderr):
+            self.assertEqual(postboot.main(argv), 0)
+        receipt = json.loads(stdout.getvalue())
+        self.assertEqual(receipt, {'status': 'PASS', 'receipt_sha256': wire._digest(target.read_bytes())})
+        self.assertEqual(stderr.getvalue(), '')
+        self.assertEqual(self.commands, [])
+        self.assertEqual(resume.latest_attempt(self.old_request), 8)
+        self.assertEqual(self.successor_history['progress_sha256'], {})
+        self.assertTrue(all(path.read_bytes() == raw for path, raw in self.all_original.items()))
+        self.assertNotIn(b'sensitive-marker', target.read_bytes())
+        original = target.read_bytes()
+        with patch.object(postboot.os, 'geteuid', return_value=0), patch('sys.stdout', stdout), patch('sys.stderr', stderr):
+            self.assertEqual(postboot.main(argv), 1)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_carryover_cli_rejects_nonroot_before_read_and_bad_pin_without_receipt(self):
+        postboot, target, argv, stdout, stderr = self.carryover_cli_inputs()
+        with patch.object(postboot.os, 'geteuid', return_value=1000), patch.object(w.runtime, '_read') as reader, patch('sys.stderr', stderr):
+            self.assertEqual(postboot.main(argv), 1)
+            reader.assert_not_called()
+        argv[3] = '0'*64
+        with patch.object(postboot.os, 'geteuid', return_value=0), patch('sys.stdout', stdout), patch('sys.stderr', stderr):
+            self.assertEqual(postboot.main(argv), 1)
+        self.assertFalse(target.exists())
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertNotIn('sensitive-marker', stderr.getvalue())
+
+    def test_carryover_cli_rejects_appended_duplex_frame(self):
+        postboot, target, argv, stdout, stderr = self.carryover_cli_inputs()
+        path = Path(argv[1]); body = path.read_bytes() + b'{}\n'
+        path.chmod(0o600); path.write_bytes(body); path.chmod(0o400)
+        argv[3] = wire._digest(body)
+        with patch.object(postboot.os, 'geteuid', return_value=0), patch('sys.stdout', stdout), patch('sys.stderr', stderr):
+            self.assertEqual(postboot.main(argv), 1)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.commands, [])
+
+    def test_carryover_cli_reader_requires_immutable_root_file_and_digest(self):
+        from ha_control import native_guest_postboot as postboot
+        with patch.object(w.runtime, '_read', return_value=b'{}') as reader:
+            self.assertEqual(postboot._carryover_input('/trusted/input.json', wire._digest(b'{}'), limit=100), b'{}')
+            reader.assert_called_once_with(Path('/trusted/input.json'), 0, {0o400}, limit=100)
+            with self.assertRaises(TransitionBlocked):
+                postboot._carryover_input('/trusted/input.json', '0'*64, limit=100)
+
+    def test_carryover_cli_full_version_transition_draft_and_final_admission(self):
+        postboot, target, argv, stdout, stderr = self.carryover_cli_inputs()
+        draft_path = Path(argv[1]); draft = json.loads(draft_path.read_bytes())
+        transition = {'previous_service_image_sha256': '1'*64,
+            'successor_service_image_sha256': '2'*64, 'successor_service_image_path_sha256': '3'*64}
+        draft['args']['postboot'].update(transition)
+        body = wire._bytes(draft)
+        draft_path.chmod(0o600); draft_path.write_bytes(body); draft_path.chmod(0o400)
+        argv[3] = wire._digest(body)
+        with patch.object(postboot.os, 'geteuid', return_value=0), patch('sys.stdout', stdout), patch('sys.stderr', stderr):
+            self.assertEqual(postboot.main(argv), 0)
+        record = json.loads(target.read_bytes())
+        self.assertTrue(all(record['postboot'][key] == value for key, value in transition.items()))
+        self.assertNotIn('predecessor_seal_sha256', record['postboot'])
+        self.assertNotIn('carryover_receipt_sha256', record['postboot'])
+        # Draft pins cannot be used as admission. Finalize receipt, seal and
+        # plan pins before issuing a new service-instance authorization.
+        draft_request = postboot._carryover_request(body)
+        with self.assertRaises(TransitionBlocked):
+            postboot.observe_carryover(draft_request, 'd'*64, postboot.DRAFT_PIN)
+        pin = wire._digest(target.read_bytes())
+        self.request = replace(self.request, args=self.request.args | {'postboot':
+            self.request.args['postboot'] | transition | {'carryover_receipt_sha256': pin}})
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        self.assertEqual(self.commands, [])
+        self.attest_successor()
+        self.assertEqual(w.start_initial_recovery(self.request, self.windows).status, 'PASS')
 
     def test_carryover_rejects_unbound_predecessor_nonce(self):
         postboot = self.prepare_successor_carryover()

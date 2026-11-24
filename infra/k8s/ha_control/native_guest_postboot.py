@@ -118,6 +118,7 @@ def observe(request, attempt, expected, *, require_stopped=True, _runtime=True):
 
 
 CARRYOVER_KIND = 'authenticated-postboot-app-carryover-v1'
+DRAFT_PIN = '0' * 64
 CARRYOVER_FIELDS = {'schema_version', 'kind', 'binding', 'postboot', 'recovery_args',
     'predecessor_postboot', 'predecessor_request', 'history', 'hold_sha256', 'containers',
     'container_contracts', 'protected_inventory_sha256'}
@@ -249,3 +250,67 @@ def observe_carryover(request, attempt, expected, *, require_stopped=True, inven
         worker._need(contracts == record['container_contracts']
             and all(row['running'] is False for row in contracts.values()), ERROR)
     return record
+
+
+def _carryover_input(path, expected, *, limit):
+    """Only immutable ROOT inputs; pins refer to exact bytes, including newlines."""
+    from pathlib import Path
+    worker._need(wire._hash(expected), ERROR)
+    raw = worker.runtime._read(Path(path), 0, {0o400}, limit=limit)
+    worker._need(wire._digest(raw) == expected, ERROR)
+    return raw
+
+
+def _carryover_request(raw):
+    import io
+    stream = io.BytesIO(raw)
+    request = worker.read_request(stream)
+    # Start requests normally use a duplex stream. A local attestation input
+    # must contain exactly one canonical request, without a second frame.
+    worker._need(not stream.read(1) and request.node == 'A'
+        and request.verb == wire.GUEST_START_INITIAL_POSTBOOT, ERROR)
+    return request
+
+
+def main(argv=None):
+    """Issue only carryover metadata from a trusted, ROOT-owned installed package.
+
+    Run as `python -m ha_control.native_guest_postboot` with that package on the
+    trusted interpreter path. This is not an SSH worker verb and grants no new
+    sudo entry. It never starts apps, changes a DB, or edits predecessor records.
+    The new request is an explicit draft: final plan, predecessor seal and
+    carryover receipt hashes must be DRAFT_PIN. Those hashes do not exist until
+    after issuance; normal startup still authenticates the final real hashes.
+    """
+    import argparse
+    import sys
+    from .initial_app_resume import decode
+    parser = argparse.ArgumentParser(description='Issue immutable postboot carryover metadata only.')
+    for name in ('request', 'predecessor-request', 'predecessor-plan', 'history'):
+        parser.add_argument('--' + name, required=True)
+        parser.add_argument('--' + name + '-sha256', required=True)
+    args = parser.parse_args(argv)
+    try:
+        worker._need(os.geteuid() == 0, ERROR)
+        inputs = {name: _carryover_input(getattr(args, name), getattr(args, name + '_sha256'),
+            limit=wire.FRAME_BYTES if name in {'request', 'predecessor_request'} else 131072)
+            for name in ('request', 'predecessor_request', 'predecessor_plan', 'history')}
+        request = _carryover_request(inputs['request'])
+        predecessor = _carryover_request(inputs['predecessor_request'])
+        worker._need(request.binding == predecessor.binding
+            and request.args['postboot_plan_sha256'] == DRAFT_PIN
+            and request.args['postboot'].get('carryover_receipt_sha256') == DRAFT_PIN
+            and request.args['postboot']['predecessor_seal_sha256'] == DRAFT_PIN, ERROR)
+        receipt = attest_carryover(request, predecessor_plan_raw=inputs['predecessor_plan'],
+            predecessor_request=predecessor, history=decode(inputs['history']))
+    except (TransitionBlocked, wire.BridgeRejected, OSError, KeyError, TypeError, ValueError):
+        # Plans can contain connection settings. Never echo input bytes, paths,
+        # or exception text, including failures in the underlying reader.
+        print(ERROR, file=sys.stderr)
+        return 1
+    print(json.dumps({'status': receipt.status, 'receipt_sha256': receipt.receipt_sha256}, sort_keys=True))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

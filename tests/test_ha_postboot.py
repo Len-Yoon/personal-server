@@ -1100,4 +1100,192 @@ class SamebootPostbootPgTests(PostbootPgTests):
         self.backend.plan['initial_recovery_postboot']['stopped_attempt_id']='f'*64
         with self.assertRaises(TransitionBlocked):lease.renew(self.state)
 
-if __name__=='__main__':unittest.main()
+class SamebootTransitionDriverTests(unittest.TestCase):
+    """Production boundaries as typed fake driver responses, without native I/O."""
+
+    def setUp(self):
+        import tempfile
+        from ha_control import sameboot_transition as transition
+
+        self.module = transition
+        data = tempfile.TemporaryDirectory()
+        self.addCleanup(data.cleanup)
+        self.scope = {
+            'attempt_sha256': '0' * 64, 'previous_plan_sha256': '1' * 64, 'previous_instance_sha256': '2' * 64,
+            'history_sha256': '3' * 64, 'successor_image_sha256': '4' * 64, 'previous_revision': 14,
+            'driver_sha256': '5' * 64, 'runtime_manifest_sha256': '6' * 64,
+        }
+        self.calls = []
+        self.driver = self.module.SamebootTransition(data.name, self.scope, self)
+        self.terminal = 'a' * 64
+        self.carryover = 'b' * 64
+        self.plan = 'c' * 64
+        self.instance = 'd' * 64
+        self.fail_apply = None
+        self.reject_provider = False
+        self.denied_guard = None
+        import time
+        self.clock = time.monotonic
+
+    def guard(self, request, _chain, _deadline, *, observe_only):
+        stage = json.loads(request)['stage']
+        self.calls.append(('guard-observe' if observe_only else 'guard', stage))
+        return stage != self.denied_guard
+
+    def result(self, request, kind):
+        import hashlib
+        stage = json.loads(request)['stage']
+        self.calls.append((kind, stage))
+        if kind == 'apply' and stage == self.fail_apply:
+            raise OSError('unconfirmed side effect')
+        if stage == 'replace_provider' and self.reject_provider:
+            return {'issued_sha256': hashlib.sha256(request).hexdigest(),
+                    'status': 'REJECTED', 'evidence': {'replacement_failed': True}}
+        evidence = {
+            'preflight': {
+                'history_sha256': self.scope['history_sha256'], 'rollback_sha256': '6' * 64,
+                'previous_instance_sha256': self.scope['previous_instance_sha256'], 'revision': 14,
+                'all_apps_stopped': True, 'successor_runtime_verified': True,
+                'successor_provider_verified': True, 'handoff_driver_verified': True,
+                'old_provider_only_retirement': True},
+            'retire_provider': {
+                'previous_instance_sha256': self.scope['previous_instance_sha256'], 'terminal_sha256': self.terminal,
+                'other_observers_preserved': True, 'old_service_stopped_disabled': True,
+                'native_terminal_preserved': True},
+            'close_pair': {'closed_nodes': ['A', 'B'], 'revision': 15, 'synchronous': True,
+                           'same_expiry': True, 'replay_verified': True, 'effects_isolated': True,
+                           'terminal_sha256': self.terminal, 'closed_proof_sha256': '7' * 64},
+            'replace_provider': {'owned_port': True, 'provider_proof_sha256': '8' * 64},
+            'restore_provider': {'old_port_owner_verified': True, 'old_provider_proof_sha256': '9' * 64,
+                                 'rollback_sha256': '6' * 64},
+            'carryover': {'history_sha256': self.scope['history_sha256'], 'carryover_sha256': self.carryover,
+                          'held_observation_sha256': self.carryover},
+            'stage_runtime': {'runtime_stage_sha256': 'e' * 64, 'old_runtime_preserved': True,
+                              'authority_issued': False, 'manifest_sha256': self.scope['runtime_manifest_sha256']},
+            'arm_host': {'successor_image_sha256': self.scope['successor_image_sha256'], 'plan_sha256': self.plan,
+                         'carryover_sha256': self.carryover, 'service_stopped': True},
+            'publish': {'plan_sha256': self.plan, 'instance_sha256': self.instance, 'publication_sha256': 'f' * 64,
+                        'revision': 16, 'writers': ['A'], 'standby_node': 'B', 'synchronous': True,
+                        'predecessor_instance_stopped': True},
+            'start_apps': {'instance_sha256': self.instance, 'startup_sha256': 'f' * 64,
+                           'ready': list(self.module.RECOVERY_START_ORDER)},
+        }[stage]
+        return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS', 'evidence': evidence}
+
+    def observe(self, request, _chain, _deadline):
+        return self.result(request, 'observe')
+
+    def apply(self, request, _chain, _deadline):
+        return self.result(request, 'apply')
+
+    def arm_material(self, _request, _chain, _deadline):
+        return {'candidate': {}, 'previous_raw': b'', 'plan_pin': self.plan, 'files': {}}
+
+    def arm_binding(self):
+        return {'plan_sha256': self.plan, 'carryover_sha256': self.carryover,
+                'successor_image_sha256': self.scope['successor_image_sha256'],
+                'terminal_sha256': self.terminal, 'closed_proof_sha256': '7' * 64,
+                'previous_plan_sha256': self.scope['previous_plan_sha256']}
+
+    def step(self, **kwargs):
+        return self.driver.step(self.clock() + 100, **kwargs)
+
+    def test_only_fixed_order_can_open_a_then_verify_seven_apps_and_portal(self):
+        now = self.clock()
+        portal = dict(landing_http=200, health_http=[200, 200, 200],
+                      health_started_monotonic=[now-21, now-11, now-1])
+        with (patch.object(self.module, 'observe_portal', return_value=portal),
+              patch.object(self.module, 'bind_successor_plan', return_value=self.arm_binding())):
+            for stage in self.module.STAGES:
+                self.assertEqual(self.driver.status()['stage'], stage)
+                self.assertEqual(self.step()['stage'], stage)
+        self.assertEqual(self.step()['status'], 'COMPLETE')
+        self.assertEqual([stage for kind, stage in self.calls if kind == 'apply'],
+                         [stage for stage in self.module.STAGES if stage not in self.module.READ_ONLY])
+
+    def test_lost_mutation_only_permits_bound_readback(self):
+        self.step()
+        self.fail_apply = 'retire_provider'
+        with self.assertRaises(OSError):
+            self.step()
+        self.assertTrue(self.driver.status()['observe_only'])
+        with self.assertRaisesRegex(TransitionBlocked, 'reconciliation_required'):
+            self.step()
+        self.assertEqual(self.step(observe_only=True)['stage'], 'retire_provider')
+        self.assertEqual(self.calls.count(('apply', 'retire_provider')), 1)
+        self.assertIn(('guard-observe', 'retire_provider'), self.calls)
+
+    def test_verified_provider_rejection_allows_only_restore(self):
+        for _ in range(3):
+            self.step()
+        self.reject_provider = True
+        self.assertEqual(self.step()['status'], 'REJECTED')
+        self.assertEqual(self.driver.status()['stage'], 'restore_provider')
+        self.assertEqual(self.step()['status'], 'PROVIDER_RESTORED')
+        self.assertEqual(self.driver.status()['status'], 'PROVIDER_RESTORED')
+        self.assertNotIn(('apply', 'publish'), self.calls)
+
+    def test_fresh_guard_failure_neither_issues_nor_dispatches(self):
+        for _ in range(3):
+            self.step()
+        self.denied_guard = 'replace_provider'
+        with self.assertRaises(TransitionBlocked):
+            self.step()
+        self.assertFalse(self.driver.status()['observe_only'])
+        self.assertNotIn(('apply', 'replace_provider'), self.calls)
+
+    def test_change_in_revision_or_second_writer_blocks_start(self):
+        with patch.object(self.module, 'bind_successor_plan', return_value=self.arm_binding()):
+            for _ in range(7):
+                self.step()
+        apply = self.apply
+
+        def unsafe(*args):
+            reply = apply(*args)
+            reply['evidence']['writers'].append('B')
+            return reply
+
+        with patch.object(self, 'apply', side_effect=unsafe), self.assertRaises(TransitionBlocked):
+            self.step()
+        self.assertEqual(self.driver.status()['stage'], 'publish')
+        self.assertNotIn(('apply', 'start_apps'), self.calls)
+
+    def test_mismatched_native_seal_blocks_before_arming(self):
+        for _ in range(6):
+            self.step()
+        binding = self.arm_binding() | {'closed_proof_sha256': 'f' * 64}
+        with patch.object(self.module, 'bind_successor_plan', return_value=binding), self.assertRaises(TransitionBlocked):
+            self.step()
+        self.assertFalse(self.driver.status()['observe_only'])
+        self.assertNotIn(('apply', 'arm_host'), self.calls)
+
+    def test_real_native_successor_files_bind_to_exact_plan(self):
+        plan, files = SamebootPostbootSealTests().transition_fixture()
+        plan_pin = self.module._digest(plan)
+        resumed = json.loads(files[FILES[4]]) | {'plan_sha256': plan_pin}
+        files[FILES[4]] = self.module._encoded(resumed)
+        acceptance = json.loads(files[FILES[5]]) | {
+            'plan_sha256': plan_pin, 'resume_evidence_sha256': hashlib.sha256(files[FILES[4]]).hexdigest()}
+        files[FILES[5]] = self.module._encoded(acceptance)
+        previous = files['postboot-predecessor-plan.json']
+        actual = self.module.bind_successor_plan(plan, previous, plan_pin, files)
+        self.assertEqual(actual['closed_proof_sha256'], json.loads(files[FILES[3]])['closed_pair_sha256'])
+        self.assertEqual(actual['plan_sha256'], plan_pin)
+        with self.assertRaises(TransitionBlocked):
+            self.module.bind_successor_plan(plan, previous + b'\n', plan_pin, files)
+
+    def test_lost_arm_cannot_reconcile_different_plan(self):
+        for _ in range(6):
+            self.step()
+        self.fail_apply = 'arm_host'
+        with patch.object(self.module, 'bind_successor_plan', return_value=self.arm_binding()), self.assertRaises(OSError):
+            self.step()
+        self.plan = 'a' * 64
+        with patch.object(self.module, 'bind_successor_plan', return_value=self.arm_binding()), self.assertRaises(TransitionBlocked):
+            self.step(observe_only=True)
+        self.assertEqual(self.calls.count(('apply', 'arm_host')), 1)
+        self.assertNotIn(('observe', 'arm_host'), self.calls)
+
+
+if __name__ == '__main__':
+    unittest.main()
