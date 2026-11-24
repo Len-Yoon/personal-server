@@ -23,9 +23,6 @@ from .initial_postboot import scope, sameboot, TRANSITION_FIELDS
 from .initial_unpublished import derive_predecessor
 
 ERROR = 'successor_app_start_unverified'
-# The measured paired read needs about 2.5s; reserve the existing live-read
-# margin for one fresh observation, without extending its caller's deadline.
-_READ_RETRY_RESERVE_SECONDS = 2.65
 
 
 def need(condition):
@@ -205,7 +202,6 @@ class PairedAuthorityBoundary:
         inputs.validate()
         need(callable(powershell) and type(deadline) in (int, float) and math.isfinite(deadline))
         self.call, self.inputs, self.deadline, self.phase = powershell, inputs, deadline, 0
-        self.renewal_race = False
 
     def powershell(self, source, deadline):
         need(time.monotonic() < deadline <= self.deadline)
@@ -257,12 +253,40 @@ $body=[Text.UTF8Encoding]::new($false,$true).GetString([Convert]::FromBase64Stri
 $first=@(& $authority)
 if($first.Count -ne 1){{throw 'successor_before_shape'}}
 $before=ConvertFrom-Json $first[0]
-$offset=$clock.Elapsed.TotalSeconds
-$rows=@($body|& $python -I -B - $before.service_incarnation_sha256)
-if($LASTEXITCODE -ne 0 -or $rows.Count -ne 1){{throw 'successor_pair_unverified'}}
-$last=@(& $authority)
-if($last.Count -ne 1){{throw 'successor_after_shape'}}
-@{{before=$before;after=(ConvertFrom-Json $last[0]);pair=(ConvertFrom-Json $rows[0]);
+$limit={budget:.6f}
+for($readIndex=0;$readIndex -lt 2;$readIndex++){{
+ $offset=$clock.Elapsed.TotalSeconds
+ $rows=@($body|& $python -I -B - $before.service_incarnation_sha256)
+ if($LASTEXITCODE -ne 0 -or $rows.Count -ne 1){{throw 'successor_pair_unverified'}}
+ $last=@(& $authority)
+ if($last.Count -ne 1){{throw 'successor_after_shape'}}
+ $pair=ConvertFrom-Json $rows[0]
+ $after=ConvertFrom-Json $last[0]
+ # If publication advanced around the paired read, reuse its verified
+ # closing snapshot as the opening snapshot for one new read. There is
+ # no second SSH command and the caller's deadline still applies.
+ $advanced=$after.heartbeat_sequence - $before.heartbeat_sequence
+ if($readIndex -ne 0 -or $pair.lease_sha256 -cin @($before.live_lease_sha256,$after.live_lease_sha256) -or
+    $pair.lease_sha256 -cnotmatch '\\A[a-f0-9]{{64}}\\z' -or
+    $before.service_incarnation_sha256 -cne $after.service_incarnation_sha256 -or
+    $advanced -lt 0 -or $advanced -gt 1 -or
+    ($advanced -eq 0 -and $before.live_lease_sha256 -cne $after.live_lease_sha256) -or
+    $clock.Elapsed.TotalSeconds + 1.8 -ge $limit){{break}}
+ foreach($sample in @($before,$after)){{
+  if((@($sample.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne
+     'heartbeat_sequence,live_lease_sha256,service_incarnation_sha256,windows_generation' -or
+     ($sample.windows_generation -isnot [int] -and $sample.windows_generation -isnot [long]) -or
+     $sample.windows_generation -ne 1 -or
+     ($sample.heartbeat_sequence -isnot [int] -and $sample.heartbeat_sequence -isnot [long]) -or
+     $sample.heartbeat_sequence -lt 1 -or
+     $sample.live_lease_sha256 -isnot [string] -or $sample.live_lease_sha256 -cnotmatch '\\A[a-f0-9]{{64}}\\z' -or
+     $sample.service_incarnation_sha256 -isnot [string] -or $sample.service_incarnation_sha256 -cnotmatch '\\A[a-f0-9]{{64}}\\z'){{
+   throw 'successor_retry_native_shape'
+  }}
+ }}
+ $before=$after
+}}
+@{{before=$before;after=$after;pair=$pair;
  offset=$offset;elapsed=$clock.Elapsed.TotalSeconds}}|ConvertTo-Json -Depth 6 -Compress
 """
         need(len(command.encode()) <= 131072)
@@ -301,9 +325,7 @@ if($last.Count -ne 1){{throw 'successor_after_shape'}}
             expiries.append(self.started + max(0, self.result['offset'] + at - .05) + remaining)
         valid_until = min(expiries)
         need(valid_until - time.monotonic() > 1)
-        if pair['lease_sha256'] not in (before['live_lease_sha256'], after['live_lease_sha256']):
-            self.renewal_race = after['heartbeat_sequence'] - before['heartbeat_sequence'] <= 1
-            need(False)
+        need(pair['lease_sha256'] in (before['live_lease_sha256'], after['live_lease_sha256']))
         self.phase = 2
         return {'proof_sha256': pair['proof_sha256'], 'lease_sha256': pair['lease_sha256'],
                 'valid_until_monotonic': valid_until}
@@ -399,22 +421,11 @@ class SuccessorAppStage:
         self.consumed = False
 
     def _proof(self, deadline, guard):
-        remaining = deadline - time.monotonic()
-        first_deadline = deadline - _READ_RETRY_RESERVE_SECONDS if remaining > 2 * _READ_RETRY_RESERVE_SECONDS else deadline
-        for attempt in range(2):
-            limit = first_deadline if attempt == 0 else deadline
-            boundary = PairedAuthorityBoundary(self.powershell, self.proof_inputs, limit)
-            try:
-                return self.lease.verify_recovery_continuity(
-                    boundary.powershell, self.plan['initial_cutover_recovery'], limit,
-                    observe_pair=boundary.observe_pair, assert_guard=guard, postboot=self.postboot,
-                    predecessor_terminal=self.terminal)
-            except (TransitionBlocked, wire.BridgeRejected) as error:
-                timeout = type(error) is wire.BridgeRejected and str(error) in {
-                    'guest_ssh_deadline_exceeded', 'bridge_deadline_exceeded'}
-                if attempt or not (boundary.renewal_race or timeout) or deadline - time.monotonic() < _READ_RETRY_RESERVE_SECONDS:
-                    raise
-                guard()
+        boundary = PairedAuthorityBoundary(self.powershell, self.proof_inputs, deadline)
+        return self.lease.verify_recovery_continuity(
+            boundary.powershell, self.plan['initial_cutover_recovery'], deadline,
+            observe_pair=boundary.observe_pair, assert_guard=guard, postboot=self.postboot,
+            predecessor_terminal=self.terminal)
 
     def preflight(self, deadline, *, assert_guard):
         """Read-only proof; no authorization is published and no app is started."""

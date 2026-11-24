@@ -1069,75 +1069,32 @@ class SuccessorAuthorityTimingTests(unittest.TestCase):
     def fixture(self):
         return SuccessorAppWiringTests().fixture()
 
-    def test_retry_reserves_same_absolute_deadline_and_uses_fresh_boundary(self):
+    def test_proof_retains_full_timeout_and_does_not_repeat_transport_error(self):
         app, stage, _ = self.fixture()
-        seen = []
-        def verify(read, recovery, deadline, **kwargs):
-            seen.append((read.__self__, deadline))
-            if len(seen) == 1:
-                raise wire.BridgeRejected('guest_ssh_deadline_exceeded')
-            return 'a' * 64
+        calls = []
+        def verify(read, recovery, limit, **kwargs):
+            calls.append(limit)
+            raise wire.BridgeRejected('guest_ssh_deadline_exceeded')
         stage.lease.verify_recovery_continuity = verify
         with patch.object(app.time, 'monotonic', return_value=100):
-            self.assertEqual(stage._proof(106, lambda: None), 'a' * 64)
-        self.assertEqual([deadline for _, deadline in seen], [103.35, 106])
-        self.assertIsNot(seen[0][0], seen[1][0])
-
-    def test_short_budget_and_exhausted_reserve_never_retry(self):
-        app, stage, _ = self.fixture()
-        for deadline, after in ((105.28, 103), (106, 103.4)):
-            with self.subTest(deadline=deadline), patch.object(app.time, 'monotonic') as clock:
-                clock.return_value = 100
-                calls = []
-                def verify(read, recovery, limit, **kwargs):
-                    calls.append(limit)
-                    clock.return_value = after
-                    raise wire.BridgeRejected('guest_ssh_deadline_exceeded')
-                stage.lease.verify_recovery_continuity = verify
-                with self.assertRaises(wire.BridgeRejected):
-                    stage._proof(deadline, lambda: None)
-                self.assertEqual(len(calls), 1)
-                if deadline == 105.28:
-                    self.assertEqual(calls, [deadline])
-
-    def test_only_read_timeouts_retry_once_and_guard_can_stop_retry(self):
-        app, stage, _ = self.fixture()
-        from unittest.mock import Mock
-        for error in (TransitionBlocked('bad_native_scope'), wire.BridgeRejected('guest_ssh_exit_unconfirmed')):
-            verify = Mock(side_effect=error)
-            stage.lease.verify_recovery_continuity = verify
-            with patch.object(app.time, 'monotonic', return_value=100), self.assertRaises(type(error)):
+            with self.assertRaises(wire.BridgeRejected):
                 stage._proof(106, lambda: None)
-            self.assertEqual(verify.call_count, 1)
-        verify = Mock(side_effect=wire.BridgeRejected('guest_ssh_deadline_exceeded'))
-        stage.lease.verify_recovery_continuity = verify
-        with patch.object(app.time, 'monotonic', return_value=100), self.assertRaises(wire.BridgeRejected):
-            stage._proof(106, lambda: None)
-        self.assertEqual(verify.call_count, 2)
-        verify.reset_mock()
-        guard = Mock(side_effect=TransitionBlocked('guard_lost'))
-        with patch.object(app.time, 'monotonic', return_value=100), self.assertRaisesRegex(TransitionBlocked, 'guard_lost'):
-            stage._proof(106, guard)
-        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(calls, [106])
 
-    def test_renewal_race_reobserves_all_facts_with_new_challenge(self):
+    def test_windows_bracket_resamples_in_one_call_and_still_requires_matching_lease(self):
         app, stage, _ = self.fixture()
         native = {'windows_generation': 1, 'service_incarnation_sha256': '1'*64,
                   'heartbeat_sequence': 2, 'live_lease_sha256': '2'*64}
         output = {'before': native, 'after': native | {'heartbeat_sequence': 3},
-                  'pair': {'proof_sha256': '3'*64, 'lease_sha256': 'f'*64,
+                  'pair': {'proof_sha256': '3'*64, 'lease_sha256': '2'*64,
                            'observations': {'A': [.1, 4.0], 'B': [.2, 3.5]}, 'child_elapsed_seconds': .3},
                   'offset': .2, 'elapsed': .6}
-        commands, challenges = [], []
+        commands = []
         def powershell(command, deadline):
-            commands.append(command)
-            value = copy.deepcopy(output)
-            if len(commands) == 2:
-                value['pair']['lease_sha256'] = '2'*64
-            return value
+            commands.append((command,deadline))
+            return copy.deepcopy(output)
         def verify(read, recovery, deadline, *, observe_pair, **kwargs):
-            challenge = str(len(challenges)+4)*64
-            challenges.append(challenge)
+            challenge = '4'*64
             source = "native -RecoveryContinuity -PriorSha256 '" + challenge + "'"
             before = read(source, deadline)
             paired = observe_pair(challenge=challenge, service_incarnation_sha256=before['service_incarnation_sha256'], deadline=deadline)
@@ -1147,17 +1104,17 @@ class SuccessorAuthorityTimingTests(unittest.TestCase):
         stage.lease.verify_recovery_continuity = verify
         with patch.object(app.time, 'monotonic', return_value=100):
             proof = stage._proof(106, lambda: None)
-        self.assertEqual(challenges, ['4'*64, '5'*64])
-        self.assertEqual(len(commands), 2)
-        self.assertLess(commands[0].index('$body='), commands[0].index('$first='))
-        self.assertAlmostEqual(proof['valid_until_monotonic'], 103.85)
-        for field, value in (('service_incarnation_sha256', '9'*64), ('heartbeat_sequence', 5)):
-            with self.subTest(field=field):
-                output['after'] = native | {field: value}
-                commands.clear(); challenges.clear()
-                with patch.object(app.time, 'monotonic', return_value=100), self.assertRaises(TransitionBlocked):
-                    stage._proof(106, lambda: None)
-                self.assertEqual(len(commands), 1)
+            self.assertEqual(len(commands), 1)
+            command, deadline = commands[0]
+            self.assertEqual(deadline, 106)
+            self.assertIn('for($readIndex=0;$readIndex -lt 2;', command)
+            self.assertIn('$before=$after', command)
+            self.assertLess(command.index('$offset='), command.index('$rows='))
+            self.assertAlmostEqual(proof['valid_until_monotonic'], 103.85)
+            output['pair']['lease_sha256'] = 'f'*64
+            with self.assertRaises(TransitionBlocked):
+                stage._proof(106, lambda: None)
+            self.assertEqual(len(commands), 2)
 
     def test_start_snapshots_partial_lineage_before_callbacks(self):
         app, stage, request = self.fixture()
