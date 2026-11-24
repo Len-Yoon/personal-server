@@ -19,6 +19,7 @@ FIELDS={'schema_version','request','args','hold_sha256','service_instance_sha256
 MAX_NUMBERED_ATTEMPTS = 8
 CONTINUATION = 'resume-partial-prestart-continuation-'
 LINK_FIELDS = {'authorization_sha256', 'intent_sha256', 'progress_sha256'}
+COMPLETED_LINK_FIELDS = LINK_FIELDS | {'done_sha256'}
 
 def need(value):
     if not value:raise TransitionBlocked(ERROR)
@@ -100,13 +101,18 @@ def prior(request,hold,active,intent_pin,progress_pins):
     _prior_attempt(request,hold,active,stage,stem,intent_pin,progress_pins,'resume-')
     return stage,stem
 
-def _prior_attempt(request,hold,active,stage,stem,intent_pin,progress_pins,successor,*,authorization_pin=None):
+def _prior_attempt(request,hold,active,stage,stem,intent_pin,progress_pins,successor,*,authorization_pin=None,
+                   done_pin=None):
     from . import native_guest_worker as w
     need(wire._hash(intent_pin) and type(progress_pins) is dict
          and all(type(name) is str and wire._hash(pin) for name,pin in progress_pins.items()))
     names={p.name[len(stem):] for p in stage.iterdir()
            if p.name.startswith(stem) and (successor is None or not p.name.startswith(stem+successor))}
-    need(names=={'intent.json',*progress_pins})
+    expected_names = {'intent.json', *progress_pins}
+    if done_pin is not None:
+        need(wire._hash(done_pin) and authorization_pin is not None)
+        expected_names.add('done.json')
+    need(names==expected_names)
     raw=w.runtime._read(stage/(stem+'intent.json'),0,{0o600},limit=131072)
     need(wire._digest(raw)==intent_pin)
     intent=decode(raw);scope=w._scope(request)
@@ -130,6 +136,18 @@ def _prior_attempt(request,hold,active,stage,stem,intent_pin,progress_pins,succe
              and value['intent_sha256']==intent_pin and value['started']==sorted(order[:index+1])
              and type(value['proof']) is dict and set(value['proof'])=={'windows_proof_sha256','guest_proof_sha256'}
              and all(wire._hash(pin) for pin in value['proof'].values()))
+    if done_pin is not None:
+        need(len(progress_pins)==len(order))
+        done_raw=w.runtime._read(stage/(stem+'done.json'),0,{0o600},limit=131072)
+        need(wire._digest(done_raw)==done_pin)
+        done=decode(done_raw)
+        proof=done.get('proof')
+        expected_done={'schema_version':1,'status':'STARTED','intent_sha256':intent_pin,
+                     'hold_sha256':request.args['hold_sha256'],'started':list(order),
+                     'proof':proof,'automatic_retry_permitted':False}
+        need(wire._bytes(done)==wire._bytes(expected_done) and type(proof) is dict
+             and set(proof)=={'windows_proof_sha256','guest_proof_sha256'}
+             and all(wire._hash(pin) for pin in proof.values()))
 def _read_predecessor_authorization(request,raw,hold,active,pin,*,partial=False,prestart=False,
                                     continuation=False,numbered_attempt=0):
     from . import native_guest_worker as w
@@ -484,9 +502,12 @@ def preserved(request,body,value,hold,active,raw):
 
 
 def _latest_history(request, raw, hold, active, link):
-    """Authenticate an attempted head and every immutable predecessor, without retrying it."""
+    """Authenticate the previous app run and every immutable predecessor."""
     from . import native_guest_worker as w
-    need(type(link) is dict and set(link) == LINK_FIELDS)
+    need(type(link) is dict and set(link) in (LINK_FIELDS, COMPLETED_LINK_FIELDS))
+    completed='done_sha256' in link
+    if completed:
+        need(wire._hash(link['done_sha256']))
     numbered = latest_attempt(request)
     continuation = bool(numbered) or path(request, partial=True, prestart=True, continuation=True).exists()
     prestart = continuation or path(request, partial=True, prestart=True).exists()
@@ -500,20 +521,26 @@ def _latest_history(request, raw, hold, active, link):
     previous = replace(request, nonce=scope_record.get('nonce'), sequence=scope_record.get('sequence'))
     _validate_authorization(previous, raw, hold, active, auth, partial=partial, prestart=prestart,
                             continuation=continuation, numbered_attempt=numbered)
-    stage, stem = prior(previous, hold, active, auth['prior_intent_sha256'], auth['prior_progress_sha256'])
-    if partial:
-        _resume_lineage(previous, raw, hold, active, stage, stem, auth['prior_intent_sha256'],
-                        auth['service_instance_sha256'], auth['prior_resume'])
-    if prestart:
-        partial_auth = _prestart_lineage(previous, raw, hold, active, stage, stem, auth)
-    if continuation:
-        prestart_auth = _continuation_lineage(previous, raw, hold, active, stage, stem, auth, partial_auth)
-    if numbered:
-        _numbered_lineage(previous, raw, hold, active, stage, stem, auth, prestart_auth)
+    if 'carryover_receipt_sha256' in auth:
+        need(completed)
+        stage,stem=w.ROOT/previous.binding.attempt_id,prefix(previous)
+        _carryover_lineage(previous,raw,hold,active,auth,stage,stem,require_stopped=False)
+    else:
+        stage, stem = prior(previous, hold, active, auth['prior_intent_sha256'], auth['prior_progress_sha256'])
+        if partial:
+            _resume_lineage(previous, raw, hold, active, stage, stem, auth['prior_intent_sha256'],
+                            auth['service_instance_sha256'], auth['prior_resume'])
+        if prestart:
+            partial_auth = _prestart_lineage(previous, raw, hold, active, stage, stem, auth)
+        if continuation:
+            prestart_auth = _continuation_lineage(previous, raw, hold, active, stage, stem, auth, partial_auth)
+        if numbered:
+            _numbered_lineage(previous, raw, hold, active, stage, stem, auth, prestart_auth)
     head = (_numbered_stem(stem, numbered) if numbered else stem + 'resume-' +
             ('partial-' if partial else '') + ('prestart-' if prestart else '') +
             ('continuation-' if continuation else ''))
     _prior_attempt(previous, hold, active, stage, head, link['intent_sha256'], link['progress_sha256'],
-                   None, authorization_pin=link['authorization_sha256'])
-    need(len(link['progress_sha256']) < len(w.RECOVERY_START_ORDER))
+                   None, authorization_pin=link['authorization_sha256'],done_pin=link.get('done_sha256'))
+    if not completed:
+        need(len(link['progress_sha256']) < len(w.RECOVERY_START_ORDER))
     return auth

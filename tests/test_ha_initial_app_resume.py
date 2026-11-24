@@ -646,6 +646,81 @@ class InitialAppResumeTests(unittest.TestCase):
         with self.assertRaises(TransitionBlocked):
             self.attest_successor(prior_resume=link)
 
+    def test_completed_carryover_history_verifies_done_and_predecessors(self):
+        partial = self.prepare_interrupted_successor()
+        authorization = self.attest_successor(prior_resume=partial)
+        self.assertEqual(w.start_initial_recovery(self.request,self.windows).status, 'PASS')
+        stem = resume.prefix(self.request)+'resume-partial-'
+        files = {p.name.removeprefix(stem):p for p in self.stage.iterdir() if p.name.startswith(stem)}
+        artifact = {name:wire._digest(path.read_bytes()) for name,path in files.items()}
+        link = {'authorization_sha256':authorization['authorization_sha256'],
+                'intent_sha256':artifact.pop('intent.json'),
+                'done_sha256':artifact.pop('done.json'),'progress_sha256':artifact}
+
+        def verify(evidence):
+            return resume._latest_history(self.request,b'hold',self.hold,self.active,evidence)
+
+        self.assertEqual(verify(link)['prior_resume'],partial)
+        with self.assertRaises(TransitionBlocked):
+            verify({key:value for key,value in link.items() if key!='done_sha256'})
+        with self.assertRaises(TransitionBlocked):
+            verify(link|{'done_sha256':'a'*64})
+        self.assertEqual(len(link['progress_sha256']),8)
+        done=files['done.json']
+        raw=done.read_bytes()
+        record=resume.decode(raw)
+        record['started']=record['started'][:-1]
+        changed=wire._bytes(record)
+        done.write_bytes(changed)
+        with self.assertRaises(TransitionBlocked):
+            verify(link|{'done_sha256':wire._digest(changed)})
+        done.write_bytes(raw)
+        earlier=self.stage/(resume.prefix(self.request)+'resume-intent.json')
+        earlier.write_bytes(earlier.read_bytes()+b' ')
+        with self.assertRaises(TransitionBlocked):
+            verify(link)
+
+    def test_completed_carryover_uses_a_new_record_only_after_apps_are_stopped(self):
+        postboot = self.prepare_successor_carryover()
+        current = self.request
+        plan = {'installation_id':current.args['installation_id'],
+                'initial_recovery_postboot':current.args['postboot'],
+                'initial_cutover_recovery':{'attempt_id':current.args['recovery_attempt_id']},
+                'initial_cutover_handoff':{'attempt_id':current.binding.attempt_id,
+                                           'legacy_plan_sha256':current.binding.plan_sha256}}
+        plan_raw=wire._bytes(plan)
+        plan_pin=wire._digest(plan_raw)
+        self.request=current=replace(current,args=current.args|{'postboot_plan_sha256':plan_pin})
+        auth=self.attest_successor()
+        self.assertEqual(w.start_initial_recovery(current,self.windows).status,'PASS')
+        stem=resume.prefix(current)+'resume-'
+        files={p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        records={p.name.removeprefix(stem):wire._digest(raw) for p,raw in files.items() if p.name.startswith(stem)}
+        link={'authorization_sha256':auth['authorization_sha256'],
+              'intent_sha256':records.pop('intent.json'),
+              'done_sha256':records.pop('done.json'),'progress_sha256':records}
+        newer=replace(current,nonce='3'*64,args=current.args|{
+            'postboot':current.args['postboot']|{
+                'attempt_id':'c'*64,'predecessor_plan_sha256':plan_pin,
+                'carryover_receipt_sha256':postboot.DRAFT_PIN,
+                'predecessor_seal_sha256':postboot.DRAFT_PIN},
+            'postboot_plan_sha256':postboot.DRAFT_PIN})
+
+        def issue():
+            return postboot.attest_carryover(newer,predecessor_plan_raw=plan_raw,
+                    predecessor_request=current,history=link)
+
+        with self.assertRaises(TransitionBlocked):
+            issue()
+        self.assertFalse(postboot.carryover_path(newer,'c'*64).exists())
+        for container in self.contracts.values():
+            container['running']=False
+        receipt=issue()
+        admitted=replace(newer,args=newer.args|{'postboot':newer.args['postboot']|{
+            'carryover_receipt_sha256':receipt.receipt_sha256}})
+        self.assertEqual(postboot.observe_carryover(admitted,'c'*64,receipt.receipt_sha256)['history'],link)
+        self.assertTrue(all(path.read_bytes()==raw for path,raw in files.items()))
+
     def test_interrupted_carryover_rejects_wrong_instance_tampering_and_drift(self):
         link = self.prepare_interrupted_successor()
         with self.assertRaises(TransitionBlocked):
