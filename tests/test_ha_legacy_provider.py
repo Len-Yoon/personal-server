@@ -344,5 +344,196 @@ class LegacyProviderTest(unittest.TestCase):
                     module.main(["restore", "--config", str(source), "--config-sha256", wire._digest(raw)])
 
 
+class SamebootReleaseTest(unittest.TestCase):
+    def setUp(self):
+        from ha_control import native_sameboot_release as release
+        self.release = release
+
+    def pair(self):
+        release = self.release
+        files = {name: {"filename": name, "bytes": 10, "sha256": "7" * 64} for name in (
+            "python/python.exe", "controller/files/ha_control/cli.py",
+            "controller/files/ha_control/initial_pg_lease.py")}
+        raw = wire._bytes({"files": files})
+        config = {"plan": r"C:\ProgramData\fixture\plan.json", "plan_sha256": "1" * 64,
+                  "binding": r"C:\ProgramData\fixture\binding.json", "binding_sha256": "2" * 64,
+                  "runtime": r"C:\ProgramData\fixture\runtime", "python_sha256": "7" * 64,
+                  "boot_sha256": "8" * 64, "revision": 14}
+        return release.WindowsPairClosure(Mock(), config, runtime_manifest=raw,
+                                          runtime_manifest_sha256=wire._digest(raw))
+
+    def coordinator(self):
+        from ha_control.sameboot_transition import SCOPE_FIELDS
+        pair = self.pair()
+        scope = {key: "a" * 64 for key in SCOPE_FIELDS}
+        scope.update(previous_revision=14, previous_plan_sha256="1" * 64,
+                     previous_instance_sha256="2" * 64)
+        guard = Mock(return_value=True)
+        guest = Mock()
+        retired = {"retirement_sha256": "b" * 64, "held_observation_sha256": "c" * 64,
+                   "rollback_sha256": "d" * 64}
+        guest.retire.return_value = retired
+        guest.observe_retired.return_value = retired
+        driver = self.release.NativeSamebootRelease(scope, guest, pair, guard)
+        request = {"scope": scope, "stage": "retire_provider", "nonce": "e" * 64,
+                   "previous_sha256": "f" * 64, "plan_material_sha256": None}
+        receipts = {"preflight": {"rollback_sha256": "d" * 64}}
+        closed = {"closed_nodes": ["A", "B"], "synchronous": True, "same_expiry": True,
+                  "replay_verified": True, "effects_isolated": True, "revision": 15,
+                  "terminal_sha256": "3" * 64, "closed_proof_sha256": "4" * 64}
+        pair.snapshot = Mock(side_effect=[{"status": "RUNNING"}, {"status": "STOPPED", "terminal_sha256": "3" * 64},
+            {"status": "STOPPED", "disabled": True, "terminal_sha256": "3" * 64}])
+        pair.disable_stopped = Mock()
+        pair.closed_pair = Mock(return_value=closed)
+        return driver, request, receipts
+
+    def test_release_disables_only_after_native_stop_and_reobserves_closed_pair(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        result = driver.apply(self.release._encoded(request), self.release._encoded(receipts), time.monotonic() + 30)
+        self.assertEqual(result["evidence"]["terminal_sha256"], "3" * 64)
+        self.assertTrue(result["evidence"]["old_service_stopped_disabled"])
+        driver.guest.retire.assert_called_once()
+        driver.guest.observe_retired.assert_called_once()
+        driver.pair.disable_stopped.assert_called_once()
+        driver.pair.closed_pair.assert_called_once()
+        self.assertEqual(driver.pair.snapshot.call_count, 3)
+
+    def test_reconciliation_never_reissues_retirement_or_scm_mutation(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        driver.pair.snapshot.side_effect = None
+        driver.pair.snapshot.return_value = {"status": "STOPPED", "disabled": True, "terminal_sha256": "3" * 64}
+        driver.observe(self.release._encoded(request), self.release._encoded(receipts), time.monotonic() + 30)
+        driver.guest.retire.assert_not_called()
+        driver.pair.disable_stopped.assert_not_called()
+        request["stage"] = "close_pair"
+        receipts["retire_provider"] = {"terminal_sha256": "9" * 64}
+        with self.assertRaises(TransitionBlocked):
+            driver.observe(self.release._encoded(request), self.release._encoded(receipts), time.monotonic() + 30)
+        self.assertEqual(driver.pair.closed_pair.call_count, 1)
+
+    def test_changed_package_or_guard_denial_fails_before_guest_mutation(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        driver.pair.snapshot.side_effect = TransitionBlocked("runtime_changed")
+        with self.assertRaisesRegex(TransitionBlocked, "runtime_changed"):
+            driver.apply(self.release._encoded(request), self.release._encoded(receipts), time.monotonic() + 30)
+        driver.guest.retire.assert_not_called()
+        driver.pair.disable_stopped.assert_not_called()
+        driver.custody_guard.return_value = False
+        driver.pair.snapshot.reset_mock()
+        with self.assertRaises(TransitionBlocked):
+            driver.apply(self.release._encoded(request), self.release._encoded(receipts), time.monotonic() + 30)
+        driver.pair.snapshot.assert_not_called()
+
+    def test_pinned_natural_stop_needs_exact_native_terminal_and_pair_before_retirement(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        driver.expected_stopped_terminal_sha256 = "3" * 64
+        driver.pair.closed_pair_before_disable = Mock()
+        driver.pair.snapshot.side_effect = [
+            {"status": "STOPPED", "terminal_sha256": "3" * 64},
+            {"status": "STOPPED", "terminal_sha256": "3" * 64},
+            {"status": "STOPPED", "disabled": True, "terminal_sha256": "3" * 64}]
+        driver.retire_provider(request, receipts, time.monotonic() + 30)
+        driver.pair.closed_pair_before_disable.assert_called_once()
+        driver.guest.retire.assert_called_once()
+        other, request, receipts = self.coordinator()
+        other.expected_stopped_terminal_sha256 = "9" * 64
+        other.pair.snapshot.side_effect = None
+        other.pair.snapshot.return_value = {"status": "STOPPED", "terminal_sha256": "3" * 64}
+        with self.assertRaises(TransitionBlocked):
+            other.retire_provider(request, receipts, time.monotonic() + 30)
+        other.guest.retire.assert_not_called()
+        other.pair.disable_stopped.assert_not_called()
+
+    def test_later_prearm_guard_does_not_demand_absent_replaced_provider_port(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        request["stage"] = "carryover"
+        receipts.update(retire_provider={"terminal_sha256": "3" * 64}, close_pair={"terminal_sha256": "3" * 64})
+        result = driver.observe_closed(request, receipts, time.monotonic() + 30)
+        self.assertEqual(result["revision"], 15)
+        driver.guest.retire.assert_not_called()
+        driver.guest.observe_retired.assert_not_called()
+        driver.pair.snapshot.assert_not_called()
+
+    def test_guest_reconciliation_checks_preserved_held_and_writes_nothing(self):
+        fixture = LegacyProviderTest()
+        self.addCleanup(fixture.doCleanups)
+        with tempfile.TemporaryDirectory() as root:
+            provider = fixture.adapter(root)
+            state, dispatch = fixture.state(provider)
+            provider.retire(Mock(return_value="a" * 64))
+            # An uncertain response can lose the done receipt; protected intent
+            # and direct absence/preserved-held facts are sufficient to observe.
+            provider._paths("retire")[1].unlink()
+            with patch.object(module.runtime, "_write") as write:
+                result = self.release.observe_guest_retired(provider, Mock(return_value="a" * 64))
+                self.assertEqual(result["rollback_sha256"], provider.rollback)
+                write.assert_not_called()
+            self.assertEqual(dispatch.call_count, 1)
+            state["held_pid"] = 99
+            with self.assertRaises(TransitionBlocked):
+                self.release.observe_guest_retired(provider, Mock(return_value="a" * 64))
+            self.assertEqual(dispatch.call_count, 1)
+
+    def test_windows_script_never_stops_running_service_and_closes_exact_pair(self):
+        pair = self.pair()
+        source = self.release.WINDOWS_BODY
+        self.assertNotIn("StopService", source)
+        self.assertNotIn("Stop-Service", source)
+        self.assertLess(source.index("Stopped $service"), source.index("Invoke-CimMethod -InputObject $service -MethodName ChangeStartMode"))
+        self.assertIn("-Arguments @{StartMode='Disabled'} -OperationTimeoutSec 5 -ErrorAction Stop", source)
+        self.assertNotIn("$service.ChangeStartMode(", source)
+        self.assertIn("SameScope $record.postboot $plan.initial_recovery_postboot", source)
+        sql = self.release.PAIRED_SQL
+        compile(sql, "exact_pair", "exec")
+        for expected in ("REPEATABLE READ READ ONLY", "validate_catalog(conn,binding)",
+                         "InitialPgLeaseRecovery._quarantine_observation", "primary[12]==replica[12]",
+                         "lsn(peers[0][6])>=lsn(primary[19])"):
+            self.assertIn(expected, sql)
+        import base64
+        import gzip
+        import re
+        import time
+        def powershell(script, _deadline):
+            blob = re.search(r"FromBase64String\('([^']+)'\)", script)[1]
+            cfg = json.loads(gzip.decompress(base64.b64decode(blob)))
+            return {"challenge": cfg["challenge"], "status": "CLOSED_PAIR_VERIFIED", "terminal_sha256": "3" * 64,
+                    "proof_sha256": "4" * 64, "closed_revision": 15}
+        pair.windows.powershell.side_effect = powershell
+        result = pair.closed_pair("3" * 64, time.monotonic() + 30)
+        self.assertEqual(result["closed_nodes"], ["A", "B"])
+        pair.windows.powershell.return_value = {}
+        pair.windows.powershell.side_effect = None
+        with self.assertRaises(TransitionBlocked):
+            pair.closed_pair("3" * 64, time.monotonic() + 30)
+
+    def test_postarm_closure_requires_both_successor_pins_and_preserves_original_scope(self):
+        import base64
+        import gzip
+        import re
+        import time
+        pair = self.pair()
+        captured = []
+        def powershell(script, _deadline):
+            blob = re.search(r"FromBase64String\('([^']+)'\)", script)[1]
+            cfg = json.loads(gzip.decompress(base64.b64decode(blob)))
+            captured.append(cfg)
+            return {"challenge": cfg["challenge"], "status": "CLOSED_PAIR_VERIFIED", "terminal_sha256": "3" * 64,
+                    "proof_sha256": "4" * 64, "closed_revision": 15}
+        pair.windows.powershell.side_effect = powershell
+        pair.closed_pair_after_arm("3" * 64, "5" * 64, "6" * 64, time.monotonic() + 30)
+        self.assertEqual(captured[0]["mode"], "closed_after_arm")
+        self.assertEqual(captured[0]["successor"], {"path_sha256": "5" * 64, "image_sha256": "6" * 64})
+        self.assertEqual(captured[0]["plan_sha256"], pair.config["plan_sha256"])
+        self.assertTrue(captured[0]["verify_runtime"])
+        with self.assertRaises(TransitionBlocked):
+            pair.closed_pair_after_arm("3" * 64, "5" * 64, "invalid", time.monotonic() + 30)
+        self.assertEqual(len(captured), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1286,6 +1286,106 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertEqual(self.calls.count(('apply', 'arm_host')), 1)
         self.assertNotIn(('observe', 'arm_host'), self.calls)
 
+    def test_native_guard_tracks_the_stopped_successor_after_arming(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from ha_control.native_sameboot_driver import NativeSamebootDriver
+
+        encode = self.module._encoded
+        terminal = self.terminal
+        closed = {'terminal_sha256': terminal, 'revision': 15, 'closed_nodes': ['A', 'B'],
+                  'synchronous': True, 'same_expiry': True, 'replay_verified': True,
+                  'effects_isolated': True}
+        release = Mock()
+        release.observe_closed.return_value = closed
+        release.pair.closed_pair_after_arm.return_value = closed
+        platform = Mock()
+        platform.guard.return_value = True
+        host = SimpleNamespace(checked={'plan_sha256': self.plan, 'successor_image_sha256': '4' * 64},
+                               config={'image_path_pin': '8' * 64})
+        driver = NativeSamebootDriver(release=release, platform=platform, windows=None, successor_options={},
+                                      paired_publication=None, apps_factory=None)
+        chain = encode({'close_pair': closed, 'arm_host': {'plan_sha256': self.plan}})
+        arm = encode({'stage': 'arm_host', 'plan_material_sha256': self.plan})
+        publish = encode({'stage': 'publish'})
+        deadline = self.clock() + 10
+        with patch.object(driver, '_host', return_value=host):
+            self.assertTrue(driver.guard(arm, chain, deadline, observe_only=False))
+            self.assertTrue(driver.guard(arm, chain, deadline, observe_only=True))
+            self.assertTrue(driver.guard(publish, chain, deadline, observe_only=False))
+            release.observe_closed.assert_called_once()
+            self.assertEqual(release.pair.closed_pair_after_arm.call_count, 2)
+            release.pair.closed_pair_after_arm.assert_called_with(terminal, '8' * 64, '4' * 64, deadline)
+            release.pair.closed_pair_after_arm.return_value = closed | {'closed_nodes': ['B']}
+            with self.assertRaises(TransitionBlocked):
+                driver.guard(publish, chain, deadline, observe_only=False)
+            self.assertTrue(driver.guard(publish, chain, deadline, observe_only=True))
+
+    def test_native_successor_builder_preserves_validated_predecessor_material(self):
+        from pathlib import PureWindowsPath
+        from unittest.mock import Mock
+
+        from ha_control import native_sameboot_successor as native
+
+        _, files = SamebootPostbootSealTests().transition_fixture()
+        encode = self.module._encoded
+        old = json.loads(files['postboot-predecessor-plan.json'])
+        old['windows_recovery_observers'].update(held_admission={'server_pid': 200}, provider_isolation={})
+        old['pg_enforcement'] = {'definition_sha256': '1' * 64, 'effects': {'code_sha256': '2' * 64}}
+        old_raw = encode(old)
+        old_pin = hashlib.sha256(old_raw).hexdigest()
+        terminal = encode(json.loads(files[FILES[0]]) | {'controller_plan_sha256': old_pin})
+        binding = encode(json.loads(files[FILES[1]]) | {'controller_plan_sha256': old_pin})
+        lines = files[FILES[2]].decode().splitlines()
+        args = ('\n'.join('plan_sha256=' + old_pin if line.startswith('plan_sha256=') else line
+                          for line in lines) + '\n').encode()
+        recovery = old['initial_cutover_recovery']['attempt_id']
+        provenance = dict.fromkeys((*native.PROVENANCE, 'enforced_adapter_sha256', 'enforced_driver_sha256'), '3' * 64)
+        provenance.update(source_commit='a' * 40, enforced_definition_sha256='1' * 64,
+                          effects_runtime_sha256='2' * 64)
+        runtime = dict.fromkeys(('manifest_sha256', 'bundle_sha256', 'python_sha256', 'launcher_sha256',
+                                 'preflight_sha256', 'scm_sha256'), '4' * 64)
+        runtime.update(path=rf'C:\ProgramData\N100HA_{recovery[:24]}\runtime-{"4" * 24}', provenance=provenance)
+        observers = {name: {'pipe_name': 'n100ha-recovery-proof-' + digit * 32,
+                            'server_pid': 300 + index, 'key_sha256': digit * 64}
+                     for index, (name, digit) in enumerate(zip(('legacy', 'held_admission', 'provider_isolation'),
+                                                              '567', strict=True))}
+        resumed = json.loads(files[FILES[4]])
+        evidence = {key: resumed[key] for key in ('closed_pair_sha256', 'closed_revision', 'guests', 'observed',
+                  'guest_observation_sha256', 'clock_ca_validated', 'fresh_vsock')}
+        evidence['carryover_sha256'] = 'd' * 64
+        evidence['guests']['A']['container_inventory_sha256'] = evidence['guest_observation_sha256']['A'] = 'd' * 64
+        material = native.assemble_material(old_raw, terminal, binding, args, files[FILES[6]],
+                                           previous_sha256=old_pin, attempt='a1' * 32, successor_image_sha256='a2' * 32,
+                                           runtime=runtime, observers=observers, evidence=evidence)
+        self.assertEqual(self.module.bind_successor_plan(**material)['carryover_sha256'], 'd' * 64)
+        self.assertEqual(material['files'][FILES[6]], files[FILES[6]])
+        self.assertEqual(material['files'][FILES[0]], terminal)
+        self.assertEqual(material['candidate']['pg_enforcement'], old['pg_enforcement'])
+        plan = material['candidate']
+        root = PureWindowsPath(plan['initial_service_start']['binding_path']).parent
+        source = PureWindowsPath(runtime['path']) / 'controller' / 'files' / 'ha_control'
+        windows = Mock()
+        host = native.WindowsSamebootHost(windows, material=material, approval_path=str(root / 'approval.json'),
+                                         approval_sha256='e' * 64, preflight_path=str(source / 'windows-service-preflight.ps1'),
+                                         scm_path=str(source / 'stopped_service_installer' / 'StoppedService.cs'),
+                                         starter_path=str(source / 'windows-ha-start-initial-service.ps1'),
+                                         starter_sha256='f' * 64, reservation_sha256='9' * 64)
+        deadline = self.clock() + 10
+        windows.powershell.side_effect = ({'acceptance_sha256': 'c' * 64}, OSError('reply lost'), {'armed': True})
+        self.assertEqual(host.seal(deadline), 'c' * 64)
+        self.assertIn('Seal-HaInitialPostbootAcceptance', windows.powershell.call_args.args[0])
+        with self.assertRaises(OSError):
+            host.arm(deadline)
+        self.assertEqual(host.observe_armed(deadline), host.arm_evidence())
+        commands = [call.args[0] for call in windows.powershell.call_args_list]
+        self.assertEqual(sum('$p.ArmPostbootHost' in command for command in commands), 1)
+        self.assertNotIn('$p.Go', commands[-1])
+        material['files'][FILES[0]] += b' '
+        with self.assertRaises(TransitionBlocked):
+            self.module.bind_successor_plan(**material)
+
 
 if __name__ == '__main__':
     unittest.main()

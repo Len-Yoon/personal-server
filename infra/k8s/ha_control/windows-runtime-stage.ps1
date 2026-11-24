@@ -1,6 +1,7 @@
 param([string]$Manifest,[string]$ManifestPath,[string]$ManifestSha256,
       [string]$OwnedProfile,[string]$OwnedProfileSha256,[string]$RecoveryAttemptId,
-      [string]$RecoveryReservationSha256,[string]$RearmAttemptId,[string]$RearmPredecessorArgsSha256,[switch]$Go)
+      [string]$RecoveryReservationSha256,[string]$RearmAttemptId,[string]$RearmPredecessorArgsSha256,
+      [switch]$IncomingRecoveryRuntime,[switch]$Go)
 # Stage code only into a new private directory. No SCM, policy, VM or credential installer.
 $ErrorActionPreference='Stop'
 $WarningPreference='SilentlyContinue'
@@ -241,6 +242,26 @@ function Test-RuntimeRearmMode([bool]$RecoveryMode,[string]$Attempt,[string]$Arg
         $ArgsSha -cnotmatch '\A[a-f0-9]{64}\z' -or $Attempt -ceq $OriginalAttempt))){throw 'runtime_stage_rearm_scope'}
     return [bool]$Attempt
 }
+function Get-IncomingRecoveryRuntimeLayout([bool]$Rearming,[string]$ManifestPath,[string]$ManifestHash,[string]$RecoveryRoot){
+    if(-not $Rearming -or -not $ManifestPath -or -not $RecoveryRoot -or $ManifestHash -cnotmatch '\A[a-f0-9]{64}\z'){
+        throw 'runtime_stage_incoming_scope'
+    }
+    $directory=Join-Path $RecoveryRoot ('incoming-runtime-'+$ManifestHash.Substring(0,24))
+    $expected=Join-Path $directory 'runtime-manifest.json'
+    if($ManifestPath -cne $expected){throw 'runtime_stage_incoming_path'}
+    return [pscustomobject]@{Root=$RecoveryRoot;Directory=$directory;Manifest=$expected;Archive=(Join-Path $directory 'runtime.zip')}
+}
+function Assert-IncomingRecoveryRuntimeInputs($Layout,$Inputs,[string]$ManifestHash,$Spec){
+    Assert-RuntimeStagePath $Layout.Directory $Layout.Directory
+    foreach($entry in @(@{Path=$Layout.Manifest;Identity=$Inputs.ManifestIdentity;Stream=$Inputs.Manifest;Pin=$ManifestHash},
+                       @{Path=$Layout.Archive;Identity=$Inputs.ArchiveIdentity;Stream=$Inputs.Archive;Pin=$Spec.ArchiveHash})){
+        Assert-RuntimeStagePath $entry.Path $Layout.Directory '' $true
+        if([HaRuntimeStageV1.Native]::Identity($entry.Path) -cne $entry.Identity){throw 'runtime_stage_incoming_changed'}
+        $entry.Stream.Position=0
+        if([HaRuntimeStageV1.Rules]::StreamHash($entry.Stream) -cne $entry.Pin){throw 'runtime_stage_incoming_changed'}
+        $entry.Stream.Position=0
+    }
+}
 function Read-RearmRuntimeService([string]$Root,$Spec){
     $service=@(Get-CimInstance Win32_Service -Filter ("Name='"+$Spec.ServiceName+"'") -OperationTimeoutSec 5 -ErrorAction Stop)
     $pattern='\A"'+[regex]::Escape($Root)+'\\(?:(?:rearm|postboot)-[a-f0-9]{64}\\)?host\\windows-service-host\.exe"\z'
@@ -416,6 +437,7 @@ function Invoke-RuntimeStage {
     $script:RuntimeFailureStage='initialize'
     Initialize-RuntimeStage
     $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null;$ownedLease=$null;$owned=$null;$rearmLease=$null
+    $incomingLayout=$null;$incomingInputs=$null
     try{
         $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
         $script:RuntimeFailureStage='owned_profile'
@@ -429,6 +451,9 @@ function Invoke-RuntimeStage {
             $script:RuntimeRecoverySpec=[pscustomobject]@{ServiceSid=[HaRuntimeStageV1.Rules]::ServiceSid($identityName)}
             $script:RuntimeRecoveryRoot=Join-Path $parent ('N100HA_'+$RecoveryAttemptId.Substring(0,24))
         }
+        if($IncomingRecoveryRuntime){
+            $incomingLayout=Get-IncomingRecoveryRuntimeLayout $rearming $ManifestPath $ManifestSha256 $script:RuntimeRecoveryRoot
+        }
         if($OwnedProfile){
             . (Import-RuntimeOwnedSupport)
             $scriptHash=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($PSCommandPath))
@@ -440,11 +465,18 @@ function Invoke-RuntimeStage {
         }
         $script:RuntimeFailureStage='manifest'
         if($ManifestPath){
-            $prefix=[IO.Path]::GetDirectoryName($ManifestPath)
-            if([IO.Path]::GetFileName($ManifestPath) -cne 'runtime-manifest.json' -or [IO.Path]::GetDirectoryName($prefix) -ine $parent -or [IO.Path]::GetFileName($prefix) -cnotmatch '^N100HA_[0-9a-f]{24}$'){throw 'runtime_stage_manifest_path_rejected'}
+            if($null -ne $incomingLayout){
+                $prefix=$incomingLayout.Root;$inputRoot=$incomingLayout.Directory
+                $incomingInputs=[pscustomobject]@{ManifestIdentity=[HaRuntimeStageV1.Native]::Identity($ManifestPath);
+                    ArchiveIdentity='';Manifest=$null;Archive=$null}
+            }else{
+                $prefix=[IO.Path]::GetDirectoryName($ManifestPath);$inputRoot=$prefix
+                if([IO.Path]::GetFileName($ManifestPath) -cne 'runtime-manifest.json' -or [IO.Path]::GetDirectoryName($prefix) -ine $parent -or [IO.Path]::GetFileName($prefix) -cnotmatch '^N100HA_[0-9a-f]{24}$'){throw 'runtime_stage_manifest_path_rejected'}
+            }
             if($null -ne $owned -and $prefix -ine $script:RuntimeOwnedRoot){throw 'runtime_stage_owned_root_changed'}
             if($RecoveryAttemptId -and $prefix -ine $script:RuntimeRecoveryRoot){throw 'runtime_stage_recovery_scope'}
-            $manifestFile=Read-RuntimeStageInput $ManifestPath $prefix 2097152
+            $manifestFile=Read-RuntimeStageInput $ManifestPath $inputRoot 2097152
+            if($null -ne $incomingInputs){$incomingInputs.Manifest=$manifestFile}
             $raw=New-Object byte[] ([int]$manifestFile.Length);$offset=0
             while($offset -lt $raw.Length){$read=$manifestFile.Read($raw,$offset,$raw.Length-$offset);if($read -le 0){throw 'runtime_stage_manifest_read_failed'};$offset+=$read}
         }else{if($Manifest.Length -gt 2796204){throw 'runtime_stage_manifest_limit'};$raw=[Convert]::FromBase64String($Manifest);if($raw.Length -gt 2097152){throw 'runtime_stage_manifest_limit'}}
@@ -484,7 +516,12 @@ function Invoke-RuntimeStage {
             else{Assert-RecoveryRuntimeStopped $root $spec}
         }else{Assert-RuntimeStageParentManifest $stage $spec $owned}
         $script:RuntimeFailureStage='archive'
-        $zipPath=Join-Path $root 'runtime.zip';$zipFile=Read-RuntimeStageInput $zipPath $root 1073741824
+        if($null -ne $incomingLayout){
+            $zipPath=$incomingLayout.Archive;$zipRoot=$incomingLayout.Directory
+            $incomingInputs.ArchiveIdentity=[HaRuntimeStageV1.Native]::Identity($zipPath)
+        }else{$zipPath=Join-Path $root 'runtime.zip';$zipRoot=$root}
+        $zipFile=Read-RuntimeStageInput $zipPath $zipRoot 1073741824
+        if($null -ne $incomingInputs){$incomingInputs.Archive=$zipFile}
         if($zipFile.Length -ne $spec.ArchiveBytes -or ([HaRuntimeStageV1.Rules]::StreamHash($zipFile)) -cne $spec.ArchiveHash){throw 'runtime_stage_archive_changed'};$zipFile.Position=0
         $archive=[IO.Compression.ZipArchive]::new($zipFile,[IO.Compression.ZipArchiveMode]::Read,$true)
         [HaRuntimeStageV1.Rules]::Zip($archive,$spec)
@@ -497,6 +534,7 @@ function Invoke-RuntimeStage {
         if($null -ne $owned){$ownedLease.AssertCurrent();$intent.owned_profile_sha256=$OwnedProfileSha256;$intent.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256}
         if($recovering){$intent.recovery_attempt_id=$spec.RecoveryAttempt;$intent.reservation_receipt_sha256=$spec.ReservationHash}
         if($rearming){$intent.rearm_attempt_id=$RearmAttemptId;$intent.predecessor_args_sha256=$RearmPredecessorArgsSha256}
+        if($null -ne $incomingLayout){Assert-IncomingRecoveryRuntimeInputs $incomingLayout $incomingInputs $ManifestSha256 $spec}
         $script:RuntimeFailureStage='journal'
         Write-RuntimeStageEvent $journal 'intent' $intent $true
         $script:RuntimeFailureStage='extract'
@@ -530,6 +568,7 @@ function Invoke-RuntimeStage {
             $receipt.reservation_receipt_sha256=$spec.ReservationHash
             if($rearming){$receipt.schema_version=4;$receipt.rearm_attempt_id=$RearmAttemptId;$receipt.predecessor_args_sha256=$RearmPredecessorArgsSha256}
         }
+        if($null -ne $incomingLayout){Assert-IncomingRecoveryRuntimeInputs $incomingLayout $incomingInputs $ManifestSha256 $spec}
         Write-RuntimeStageEvent $journal 'sealed_code_stage' @{file_count=$count;native_code_only=$true;SCM_registered=$false;authority_issued=$false}
         $receipt|ConvertTo-Json -Compress
     }finally{

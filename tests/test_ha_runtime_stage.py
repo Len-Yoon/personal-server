@@ -140,6 +140,85 @@ foreach($drift in @(@{State='Running'},@{ProcessId=4},@{StartMode='Auto'},@{Serv
 exit 0
 ''')
 
+    def test_incoming_recovery_runtime_accepts_only_explicit_rearm_exact_siblings(self):
+        self.ps(r'''
+function Join-Path {param($Path,$ChildPath);return $Path.TrimEnd('\')+'\'+$ChildPath}
+$root='C:\ProgramData\N100HA_'+('a'*24);$pin='b'*64
+$directory=$root+'\incoming-runtime-'+$pin.Substring(0,24)
+$manifest=$directory+'\runtime-manifest.json'
+$layout=Get-IncomingRecoveryRuntimeLayout $true $manifest $pin $root
+if($layout.Root -cne $root -or $layout.Directory -cne $directory -or $layout.Manifest -cne $manifest -or
+   $layout.Archive -cne ($directory+'\runtime.zip')){throw 'fixture_layout'}
+foreach($parameters in @(@($false,$manifest,$pin,$root),@($true,'',$pin,$root),
+                        @($true,$manifest,'bad',$root),@($true,$manifest,$pin,''))){
+ try{Get-IncomingRecoveryRuntimeLayout @parameters;throw 'fixture_accepted_scope'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_incoming_scope'){throw}}
+}
+foreach($path in @($root+'\runtime-manifest.json',$manifest.Replace('incoming-runtime-','incoming-other-'),
+                  $manifest.Replace($pin.Substring(0,24),('c'*24)),$manifest+'\..\runtime-manifest.json',
+                  $manifest+':stream',$manifest.Replace('runtime-manifest.json','other.json'),
+                  $manifest.Replace('incoming-runtime-','INCOMING-runtime-'),$manifest.Replace('\','/'),
+                  $manifest.Replace($root,$root+'-other'))){
+ try{Get-IncomingRecoveryRuntimeLayout $true $path $pin $root;throw 'fixture_accepted_path'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_incoming_path'){throw}}
+}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:RUNTIME_STAGE_SOURCE,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+$parameter=@($ast.ParamBlock.Parameters|Where-Object {$_.Name.VariablePath.UserPath -ceq 'IncomingRecoveryRuntime'})
+if($parameter.Count -ne 1 -or $parameter[0].StaticType -ne [Management.Automation.SwitchParameter]){throw 'fixture_switch'}
+$invoke=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-RuntimeStage'},$true).Extent.Text
+if(-not $invoke.Contains('if($IncomingRecoveryRuntime)') -or
+   -not $invoke.Contains('Get-IncomingRecoveryRuntimeLayout $rearming $ManifestPath $ManifestSha256 $script:RuntimeRecoveryRoot') -or
+   -not $invoke.Contains('$zipPath=$incomingLayout.Archive;$zipRoot=$incomingLayout.Directory') -or
+   -not $invoke.Contains('$zipFile=Read-RuntimeStageInput $zipPath $zipRoot 1073741824') -or
+   -not $invoke.Contains('Open-RearmRuntimeStopped $root $spec $RearmPredecessorArgsSha256') -or
+   -not $invoke.Contains('Assert-RearmRuntimeStopped $root $spec $rearmLease')){throw 'fixture_incoming_wiring'}
+if(([regex]::Matches($invoke,'Assert-IncomingRecoveryRuntimeInputs ')).Count -ne 2){throw 'fixture_input_boundaries'}
+if($invoke.IndexOf('Assert-IncomingRecoveryRuntimeInputs ') -gt $invoke.IndexOf("Write-RuntimeStageEvent `$journal 'intent'")){throw 'fixture_late_initial_check'}
+if($invoke.LastIndexOf('Assert-IncomingRecoveryRuntimeInputs ') -lt $invoke.IndexOf('[HaRuntimeStageV1.Smoke]::Run')){throw 'fixture_early_final_check'}
+''')
+
+    def test_incoming_recovery_runtime_rechecks_held_input_identity_hash_and_acl(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.ps(r'''
+Add-Type 'public static class IncomingRuntimeFixture {public static bool Drift=false;public static string Identity(string path){return (Drift ? "changed:" : "stable:")+path;}}'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:RUNTIME_STAGE_SOURCE,[ref]$tokens,[ref]$errors)
+$node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Assert-IncomingRecoveryRuntimeInputs'},$true)
+. ([scriptblock]::Create($node.Extent.Text.Replace('[HaRuntimeStageV1.Native]::Identity','[IncomingRuntimeFixture]::Identity')))
+$script:aclChecks=0
+function Assert-RuntimeStagePath {param($Path,$PrivateRoot,$ReaderSid,$InputFile);$script:aclChecks++;if($PrivateRoot -cne $env:FIXTURE){throw 'fixture_wrong_acl_root'}}
+$manifestPath=Join-Path $env:FIXTURE 'runtime-manifest.json';$archivePath=Join-Path $env:FIXTURE 'runtime.zip'
+[IO.File]::WriteAllText($manifestPath,'synthetic manifest');[IO.File]::WriteAllText($archivePath,'synthetic archive')
+$layout=[pscustomobject]@{Directory=$env:FIXTURE;Manifest=$manifestPath;Archive=$archivePath}
+$manifestPin=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($manifestPath))
+$spec=[pscustomobject]@{ArchiveHash=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($archivePath))}
+$inputs=[pscustomobject]@{ManifestIdentity=[IncomingRuntimeFixture]::Identity($manifestPath);ArchiveIdentity=[IncomingRuntimeFixture]::Identity($archivePath);
+ Manifest=[IO.File]::Open($manifestPath,'Open','Read','Read');Archive=[IO.File]::Open($archivePath,'Open','Read','Read')}
+try{
+ Assert-IncomingRecoveryRuntimeInputs $layout $inputs $manifestPin $spec
+ Assert-IncomingRecoveryRuntimeInputs $layout $inputs $manifestPin $spec
+ if($script:aclChecks -ne 6 -or -not $inputs.Manifest.CanRead -or -not $inputs.Archive.CanRead -or
+    $inputs.Manifest.Position -ne 0 -or $inputs.Archive.Position -ne 0){throw 'fixture_lost_handle'}
+ [IncomingRuntimeFixture]::Drift=$true
+ try{Assert-IncomingRecoveryRuntimeInputs $layout $inputs $manifestPin $spec;throw 'fixture_accepted_identity'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_incoming_changed'){throw}}
+ [IncomingRuntimeFixture]::Drift=$false
+ foreach($which in @('Manifest','Archive')){
+  $original=$inputs.$which;$replacement=[IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes('changed'))
+  try{
+   $inputs.$which=$replacement
+   try{Assert-IncomingRecoveryRuntimeInputs $layout $inputs $manifestPin $spec;throw 'fixture_accepted_hash'}
+   catch{if($_.Exception.Message -cne 'runtime_stage_incoming_changed'){throw}}
+  }finally{$inputs.$which=$original;$replacement.Dispose()}
+ }
+ $layout.Archive=$archivePath+'.other'
+ try{Assert-IncomingRecoveryRuntimeInputs $layout $inputs $manifestPin $spec;throw 'fixture_accepted_alias'}
+ catch{if($_.Exception.Message -cne 'runtime_stage_incoming_changed'){throw}}
+}finally{$inputs.Manifest.Dispose();$inputs.Archive.Dispose()}
+''', folder)
+
     def test_rearm_stage_pins_actual_args_owned_host_and_scm_before_after(self):
         with tempfile.TemporaryDirectory() as folder:
             self.ps(r'''

@@ -781,4 +781,208 @@ class InitialAppResumeTests(unittest.TestCase):
             w.start_initial_recovery(self.request, self.windows)
         self.assertEqual(self.commands, [])
 
+class SuccessorAppWiringTests(unittest.TestCase):
+    def fixture(self):
+        from tests.test_ha_postboot import SamebootPostbootSealTests
+        from ha_control import initial_app_resume_wiring as app
+        from ha_control.native_windows_activation import WindowsActivationLease
+        from ha_control.native_guest_ssh import GuestSshDispatcher
+        plan, files = SamebootPostbootSealTests().transition_fixture()
+        # The real predecessor is revision 14. A scalar 14 supplied by a caller
+        # cannot replace this exact complete terminal and its digest.
+        terminal = json.loads(files['postboot-predecessor-state.json'])
+        terminal['revision'] = 14
+        raw = wire._bytes(terminal)
+        postboot = plan['initial_recovery_postboot']
+        postboot['predecessor_terminal_sha256'] = wire._digest(raw)
+        binding = wire.Binding(plan['initial_cutover_handoff']['legacy_plan_sha256'],
+                               plan['initial_cutover_handoff']['attempt_id'], '3'*64, '4'*64, '5'*64)
+        lease = object.__new__(WindowsActivationLease)
+        lease.custody = SimpleNamespace(binding=binding)
+        lease.service_instance_sha256 = '9'*64
+        dispatcher = object.__new__(GuestSshDispatcher)
+        dispatcher.binding = binding
+        launcher = b'fixture-launcher'
+        dispatcher.launcher_sha256 = wire._digest(launcher)
+        inputs = app.PairedProofInputs(r'C:\fixture\runtime', r'C:\fixture\plan.json', wire._digest(wire._bytes(plan)),
+                                       r'C:\fixture\terminal.json', wire._digest(raw), 'a'*64, plan['source_commit'])
+        stage = app.SuccessorAppStage(lease=lease, dispatcher=dispatcher, powershell=lambda *a: None,
+            proof_inputs=inputs, plan=plan, predecessor_terminal=raw, launcher=launcher,
+            manifest_sha256='b'*64, prior_intent_sha256='c'*64,
+            prior_progress_sha256={'progress-ha-broker.json': 'd'*64})
+        args = {key: 'e'*64 for key in wire.INITIAL_RECOVERY_ARGS}
+        args.update(recovery_attempt_id=plan['initial_cutover_recovery']['attempt_id'],
+                    installation_id=plan['installation_id'], hold_sha256=plan['windows_recovery_observers']['hold_sha256'],
+                    postboot=postboot, postboot_plan_sha256=inputs.plan_sha256,
+                    postboot_stopped_receipt_sha256=postboot['stopped_receipt_sha256'])
+        request = wire.Request(binding, 'A', wire.GUEST_START_INITIAL_POSTBOOT, 1, 'f'*64, args)
+        return app, stage, request
+
+    def test_derives_15_closed_16_open_from_exact_terminal_and_rejects_changed_terminal(self):
+        app, stage, request = self.fixture()
+        self.assertEqual((stage.closed_revision, stage.open_revision, stage.revoked_revision), (15, 16, 17))
+        stage.proof_inputs.validate()
+        with self.assertRaises(TransitionBlocked):
+            app.SuccessorAppStage(lease=stage.lease, dispatcher=stage.dispatcher, powershell=lambda *a: None,
+                proof_inputs=stage.proof_inputs, plan=stage.plan, predecessor_terminal=stage.terminal+b' ',
+                launcher=stage.launcher, manifest_sha256=stage.manifest, prior_intent_sha256=stage.prior_intent,
+                prior_progress_sha256=stage.prior_progress)
+
+    def test_preflight_is_read_only_and_start_pins_carryover_authorization_at_every_boundary(self):
+        from unittest.mock import Mock
+        import time
+        app, stage, request = self.fixture()
+        events = []
+        authorization = {'authorization_sha256':'1'*64}
+        with patch.object(stage, '_proof', return_value='2'*64) as proof, patch.object(app, 'guest_attest', return_value=authorization) as attest:
+            self.assertEqual(stage.preflight(time.monotonic()+20, assert_guard=lambda: None), '2'*64)
+            attest.assert_not_called()
+            def start(req, deadline, *, assert_windows_current):
+                self.assertEqual(req, request)
+                scope = {'version':wire.VERSION, 'binding':req.binding.fields(), 'node':'A',
+                         'boot_sha256':req.binding.boot('A'), 'verb':req.verb, 'sequence':req.sequence, 'nonce':req.nonce}
+                for boundary in wire.RECOVERY_START_BOUNDARIES:
+                    challenge = wire._digest(wire._bytes({'request':scope, 'hold_sha256':req.args['hold_sha256'],
+                        'boundary':boundary, 'postboot':stage.postboot, 'postboot_plan_sha256':stage.proof_inputs.plan_sha256,
+                        'resume_authorization_sha256':'1'*64}))
+                    self.assertEqual(assert_windows_current(challenge,boundary,deadline), '2'*64)
+                return wire.Receipt('PASS','3'*64)
+            stage.dispatcher.start_initial_postboot = start
+            result=stage.start(request,time.monotonic()+20,assert_guard=lambda:None,
+                              issued=lambda req:events.append('issued'),record=lambda name,value:events.append(name))
+            self.assertEqual(result,'3'*64)
+            self.assertEqual(events,['issued','authorization','started'])
+            self.assertEqual(attest.call_args.args[6],stage.prior_progress)
+            self.assertEqual(proof.call_count,len(wire.RECOVERY_START_BOUNDARIES)+2)
+            with self.assertRaises(TransitionBlocked):
+                stage.start(request,time.monotonic()+20,assert_guard=lambda:None,issued=lambda _:None,record=lambda *a:None)
+
+    def test_failure_after_issue_cannot_retry_and_wrong_boundary_is_rejected(self):
+        import time
+        app, stage, request = self.fixture()
+        with patch.object(stage,'_proof',return_value='2'*64), patch.object(app,'guest_attest',side_effect=OSError('lost')):
+            with self.assertRaises(OSError):
+                stage.start(request,time.monotonic()+20,assert_guard=lambda:None,issued=lambda _:None,record=lambda *a:None)
+            self.assertTrue(stage.consumed)
+        app, stage, request = self.fixture()
+        def start(req, deadline, *, assert_windows_current):
+            return assert_windows_current('0'*64,'recovery_start_intent',deadline)
+        stage.dispatcher.start_initial_postboot=start
+        with patch.object(stage,'_proof',return_value='2'*64), patch.object(app,'guest_attest',return_value={'authorization_sha256':'1'*64}):
+            with self.assertRaises(TransitionBlocked):
+                stage.start(request,time.monotonic()+20,assert_guard=lambda:None,issued=lambda _:None,record=lambda *a:None)
+
+    def test_make_request_uses_exact_carryover_history_and_operation_nonce(self):
+        from ha_control.native_guest_postboot import CARRYOVER_KIND
+        app, stage, previous = self.fixture()
+        projection={key:value for key,value in stage.postboot.items() if key not in {'carryover_receipt_sha256','predecessor_seal_sha256'}}
+        args={key:previous.args[key] for key in (*wire.INITIAL_RECOVERY_ARGS,'hold_sha256')}
+        carryover={'schema_version':1,'kind':CARRYOVER_KIND,'binding':previous.binding.fields(),
+            'postboot':projection,'recovery_args':args,'predecessor_postboot':{},
+            'predecessor_request':{'scope':{'nonce':'0'*64},'args':{}},
+            'history':{'intent_sha256':stage.prior_intent,'progress_sha256':stage.prior_progress},
+            'hold_sha256':args['hold_sha256'],'containers':{},'container_contracts':{},
+            'protected_inventory_sha256':args['protected_inventory_sha256']}
+        raw=wire._bytes(carryover)
+        stage.postboot['carryover_receipt_sha256']=wire._digest(raw)
+        request=stage.make_request('f'*64,raw,sequence=7)
+        self.assertEqual((request.nonce,request.sequence),('f'*64,7))
+        self.assertEqual(request.args|{},args|{'postboot':stage.postboot,
+            'postboot_plan_sha256':stage.proof_inputs.plan_sha256,
+            'postboot_stopped_receipt_sha256':stage.postboot['stopped_receipt_sha256']})
+        with self.assertRaises(TransitionBlocked):stage.make_request('f'*64,raw+b' ')
+        carryover['history']['progress_sha256']={}
+        raw=wire._bytes(carryover)
+        stage.postboot['carryover_receipt_sha256']=wire._digest(raw)
+        with self.assertRaises(TransitionBlocked):stage.make_request('f'*64,raw)
+
+    def test_publication_binds_predecessor_pid_and_current_successor_path(self):
+        from tests.test_ha_postboot import SamebootPostbootSealTests
+        import time
+        app, stage, request=self.fixture()
+        old=SamebootPostbootSealTests().transition_fixture()[1]['postboot-predecessor-binding.json']
+        calls=[]
+        def powershell(source,deadline):
+            calls.append(source)
+            self.assertIn('successor_previous_instance_running',source)
+            self.assertIn('service_created_ticks',source)
+            self.assertIn('Get-CimInstance Win32_Service',source)
+            return {'predecessor_instance_stopped':True}
+        stage.powershell=powershell
+        with patch.object(stage,'_proof',return_value='a'*64) as proof:
+            publication=stage.observe_publication(time.monotonic()+20,assert_guard=lambda:None,predecessor_binding=old)
+            self.assertEqual(publication,{'plan_sha256':stage.proof_inputs.plan_sha256,'revision':16,
+                'writers':['A'],'standby_node':'B','synchronous':True,
+                'instance_sha256':stage.lease.service_instance_sha256,'predecessor_instance_stopped':True})
+            self.assertEqual(proof.call_count,2)
+            with self.assertRaises(TransitionBlocked):
+                stage.observe_publication(time.monotonic()+20,assert_guard=lambda:None,predecessor_binding=old+b' ')
+        self.assertEqual(len(calls),1)
+
+    def test_actual_pair_sampler_checks_both_read_only_nodes_and_exact_revision(self):
+        from datetime import datetime, timezone
+        from ha_control.initial_pg_lease import InitialPgLeaseRecovery
+        from ha_runtime import effects
+        app, stage, request = self.fixture()
+        plan = copy.deepcopy(stage.plan)
+        plan.update(cluster='fixture', system_id='1234', pg_nodes={node:{'host':node,'sslmode':'verify-full'} for node in ('A','B')})
+        deployment = {'source_commit':'a'*40,'plan_sha256':request.binding.plan_sha256}
+        plan['pg_enforcement']={'effects':{'deployment_binding':deployment,'broker_role':'ha_effect_broker'}}
+        expiry = datetime(2026,1,1,tzinfo=timezone.utc)
+        traces=[]
+        nonce='postboot-a:'+stage.postboot['attempt_id']+':'+'a'*32+':lease'
+        bad_revision=False
+        class Cursor:
+            def __init__(self,value):self.value=value
+            def fetchone(self):return self.value
+            def fetchall(self):return self.value
+        class Connection:
+            def __init__(self,node):self.node=node
+            def close(self):traces.append((self.node,'close'))
+            def execute(self,query,params=None):
+                traces.append((self.node,query))
+                if 'FROM ha.control c' in query:
+                    revision=14 if bad_revision else 16
+                    return Cursor(('fixture','1234',1,revision,1,'A','B',['A'],'A','AS',True,True,expiry,4.5,
+                        self.node=='B','ha_'+self.node,'remote_apply','on','on','0/20',
+                        'FIRST1(ha_b)' if self.node=='A' else 'FIRST1(ha_a)',True,'on',1,self.node))
+                if 'controller_probes' in query:return Cursor(([nonce],))
+                if query=='SHOW transaction_read_only':return Cursor(('on',))
+                if 'FROM ha_effects.binding' in query:return Cursor([('fixture','1234',deployment['source_commit'],deployment['plan_sha256'],'ha_effect_broker')])
+                if 'FROM pg_stat_replication' in query:return Cursor([('ha_b','ha_repl','B','streaming','sync',True,'0/20')])
+                if 'FROM pg_stat_wal_receiver' in query:return Cursor([('streaming',1)])
+                return Cursor(None)
+        def connect(**kwargs):
+            self.assertTrue(kwargs['autocommit'])
+            self.assertIn('default_transaction_read_only=on',kwargs['options'])
+            return Connection(kwargs['host'])
+        with patch.object(effects,'validate_catalog'), patch.object(InitialPgLeaseRecovery,'quarantine_binding',return_value=('q',None,'r','s')), patch.object(InitialPgLeaseRecovery,'_quarantine_observation',return_value=('q','r','s')):
+            value=app.sample_pair(plan,stage.proof_inputs.plan_sha256,stage.terminal,'a'*64,'b'*64,connect=connect)
+            self.assertTrue(wire._hash(value['proof_sha256']))
+            self.assertEqual(set(value['observations']),{'A','B'})
+            self.assertEqual(sum(query=='close' for _,query in traces),2)
+            self.assertFalse(any(query.startswith(('INSERT','UPDATE','DELETE','ALTER')) for _,query in traces))
+            bad_revision=True
+            with self.assertRaisesRegex(ValueError,'successor_pair_unverified'):
+                app.sample_pair(plan,stage.proof_inputs.plan_sha256,stage.terminal,'a'*64,'b'*64,connect=connect)
+
+    def test_pair_bracket_rejects_nonmatching_lease_and_expiry_credited_after_transport(self):
+        import time
+        app, stage, request = self.fixture()
+        now=time.monotonic()
+        native={'windows_generation':1,'service_incarnation_sha256':'1'*64,'heartbeat_sequence':2,'live_lease_sha256':'2'*64}
+        pair={'proof_sha256':'3'*64,'lease_sha256':'2'*64,'observations':{'A':[.1,4.0],'B':[.2,3.5]},'child_elapsed_seconds':.3}
+        output={'before':native,'after':native.copy(),'pair':pair,'offset':.2,'elapsed':.6}
+        boundary=app.PairedAuthorityBoundary(lambda *_:copy.deepcopy(output),stage.proof_inputs,now+6)
+        source="native -RecoveryContinuity -PriorSha256 '"+'4'*64+"'"
+        boundary.powershell(source,now+5.9)
+        proof=boundary.observe_pair(challenge='4'*64,service_incarnation_sha256='1'*64,deadline=now+5.9)
+        self.assertAlmostEqual(proof['valid_until_monotonic'],boundary.started+.2+.2-.05+3.5)
+        self.assertEqual(boundary.powershell(source,now+5.9),native)
+        output['pair']['lease_sha256']='f'*64
+        boundary=app.PairedAuthorityBoundary(lambda *_:copy.deepcopy(output),stage.proof_inputs,time.monotonic()+6)
+        boundary.powershell(source,time.monotonic()+5.9)
+        with self.assertRaises(TransitionBlocked):
+            boundary.observe_pair(challenge='4'*64,service_incarnation_sha256='1'*64,deadline=time.monotonic()+5.9)
+
 if __name__=='__main__':unittest.main()
