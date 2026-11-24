@@ -1,5 +1,9 @@
 # N100 GitHub 자동배포 안내
 
+## VM 전환 이후
+
+이 문서는 VM 전환 전 WSL·Compose·K3s 배포 절차를 기록함. 현재 VM 운영과 검증은 [N100 VM 운영 기준](n100-vm-operations.md)을 따름.
+
 > 서비스·도메인·환경변수의 최신 기준은 [운영 참조](operations-reference.md)를 우선함. 이 문서는 N100 self-hosted runner 배포 절차와 장애 대응만 다룸.
 
 ## 현재 방식

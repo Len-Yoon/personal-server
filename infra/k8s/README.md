@@ -1,6 +1,12 @@
 # K3s 운영
 
-N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 운영에 사용함. 이 문서는 실제 운영 도구의 진입점만 정리하며, Secret 값·비밀번호·token은 출력하거나 문서화하지 않음.
+## VM 전환 이후
+
+현재 N100 운영 앱의 실행 위치는 Hyper-V VM A임. [현재 VM 운영 기준](../../docs/n100-vm-operations.md)
+
+아래 K3s 절차와 운영 검증은 WSL·K3s 구성에서 수행했던 작업을 보존한 기록임.
+
+전환 전 N100의 K3s는 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 운영에 사용했음. 이 문서는 실제 운영 도구의 진입점만 정리하며, Secret 값·비밀번호·token은 출력하거나 문서화하지 않음.
 
 ## 정기 운영 실행 경계
 

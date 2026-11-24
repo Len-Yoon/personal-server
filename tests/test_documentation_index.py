@@ -13,9 +13,10 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("## 검증", content)
         self.assertIn("## 운영 문서", content)
         self.assertIn("Cloudflare Tunnel", content)
-        self.assertIn("K3s", content)
-        self.assertIn("Telegram", content)
-        self.assertIn("N100 제한형 자동복구", content)
+        self.assertIn("Hyper-V", content)
+        self.assertIn("PostgreSQL", content)
+        self.assertIn("전원 재기동 후 자동 복구", content)
+        self.assertIn("docs/n100-vm-operations.md", content)
 
     def test_document_index_exposes_only_current_operations_documents(self):
         content = Path("docs/README.md").read_text(encoding="utf-8")
@@ -156,8 +157,9 @@ class DocumentationIndexTests(unittest.TestCase):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
         roadmap = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
 
-        self.assertIn("Crawler Worker K3s 현재 운영 기준", project_readme)
-        self.assertIn("K3s `crawler-worker`", project_readme)
+        self.assertIn("VM A", project_readme)
+        self.assertIn("뉴스 수집기", project_readme)
+        self.assertNotIn("Crawler Worker K3s 현재 운영 기준", project_readme)
         self.assertIn("뉴스 수집 K3s 현재 운영 기준", index)
         self.assertIn("operations-reference.md#뉴스-수집-k3s-현재-운영-기준", index)
         self.assertIn("## 뉴스 수집 K3s 현재 운영 기준", operations)

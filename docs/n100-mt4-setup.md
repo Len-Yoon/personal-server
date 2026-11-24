@@ -1,5 +1,11 @@
 # N100 Windows·WSL2 운영 환경
 
+## VM 전환 이후
+
+현재 운영 앱은 Hyper-V VM A에서 실행됨. 조회 기준 두 운영 VM의 자동 시작은 꺼져 있고 Windows의 쓰기 권한 서비스·Caddy·Tunnel은 수동 시작임. 기존 서비스용 WSL 자동 시작·유지 작업은 비활성화된 상태임. [현재 VM 운영과 재기동 기준](n100-vm-operations.md)
+
+아래 설정과 명령은 VM 전환 전의 Windows·WSL 복구 절차를 보존한 기록임.
+
 ## 현재 구성
 
 | 항목 | 기준 |
