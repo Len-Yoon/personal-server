@@ -1,5 +1,11 @@
 # Cloudflare Tunnel 운영 가이드
 
+## VM 전환 이후
+
+현재 Windows에서 Cloudflare Tunnel과 Caddy가 실행되며, 공개 웹 요청은 VM A의 앱으로 전달됨. Portal 첫 화면과 Portal·뉴스·책·영상·차량의 공개 health를 확인함. Windows Tunnel과 Caddy는 수동 시작 상태임. [현재 VM 운영 확인](n100-vm-operations.md)
+
+아래 ingress 매핑과 Linux 서비스 명령은 이전 WSL·K3s 환경을 복원하거나 당시 구성을 대조할 때 사용하는 기록임.
+
 현재 공개 경로는 **Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo**로 제공함. Hyundai OAuth callback인 `car.len.pe.kr`은 Caddy 경로에 포함하지 않음. 공유기 포트포워딩은 이 경로에 사용하지 않음.
 
 ## 현재 ingress 기준

@@ -1,5 +1,11 @@
 # 운영 참조
 
+## VM 전환 이후
+
+현재 운영 요청은 Windows의 Cloudflare Tunnel과 Caddy를 거쳐 VM A의 앱으로 전달됨. PostgreSQL 쓰기는 A, 동기 대기는 B가 담당함. 점검과 재기동 순서는 [N100 VM 운영 기준](n100-vm-operations.md)을 따름.
+
+아래 WSL·K3s·Compose 항목은 VM 전환 전 운영 절차와 복원 근거임. 섹션 제목의 현재 상태는 해당 기록 당시를 기준으로 함.
+
 현재 N100 개인 서버의 서비스 구조와 일상 점검 기준 문서임. 이 서버는 서비스 실행뿐 아니라 관측성, 장애 감지, 복구, 백업·복원 검증, 알림을 연결한 SRE 운영 체계로 관리함. 비밀값은 `.env`, Kubernetes Secret, GitHub Secret에만 보관하며 이 문서·명령 출력에 기록하지 않음.
 
 ## 현재 런타임
