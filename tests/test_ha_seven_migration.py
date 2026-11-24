@@ -12,6 +12,8 @@ import sqlite3
 import shutil
 import signal
 import socket
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -2972,11 +2974,64 @@ class NativeGuestRecoveryObserverTests(unittest.TestCase):
             request, = handle.call_args.args
             self.assertEqual(request.verb, self.bridge.GUEST_OBSERVE_CAR_ISOLATION)
             self.assertEqual(request.args["hold_sha256"], self.hold_sha)
+            inventory = handle.call_args.kwargs["provider_inventory"]
+            self.assertIs(inventory.func, native_guest_restore._observer_inventory)
+
+    def test_local_engine_inventory_rejects_changed_members_or_peer(self):
+        restore = native_guest_restore
+        first, second = "a" * 64, "b" * 64
+        identities = [{"Id": first}, {"Id": second}]
+        endpoint = Path("/run/docker.sock")
+        info = os.stat_result((stat.S_IFSOCK | 0o660, 4, 5, 1, 0, 2, 0, 1, 1, 1))
+
+        for result in ("exact", "peer", "changed", "wrong_id", "truncated"):
+            with (
+                self.subTest(result=result),
+                patch.object(Path, "lstat", return_value=info),
+                patch.object(Path, "resolve", return_value=endpoint),
+                patch.object(socket, "SO_PEERCRED", 17, create=True),
+                patch.object(restore, "_ObserverSocket") as make_socket,
+                patch.object(restore.http.client, "HTTPConnection") as make_http,
+            ):
+                stream = make_socket.return_value.__enter__.return_value
+                stream.getsockopt.return_value = struct.pack("3i", 4, 1 if result == "peer" else 0, 2)
+                listed = iter((identities, identities[:1] if result == "changed" else identities))
+
+                def connect(*_, **__):
+                    conn = MagicMock()
+
+                    def request(method, path):
+                        self.assertEqual(method, "GET")
+                        if path == "/version":
+                            value = {"ApiVersion": "1.46"}
+                        elif path == "/v1.46/containers/json?all=1":
+                            value = next(listed)
+                        else:
+                            identifier = path.split("/")[3]
+                            self.assertIn(identifier, (first, second))
+                            value = {"Id": first if result == "wrong_id" else identifier}
+                        response = conn.getresponse.return_value.__enter__.return_value
+                        response.status = 200
+                        payload = encoded(value)
+                        response.length = len(payload) + int(result == "truncated")
+                        response.read1.side_effect = [payload, b""]
+
+                    conn.request.side_effect = request
+                    return conn
+
+                make_http.side_effect = connect
+                if result == "exact":
+                    self.assertEqual(restore._observer_inventory(time.monotonic() + 2),
+                                     {first: identities[0], second: identities[1]})
+                else:
+                    with self.assertRaises(TransitionBlocked):
+                        restore._observer_inventory(time.monotonic() + 2)
 
     def test_listener_survives_timeout_and_rejects_non_host_peer(self):
         observed = []
 
-        def observe(frame):
+        def observe(frame, *, deadline):
+            self.assertGreater(deadline, time.monotonic())
             observed.append(frame)
             if len(observed) == 1:
                 time.sleep(0.5)

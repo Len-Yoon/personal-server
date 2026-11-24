@@ -2,6 +2,7 @@
 
 import argparse
 from collections import deque
+from functools import partial
 import os
 import signal
 import socket
@@ -28,7 +29,7 @@ class Observer:
         self.boot_sha256 = boot_sha256
         self.recent = deque(maxlen=1024)
 
-    def observe(self, frame):
+    def observe(self, frame, *, deadline=None):
         purpose, nonce = frame.get("purpose"), frame.get("nonce")
         bridge._need(type(purpose) is str and purpose in PURPOSES and bridge._hash(nonce)
                      and nonce not in self.recent and bridge._matches(frame, {
@@ -51,7 +52,13 @@ class Observer:
             args.update(hold_sha256=self.hold_sha256,postboot_attempt_id=self.postboot_attempt_id,
                         postboot_stopped_receipt_sha256=self.postboot_stopped_receipt_sha256)
         request = bridge.Request(binding, "A", verb, 1, nonce, args)
-        result = worker.handle(request)
+        if purpose == "provider_isolation":
+            if deadline is None:
+                deadline = time.monotonic() + REQUEST_SECONDS
+            inventory = partial(worker.restore._observer_inventory, deadline)
+            result = worker.handle(request, provider_inventory=inventory)
+        else:
+            result = worker.handle(request)
         bridge._need(type(result) is bridge.Receipt and result.status == "PASS"
                      and bridge._hash(result.receipt_sha256)
                      and (purpose != "held_admission" or result.receipt_sha256 == (self.postboot_stopped_receipt_sha256 or self.hold_sha256))
@@ -79,7 +86,7 @@ def _serve(listener, observer):
                     channel = bridge.Stdio(connection.fileno(), connection.fileno())
                     frame = channel.read(deadline)
                     bridge._need(not channel.buffer, ERROR)
-                    channel.write(observer.observe(frame), deadline)
+                    channel.write(observer.observe(frame, deadline=deadline), deadline)
                 finally:
                     deadline = None
                     signal.setitimer(signal.ITIMER_REAL, 0)

@@ -168,7 +168,8 @@ def mutation_lock(wait=0):
         yield descriptor
 
 
-def _initial_recovery_inventory(binding, containers, protected_inventory_sha256, stopped, baseline=None):
+def _initial_recovery_inventory(binding, containers, protected_inventory_sha256, stopped, baseline=None,
+                                *, inventory=None):
     error = "guest_initial_recovery_quiescence_unverified"
     _need(type(containers) is dict and set(containers) == SERVICES | {"ha-broker"}
           and all(type(item) is dict and set(item) == {"container_id", "image_id"}
@@ -177,7 +178,7 @@ def _initial_recovery_inventory(binding, containers, protected_inventory_sha256,
                   for item in containers.values()), error)
     ids = {item["container_id"] for item in containers.values()}
     _need(len(ids) == len(containers), error)
-    objects = runtime._inventory()
+    objects = (runtime._inventory if inventory is None else inventory)()
     owned = {identifier for identifier, item in objects.items()
              if (item["Config"]["Labels"] or {}).get(runtime.ATTEMPT_LABEL) == binding.attempt_id}
     _need(owned == ids, error)
@@ -395,6 +396,7 @@ def start_initial_recovery(request, assert_windows_current):
         intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                  for name in ("intent", "progress", "done"))
         resume = None
+        numbered_attempt = 0
         if initial_app_resume.supports(request):
             numbered_attempt = initial_app_resume.latest_attempt(request)
             continuation = bool(numbered_attempt) or (postboot and os.path.lexists(initial_app_resume.path(
@@ -422,8 +424,14 @@ def start_initial_recovery(request, assert_windows_current):
                 _need(args['postboot_stopped_receipt_sha256']==args['postboot']['stopped_receipt_sha256'],error)
             stopped = observe(request,stopped_attempt(args['postboot']),args['postboot_stopped_receipt_sha256'])
             baseline = (stopped['container_contracts'],args['protected_inventory_sha256'])
-        _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
-                                    set(containers), baseline)
+        def observe_inventory(stopped, deadline):
+            # The live lease observer also reads Docker during a recovery.
+            # Avoid concurrent CLI process churn while checking the same layout.
+            reader = (lambda: restore._observer_inventory(deadline)) if numbered_attempt else None
+            return _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
+                                               stopped, baseline, inventory=reader)
+
+        observe_inventory(set(containers), time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS)
         worker = GuestWorker(request)
         postgres, pins, _ = worker._prepared_pins(prepared["manifest_sha256"])
         _need(pins.installation_id == args["installation_id"] and pins.node == "A"
@@ -432,15 +440,14 @@ def start_initial_recovery(request, assert_windows_current):
         _need(set(authorities) == set(live._authority_paths().values()), error)
         started = set()
 
-        def unchanged():
+        def unchanged(deadline):
             if resume is not None:
                 initial_app_resume.preserved(request, resume[0], resume[1], hold, active, raw)
             _need(_read_initial_recovery_hold(request)[:2] == (raw, hold), error)
             _assert_car_route_blocked(request, raw, prepared, active)
             _need(all(_digest(runtime._read(path, 0, {0o444})) == pin
                       for path, pin in authorities.items()), error)
-            contract, _ = _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
-                                                      None, baseline)
+            contract, _ = observe_inventory(None, deadline)
             _need(all(contract[role]["started_at"] != baseline[0][role]["started_at"]
                       for role in started), error)
             if resume is not None or postboot:
@@ -450,7 +457,7 @@ def start_initial_recovery(request, assert_windows_current):
 
         def check(boundary):
             deadline = time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS
-            unchanged()
+            unchanged(deadline)
             challenge_scope = {"request": _scope(request), "hold_sha256": args["hold_sha256"], "boundary": boundary}
             if resume is not None:
                 challenge_scope['resume_authorization_sha256'] = _digest(resume[0])
@@ -463,7 +470,7 @@ def start_initial_recovery(request, assert_windows_current):
             challenge = _digest(_bytes(challenge_scope))
             proof = assert_windows_current(challenge, boundary)
             _need(_hash(proof) and time.monotonic() < deadline, error)
-            unchanged()
+            unchanged(deadline)
             # All Docker and file observations precede the final DB-clock sample.
             # The sample promises >1s remaining; dispatch has strictly <0.5s
             # measured before that read, accounting for time spent sampling.
@@ -568,14 +575,14 @@ def observe_initial_recovery_hold(request):
         return Receipt("PASS", _digest(raw))
 
 
-def observe_car_isolation(request):
+def observe_car_isolation(request, *, inventory=None):
     """Verify the same route block whether the exact broker is stopped or newly started."""
     args = request.args
     raw, hold, prepared, active = _read_initial_recovery_hold(request)
     _need(_digest(raw) == args["hold_sha256"], "guest_initial_recovery_car_isolation_unverified")
     _assert_car_route_blocked(request, raw, prepared, active)
     current, _ = _initial_recovery_inventory(request.binding, hold["containers"], args["protected_inventory_sha256"],
-        None, (hold["container_contracts"], args["protected_inventory_sha256"]))
+        None, (hold["container_contracts"], args["protected_inventory_sha256"]), inventory=inventory)
     _assert_car_route_blocked(request, raw, prepared, active)
     return Receipt("PASS", _digest(_bytes(_scope(request) | {"hold_sha256": args["hold_sha256"], "containers": current})))
 
@@ -1411,7 +1418,7 @@ def verify_transition_target(request):
     return Receipt("PASS", _digest(_bytes(_scope(request) | {"installation_sha256": _digest(raw)})))
 
 
-def handle(request, assert_windows_current=None):
+def handle(request, assert_windows_current=None, *, provider_inventory=None):
     try:
         _need(type(request) is Request and request.verb in VERBS, "guest_worker_request_scope")
         _args(request.verb, request.node, request.args)
@@ -1430,7 +1437,7 @@ def handle(request, assert_windows_current=None):
         if request.verb == GUEST_OBSERVE_INITIAL_RECOVERY_HOLD:
             return observe_initial_recovery_hold(request)
         if request.verb == GUEST_OBSERVE_CAR_ISOLATION:
-            return observe_car_isolation(request)
+            return observe_car_isolation(request, inventory=provider_inventory)
         if request.verb in {GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED}:
             return start_initial_recovery(request, assert_windows_current)
         if request.verb == GUEST_QUIESCE_INITIAL_RECOVERY:
