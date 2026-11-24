@@ -781,6 +781,44 @@ class ContinuationDerivationTests(unittest.TestCase):
         with patch.object(guest.worker.runtime,'_read',side_effect=(raw,raw+b' ')),self.assertRaises(TransitionBlocked):guest.closed_revision(request)
 
 class SamebootPostbootSealTests(unittest.TestCase):
+    def test_sameboot_stop_derives_closed_revision_from_both_exact_terminal_copies(self):
+        from ha_control import native_guest_postboot as guest, native_stdio_bridge as wire
+
+        _, files = self.fixture(chain=True)
+        prior = json.loads(files[FILES[0]])
+        prior.update(revision=16, phase='local_revoke_observed')
+        raw = json.dumps(prior).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        args = dict.fromkeys(wire.INITIAL_RECOVERY_ARGS, '1' * 64)
+        args.update(hold_sha256='2' * 64, postboot_attempt_id='e' * 64,
+                    recovery_attempt_id=prior['recovery']['attempt_id'],
+                    predecessor_plan_sha256=prior['controller_plan_sha256'],
+                    predecessor_terminal_sha256=pin,
+                    predecessor_postboot_attempt_id=prior['postboot']['attempt_id'])
+        binding = wire.Binding(prior['legacy_plan_sha256'], prior['attempt_id'],
+                               '3' * 64, '4' * 64, '5' * 64)
+        verb = wire.GUEST_QUIESCE_SAMEBOOT_SUCCESSOR
+        wire._args(verb, 'A', args)
+        request = wire.Request(binding, 'A', verb, 1, '6' * 64, args)
+        with patch.object(guest.worker.runtime, '_read', return_value=raw) as read:
+            self.assertEqual(guest.closed_revision(request), 17)
+            self.assertEqual([call.args[0].name for call in read.call_args_list], [
+                'predecessor-plan-' + prior['controller_plan_sha256'] + '.json',
+                'predecessor-terminal-' + pin + '.json'])
+            self.assertTrue(all(call.args[1:] == (0, {0o400}) for call in read.call_args_list))
+        for field in ('predecessor_plan_sha256', 'predecessor_terminal_sha256',
+                      'predecessor_postboot_attempt_id', 'recovery_attempt_id'):
+            with self.subTest(field=field):
+                with patch.object(guest.worker.runtime, '_read', return_value=raw):
+                    with self.assertRaises(TransitionBlocked):
+                        guest.closed_revision(request, args | {field: 'f' * 64})
+        with patch.object(guest.worker.runtime, '_read', side_effect=(raw, raw + b' ')):
+            with self.assertRaises(TransitionBlocked):
+                guest.closed_revision(request)
+        with patch.object(guest.worker.runtime, '_read', return_value=raw):
+            with self.assertRaises(TransitionBlocked):
+                guest.closed_revision(request, args | {'postboot_attempt_id': prior['postboot']['attempt_id']})
+
     def fixture(self,chain=False):
         from ha_control.initial_postboot import SAMEBOOT_KIND,RESUME_KIND
         encode=lambda value:json.dumps(value,sort_keys=True).encode()

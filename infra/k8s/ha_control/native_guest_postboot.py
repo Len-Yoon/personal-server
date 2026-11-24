@@ -26,6 +26,8 @@ def current(request, *, inventory=None):
 
 def closed_revision(request,args=None):
     args=request.args if args is None else args
+    if 'predecessor_postboot_attempt_id' in args:
+        return _sameboot_closed_revision(request, args)
     if 'predecessor_unpublished_attempt_id' not in args:
         return 7
     from .initial_unpublished import derive_predecessor
@@ -48,6 +50,28 @@ def closed_revision(request,args=None):
     return revision
 
 
+def _sameboot_closed_revision(request, args):
+    from .initial_postboot import RESUME_KIND, stopped_attempt
+    from .initial_unpublished import derive_predecessor
+
+    plan_pin = args['predecessor_plan_sha256']
+    terminal_pin = args['predecessor_terminal_sha256']
+    worker._need(wire._hash(plan_pin) and wire._hash(terminal_pin), ERROR)
+    terminal = worker.runtime._read(worker.ROOT / ('predecessor-plan-' + plan_pin + '.json'), 0, {0o400}, limit=65536)
+    pinned = worker.runtime._read(worker.ROOT / ('predecessor-terminal-' + terminal_pin + '.json'), 0, {0o400}, limit=65536)
+    worker._need(terminal == pinned, ERROR)
+    closed, _, _ = derive_predecessor(terminal, terminal_pin, published=True)
+    previous = json.loads(terminal)
+    worker._need(previous['kind'] == RESUME_KIND
+        and previous['controller_plan_sha256'] == plan_pin
+        and previous['postboot']['attempt_id'] == args['predecessor_postboot_attempt_id']
+        and args['postboot_attempt_id'] not in {previous['postboot']['attempt_id'], stopped_attempt(previous['postboot'])}
+        and previous['recovery']['attempt_id'] == args['recovery_attempt_id']
+        and previous['attempt_id'] == request.binding.attempt_id
+        and previous['legacy_plan_sha256'] == request.binding.plan_sha256, ERROR)
+    return closed
+
+
 def stop(request, assert_closed):
     """Caller must freshly prove the exact derived closed A/B pair at every boundary.
 
@@ -56,7 +80,7 @@ def stop(request, assert_closed):
     A digest of the control row alone does not satisfy this callback contract.
     Save-VM additionally requires another full paired read after this receipt.
     """
-    worker._need(request.verb in {wire.GUEST_QUIESCE_INITIAL_POSTBOOT,wire.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED} and callable(assert_closed),ERROR)
+    worker._need(request.verb in wire.POSTBOOT_STOP_VERBS and callable(assert_closed),ERROR)
     args=request.args
     expected_closed=closed_revision(request)
     with worker._guest_mutation_descriptor():

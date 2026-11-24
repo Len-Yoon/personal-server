@@ -66,12 +66,15 @@ GUEST_START_INITIAL_UNPUBLISHED = "start_initial_unpublished_recovery"
 GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR = "observe_unpublished_predecessor"
 GUEST_QUIESCE_POSTBOOT_UNPUBLISHED = "quiesce_postboot_unpublished"
 GUEST_QUIESCE_INITIAL_POSTBOOT = "quiesce_initial_postboot"
+GUEST_QUIESCE_SAMEBOOT_SUCCESSOR = "quiesce_sameboot_successor"
 GUEST_OBSERVE_INITIAL_POSTBOOT = "observe_initial_postboot"
+POSTBOOT_STOP_VERBS = frozenset((GUEST_QUIESCE_INITIAL_POSTBOOT, GUEST_QUIESCE_POSTBOOT_UNPUBLISHED,
+                                GUEST_QUIESCE_SAMEBOOT_SUCCESSOR))
 POSTBOOT_STOP_BOUNDARIES = ("postboot_stop_intent", "postboot_broker_stopped", "postboot_all_stopped")
 RECOVERY_START_ORDER = ("ha-broker", "book-memo", "car-care-worker", "crawler-worker", "homeops-executor", "portal-web", "system-agent", "youtube-memo")
 RECOVERY_START_BOUNDARIES = ("recovery_start_intent", *(boundary + role for role in RECOVERY_START_ORDER for boundary in ("recovery_before:", "recovery_after:", "recovery_ready:")), "recovery_started")
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
-DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION, GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_QUIESCE_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED, GUEST_QUIESCE_POSTBOOT_UNPUBLISHED}
+DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | POSTBOOT_STOP_VERBS | {GUEST_PREPARE_GENERATION, GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED}
 QUIESCENCE_BOUNDARIES = ("recovery_hold", "recovery_stop_broker", "recovery_stop_apps", "recovery_stopped")
 PREPARATION_OBSERVATION_BOUNDARIES = ("observe_preparation:before", "observe_preparation:after")
 PREPARATION_BOUNDARIES = tuple(f"prepare_generation:{index}" for index in range(1, 5))
@@ -121,6 +124,8 @@ VERBS = {
     GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR: ("A",20,False,(*INITIAL_RECOVERY_ARGS,"hold_sha256","predecessor_rearm_attempt_id","predecessor_plan_sha256","unpublished_attempt_id")),
     GUEST_QUIESCE_POSTBOOT_UNPUBLISHED: ("A",90,True,(*INITIAL_RECOVERY_ARGS,"hold_sha256","postboot_attempt_id","predecessor_plan_sha256","predecessor_unpublished_attempt_id")),
     GUEST_QUIESCE_INITIAL_POSTBOOT: ("A", 90, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot_attempt_id", "predecessor_plan_sha256", "predecessor_rearm_attempt_id")),
+    GUEST_QUIESCE_SAMEBOOT_SUCCESSOR: ("A", 90, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot_attempt_id",
+        "predecessor_plan_sha256", "predecessor_terminal_sha256", "predecessor_postboot_attempt_id")),
     GUEST_OBSERVE_INITIAL_POSTBOOT: ("A", 20, False, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot_attempt_id", "postboot_stopped_receipt_sha256")),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
@@ -370,10 +375,11 @@ class _Chain:
         self.recovery = False
 
     def check(self, verb, node, args):
+        _need(verb not in POSTBOOT_STOP_VERBS, "bridge_guest_only_request")
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
                           GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET,
                           GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
-                          GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_QUIESCE_INITIAL_POSTBOOT, GUEST_OBSERVE_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED, GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR, GUEST_QUIESCE_POSTBOOT_UNPUBLISHED},
+                          GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_OBSERVE_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED, GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":

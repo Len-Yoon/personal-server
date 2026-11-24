@@ -330,7 +330,7 @@ class GuestSshDispatcher:
                       bridge.GUEST_PREPARE_GENERATION, bridge.GUEST_OBSERVE_PREPARATION, bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_OBSERVE_GENERATION,
                       bridge.GUEST_VERIFY_GENERATION, bridge.GUEST_VERIFY_PREPARED_GENERATION, bridge.GUEST_TRANSITION_TARGET,
                       bridge.GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS, bridge.GUEST_QUIESCE_INITIAL_RECOVERY,
-                      bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, bridge.GUEST_OBSERVE_CAR_ISOLATION, bridge.GUEST_START_INITIAL_RECOVERY, bridge.GUEST_START_INITIAL_REARM, bridge.GUEST_START_INITIAL_POSTBOOT, bridge.GUEST_QUIESCE_INITIAL_POSTBOOT, bridge.GUEST_START_INITIAL_UNPUBLISHED, bridge.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED},
+                      bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, bridge.GUEST_OBSERVE_CAR_ISOLATION, bridge.GUEST_START_INITIAL_RECOVERY, bridge.GUEST_START_INITIAL_REARM, bridge.GUEST_START_INITIAL_POSTBOOT, bridge.GUEST_START_INITIAL_UNPUBLISHED, *bridge.POSTBOOT_STOP_VERBS},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -516,6 +516,11 @@ class GuestSshDispatcher:
         bridge._need(type(request) is bridge.Request and request.verb==bridge.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED
                      and request.node=='A' and callable(assert_windows_closed),'guest_postboot_stop_unbound')
         return self._dispatch(request,deadline,assert_windows_current=assert_windows_closed)
+
+    def quiesce_sameboot_successor(self, request, deadline, *, assert_windows_closed):
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_QUIESCE_SAMEBOOT_SUCCESSOR
+                     and request.node == 'A' and callable(assert_windows_closed), 'guest_postboot_stop_unbound')
+        return self._dispatch(request, deadline, assert_windows_current=assert_windows_closed)
 
     def observe_initial_recovery_hold(self, request, deadline):
         bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_OBSERVE_INITIAL_RECOVERY_HOLD
@@ -712,11 +717,11 @@ class GuestSshDispatcher:
                 boundaries = ACTIVATION_BOUNDARIES
                 if preparation:
                     boundaries = bridge.PREPARATION_BOUNDARIES
-                elif request.verb in {bridge.GUEST_QUIESCE_INITIAL_POSTBOOT,bridge.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED}:
+                elif request.verb in bridge.POSTBOOT_STOP_VERBS:
                     boundaries = bridge.POSTBOOT_STOP_BOUNDARIES
                 elif request.verb == bridge.GUEST_QUIESCE_INITIAL_RECOVERY:
                     boundaries = bridge.QUIESCENCE_BOUNDARIES
-                elif request.verb in {bridge.GUEST_START_INITIAL_RECOVERY, bridge.GUEST_START_INITIAL_REARM, bridge.GUEST_START_INITIAL_POSTBOOT, bridge.GUEST_QUIESCE_INITIAL_POSTBOOT, bridge.GUEST_START_INITIAL_UNPUBLISHED, bridge.GUEST_QUIESCE_POSTBOOT_UNPUBLISHED}:
+                elif request.verb in {bridge.GUEST_START_INITIAL_RECOVERY, bridge.GUEST_START_INITIAL_REARM, bridge.GUEST_START_INITIAL_POSTBOOT, bridge.GUEST_START_INITIAL_UNPUBLISHED}:
                     boundaries = bridge.RECOVERY_START_BOUNDARIES
                 output = _activation_exchange(
                     command, payload, limit, request.nonce, assert_windows_current,
