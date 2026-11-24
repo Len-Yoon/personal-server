@@ -451,6 +451,90 @@ class InitialAppResumeTests(unittest.TestCase):
             w.start_initial_recovery(self.request,self.windows)
         self.assertEqual(self.commands,[])
 
+    def prepare_numbered_request(self):
+        self.prepare_continuation_request()
+        authorization = self.attest_continuation()
+        self.failed_boundary = 'recovery_after:book-memo'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        self.continuation_stem = self.prestart_stem + 'continuation-'
+        self.continuation_intent = self.stage / (self.continuation_stem + 'intent.json')
+        progress = self.stage / (self.continuation_stem + 'progress-ha-broker.json')
+        self.prior_attempt = {
+            'authorization_sha256': authorization['authorization_sha256'],
+            'intent_sha256': wire._digest(self.continuation_intent.read_bytes()),
+            'progress_sha256': {'progress-ha-broker.json': wire._digest(progress.read_bytes())},
+        }
+        files = (resume.path(self.request, partial=True, prestart=True, continuation=True),
+                 self.continuation_intent, progress)
+        self.lineage_original.update({path:path.read_bytes() for path in files})
+        self.previous_request = self.request
+        self.request = replace(self.request, nonce='b'*64, sequence=6)
+        self.failed_boundary = None
+        self.commands.clear()
+
+    def attest_numbered(self, *, lineage=None):
+        return resume.attest(
+            self.request, service_instance_sha256='e'*64, prior_intent_sha256=self.intent_pin,
+            prior_progress_sha256={}, prior_resume=self.lineage, prior_partial=self.prior_partial,
+            prior_prestart=self.prior_prestart, prior_attempt=self.prior_attempt if lineage is None else lineage)
+
+    def test_numbered_attempt_resumes_exact_latest_progress_and_keeps_all_old_records(self):
+        self.prepare_numbered_request()
+        result = self.attest_numbered()
+        stem = self.continuation_stem + 'attempt-0001-'
+        body, value, actual_stem = resume.load(self.request, b'hold', self.hold, self.prepared, self.active,
+            partial=True, prestart=True, continuation=True, numbered_attempt=1)
+        self.assertEqual((value['prior_attempt'], value['numbered_attempt'], actual_stem),
+                         (self.prior_attempt, 1, stem))
+        self.assertEqual(wire._digest(body), result['authorization_sha256'])
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.previous_request, self.windows)
+        self.assertEqual(w.start_initial_recovery(self.request, self.windows).status, 'PASS')
+        self.assertEqual(self.commands, [('start', v['container_id']) for v in self.containers.values()])
+        self.assertTrue((self.stage / (stem + 'done.json')).is_file())
+        self.assertTrue(all(path.read_bytes() == raw for path, raw in self.lineage_original.items()))
+
+    def test_numbered_attempt_reuses_no_slot_and_verifies_transitive_history(self):
+        self.prepare_numbered_request()
+        result = self.attest_numbered()
+        self.failed_boundary = 'recovery_before:ha-broker'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        original_intent = self.stage / (self.continuation_stem + 'attempt-0001-intent.json')
+        prior = {'authorization_sha256': result['authorization_sha256'],
+                 'intent_sha256': wire._digest(original_intent.read_bytes()), 'progress_sha256': {}}
+        self.request = replace(self.request, nonce='c'*64, sequence=7)
+        self.failed_boundary = None
+        with patch.object(resume, 'MAX_NUMBERED_ATTEMPTS', 1):
+            with self.assertRaises(TransitionBlocked):
+                self.attest_numbered(lineage=prior)
+        with self.assertRaises(TransitionBlocked):
+            self.attest_numbered()  # The legacy C50 attempt is no longer the head.
+        self.attest_numbered(lineage=prior)
+        self.assertEqual(resume.latest_attempt(self.request), 2)
+        self.continuation_intent.write_bytes(self.continuation_intent.read_bytes() + b' ')
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        self.assertEqual(self.commands, [])
+
+    def test_numbered_attempt_rejects_unknown_slots_and_out_of_prefix_drift(self):
+        self.prepare_numbered_request()
+        orphan = self.stage / (self.continuation_stem + 'attempt-0002-intent.json')
+        orphan.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):
+            self.attest_numbered()
+        orphan.unlink()
+        skipped = resume.path(self.request, partial=True, prestart=True, continuation=True, numbered_attempt=2)
+        skipped.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):
+            self.attest_numbered()
+        skipped.unlink()
+        self.contracts['portal-web']['started_at'] = 'outside-verified-prefix'
+        with self.assertRaises(TransitionBlocked):
+            self.attest_numbered()
+        self.assertEqual(self.commands, [])
+
     def test_partial_stop_snapshot_allows_changed_start_times_under_real_inventory_contract(self):
         from ha_control import native_guest_postboot as postboot
         self.prepare_sameboot_request()
