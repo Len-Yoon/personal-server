@@ -272,6 +272,10 @@ def _validate_authorization(request,raw,hold,active,value,*,partial,prestart=Fal
                             numbered_attempt=0):
     from . import native_guest_worker as w
     fields=FIELDS|({'prior_resume'} if partial else set())
+    if request.args.get('postboot', {}).get('carryover_receipt_sha256'):
+        fields = fields | {'carryover_receipt_sha256'}
+        need(value.get('carryover_receipt_sha256') == request.args['postboot']['carryover_receipt_sha256']
+             and not partial and not prestart and not continuation and not numbered_attempt)
     if prestart:
         fields=fields|{'prior_partial'}
     if continuation:
@@ -288,6 +292,14 @@ def _validate_authorization(request,raw,hold,active,value,*,partial,prestart=Fal
 
 def _authorization_baseline(request,raw,hold,prepared,active,value,stage,stem):
     from . import native_guest_worker as w
+    if 'carryover_receipt_sha256' in value:
+        from .native_guest_postboot import observe_carryover
+        receipt = observe_carryover(request, request.args['postboot']['attempt_id'], value['carryover_receipt_sha256'])
+        need(value['prior_intent_sha256'] == receipt['history']['intent_sha256']
+             and value['prior_progress_sha256'] == receipt['history']['progress_sha256'])
+        need(not any(p.name.startswith(stem) for p in stage.iterdir()))
+        stem += 'resume-'
+        return receipt['container_contracts'], receipt['protected_inventory_sha256'], stem
     if 'numbered_attempt' in value:
         original = _resume_lineage(request, raw, hold, active, stage, stem, value['prior_intent_sha256'],
                                    value['service_instance_sha256'], value['prior_resume'])
@@ -367,11 +379,18 @@ def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_
                     continuation=prior_prestart is not None,numbered_attempt=numbered_attempt)
         raw,hold,prepared,active=w._read_initial_recovery_hold(request)
         need(wire._digest(raw)==request.args['hold_sha256'] and not os.path.lexists(target))
-        stage,stem=prior(request,hold,active,prior_intent_sha256,prior_progress_sha256)
+        carryover_pin = request.args.get('postboot', {}).get('carryover_receipt_sha256')
+        if carryover_pin:
+            need(not partial and prior_partial is None and prior_prestart is None and prior_attempt is None)
+            stage, stem = w.ROOT/request.binding.attempt_id, prefix(request)
+        else:
+            stage,stem=prior(request,hold,active,prior_intent_sha256,prior_progress_sha256)
         value={'schema_version':1,'request':w._scope(request),'args':request.args,
             'hold_sha256':wire._digest(raw),'service_instance_sha256':service_instance_sha256,
             'prior_intent_sha256':prior_intent_sha256,'prior_progress_sha256':prior_progress_sha256,
             'containers':hold['containers'],'authority_files':active['authority_files']}
+        if carryover_pin:
+            value['carryover_receipt_sha256'] = carryover_pin
         if partial:
             value['prior_resume']=prior_resume
         if prior_partial is not None:
@@ -404,7 +423,10 @@ def load(request,raw,hold,prepared,active,*,partial=False,prestart=False,continu
     body=w.runtime._read(target,0,{0o400},limit=131072);value=decode(body)
     _validate_authorization(request,raw,hold,active,value,partial=partial,prestart=prestart,
                             continuation=continuation,numbered_attempt=numbered_attempt)
-    stage,stem=prior(request,hold,active,value['prior_intent_sha256'],value['prior_progress_sha256'])
+    if 'carryover_receipt_sha256' in value:
+        stage, stem = w.ROOT/request.binding.attempt_id, prefix(request)
+    else:
+        stage,stem=prior(request,hold,active,value['prior_intent_sha256'],value['prior_progress_sha256'])
     contracts,protected,stem=_authorization_baseline(request,raw,hold,prepared,active,value,stage,stem)
     need(value['container_contracts']==contracts and value['protected_inventory_sha256']==protected)
     return body,value,stem
@@ -419,6 +441,10 @@ def preserved(request,body,value,hold,active,raw):
     target=path(request,partial=partial,prestart=prestart,continuation=continuation,
                 numbered_attempt=numbered_attempt)
     need(w.runtime._read(target,0,{0o400},limit=131072)==body)
+    if 'carryover_receipt_sha256' in value:
+        from .native_guest_postboot import observe_carryover
+        observe_carryover(request, request.args['postboot']['attempt_id'], value['carryover_receipt_sha256'], require_stopped=False)
+        return
     stage,stem=prior(request,hold,active,value['prior_intent_sha256'],value['prior_progress_sha256'])
     if partial:
         _resume_lineage(request,raw,hold,active,stage,stem,value['prior_intent_sha256'],
@@ -429,3 +455,39 @@ def preserved(request,body,value,hold,active,raw):
             prestart_authorization = _continuation_lineage(request,raw,hold,active,stage,stem,value,predecessor)
             if numbered_attempt:
                 _numbered_lineage(request,raw,hold,active,stage,stem,value,prestart_authorization)
+
+
+def _latest_history(request, raw, hold, active, link):
+    """Authenticate an attempted head and every immutable predecessor, without retrying it."""
+    from . import native_guest_worker as w
+    need(type(link) is dict and set(link) == LINK_FIELDS)
+    numbered = latest_attempt(request)
+    continuation = bool(numbered) or path(request, partial=True, prestart=True, continuation=True).exists()
+    prestart = continuation or path(request, partial=True, prestart=True).exists()
+    partial = prestart or path(request, partial=True).exists()
+    body = w.runtime._read(path(request, partial=partial, prestart=prestart,
+        continuation=continuation, numbered_attempt=numbered), 0, {0o400}, limit=131072)
+    need(wire._digest(body) == link['authorization_sha256'])
+    auth = decode(body)
+    scope_record = auth.get('request', {})
+    need(scope_record == w._scope(request))
+    previous = replace(request, nonce=scope_record.get('nonce'), sequence=scope_record.get('sequence'))
+    _validate_authorization(previous, raw, hold, active, auth, partial=partial, prestart=prestart,
+                            continuation=continuation, numbered_attempt=numbered)
+    stage, stem = prior(previous, hold, active, auth['prior_intent_sha256'], auth['prior_progress_sha256'])
+    if partial:
+        _resume_lineage(previous, raw, hold, active, stage, stem, auth['prior_intent_sha256'],
+                        auth['service_instance_sha256'], auth['prior_resume'])
+    if prestart:
+        partial_auth = _prestart_lineage(previous, raw, hold, active, stage, stem, auth)
+    if continuation:
+        prestart_auth = _continuation_lineage(previous, raw, hold, active, stage, stem, auth, partial_auth)
+    if numbered:
+        _numbered_lineage(previous, raw, hold, active, stage, stem, auth, prestart_auth)
+    head = (_numbered_stem(stem, numbered) if numbered else stem + 'resume-' +
+            ('partial-' if partial else '') + ('prestart-' if prestart else '') +
+            ('continuation-' if continuation else ''))
+    _prior_attempt(previous, hold, active, stage, head, link['intent_sha256'], link['progress_sha256'],
+                   None, authorization_pin=link['authorization_sha256'])
+    need(len(link['progress_sha256']) < len(w.RECOVERY_START_ORDER))
+    return auth

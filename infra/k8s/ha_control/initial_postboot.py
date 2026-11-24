@@ -12,6 +12,7 @@ PREDECESSOR_KIND='published-unpublished-recovery-v1'
 SAMEBOOT_KIND='published-postboot-sameboot-v1'
 RESUME_KIND='initial-wsl-cutover-postboot-resume'
 SAMEBOOT_FIELDS={'predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'}
+CARRYOVER_FIELD = 'carryover_receipt_sha256'
 
 def sameboot(value):
     return type(value) is dict and value.get('predecessor_kind')==SAMEBOOT_KIND
@@ -40,11 +41,12 @@ def scope(plan):
     value = plan.get('initial_recovery_postboot')
     need(not {'initial_recovery_rearm','initial_unpublished_recovery'} & plan.keys() and type(value) is dict
          and (set(value)==FIELDS or (set(value)==FIELDS|{'predecessor_kind'} and after_unpublished(value))
-              or (set(value)==FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS and sameboot(value)))
+              or (set(value) in (FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS, FIELDS|{'predecessor_kind'}|SAMEBOOT_FIELDS|{CARRYOVER_FIELD}) and sameboot(value)))
          and type(value['schema_version']) is int and value['schema_version'] == 1
          and value['closure_mode'] == 'windows-offline-v1'
          and all(type(value[key]) is str and SHA.fullmatch(value[key])
                  for key in (FIELDS-{'schema_version','closure_mode'}) | (SAMEBOOT_FIELDS if sameboot(value) else set()))
+         and (CARRYOVER_FIELD not in value or (type(value[CARRYOVER_FIELD]) is str and SHA.fullmatch(value[CARRYOVER_FIELD])))
          and (not sameboot(value) or value['attempt_id']!=value['stopped_attempt_id'])
          and type(plan.get('initial_cutover_recovery')) is dict
          and value['attempt_id'] not in {plan['initial_cutover_recovery'].get('attempt_id'),
@@ -277,7 +279,7 @@ def _validate_sameboot(plan,plan_pin,files,value):
     need(type(guests) is dict and set(guests)=={'A','B'}
          and all(type(g) is dict and set(g)==guest_fields and all(type(pin) is str and SHA.fullmatch(pin) for pin in g.values()) for g in guests.values())
          and all(guests['A'][key]!=guests['B'][key] for key in ('vm_id_sha256','disks_sha256','guest_boot_sha256'))
-         and guests['A']['container_inventory_sha256']==value['stopped_receipt_sha256']
+         and guests['A']['container_inventory_sha256']==value.get('carryover_receipt_sha256',value['stopped_receipt_sha256'])
          and guests['A']['guest_boot_sha256']==plan['windows_recovery_observers']['guest_boot_sha256'])
     resume_keys={'schema_version','plan_sha256','windows_boot_sha256','previous_windows_boot_sha256','predecessor_seal_sha256',
                  'guests','observed','hold_sha256','guest_observation_sha256','closed_revision','closed_pair_sha256',
@@ -293,6 +295,8 @@ def _validate_sameboot(plan,plan_pin,files,value):
          and all(type(v) is bool for v in (*resumed['clock_ca_validated'].values(),*resumed['fresh_vsock'].values()))
          and type(resumed['guest_observation_sha256']) is dict and set(resumed['guest_observation_sha256'])=={'A','B'}
          and all(type(pin) is str and SHA.fullmatch(pin) for pin in resumed['guest_observation_sha256'].values()))
+    if 'carryover_receipt_sha256' in value:
+        need(resumed['guest_observation_sha256']['A']==value['carryover_receipt_sha256'])
     order={'ha-broker','book-memo','car-care-worker','crawler-worker','homeops-executor','portal-web','system-agent','youtube-memo'}
     recovery_args={'recovery_attempt_id','installation_id','runtime_receipt_sha256','activation_receipt_sha256','protected_inventory_sha256','car_route_release_sha256'}
     stopkeys={'schema_version','binding','args','hold_sha256','containers','container_contracts','protected_inventory_sha256','closed_revision','closed_proof_sha256'}

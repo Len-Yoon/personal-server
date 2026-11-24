@@ -294,6 +294,7 @@ namespace N100InitialPredecessorJsonV1 {
             $scopeKeys+=@('predecessor_kind')
         }
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
+        if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
         $expectedKind=if($same){'initial-wsl-cutover-postboot-resume'}elseif($tag){'initial-wsl-cutover-postboot-unpublished'}else{'initial-wsl-cutover-postboot'}
         if($v.kind -cne $expectedKind){throw $bad}
     }
@@ -515,6 +516,9 @@ function Assert-PostbootEnvelope($Postboot){
         if($Postboot.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1')){throw 'initial_service_postboot_scope'}
         $keys+=@('predecessor_kind')
         if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1'){$keys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
+        if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and 'carryover_receipt_sha256' -cin $Postboot.PSObject.Properties.Name){
+            $keys+=@('carryover_receipt_sha256')
+        }
         $keys=@($keys|Sort-Object -CaseSensitive)
     }
     if((@($Postboot.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne ($keys -join ',') -or
@@ -573,6 +577,11 @@ function Assert-SamebootPostbootInputs($Plan,[string]$Root,$Terminal,$Binding,$P
     $previous=$old.initial_recovery_postboot;Assert-PostbootEnvelope $previous
     $previousSame=('predecessor_kind' -cin $previous.PSObject.Properties.Name) -and $previous.predecessor_kind -ceq 'published-postboot-sameboot-v1'
     $stopAttempt=if($previousSame){$previous.stopped_attempt_id}else{$previous.attempt_id}
+    if('carryover_receipt_sha256' -cin $r.PSObject.Properties.Name -and
+       ($Pre.guests.A.container_inventory_sha256 -cne $r.carryover_receipt_sha256 -or
+        $Resume.guest_observation_sha256.A -cne $r.carryover_receipt_sha256)){
+        throw 'initial_service_postboot_scope'
+    }
     if($Binding.controller_plan_sha256 -cne $r.predecessor_plan_sha256 -or $Terminal.controller_plan_sha256 -cne $r.predecessor_plan_sha256 -or
        (ConvertTo-Json $Terminal.postboot -Compress) -cne (ConvertTo-Json $previous -Compress) -or $r.attempt_id -ceq $previous.attempt_id -or
        $old.installation_id -cne $Plan.installation_id -or $old.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or

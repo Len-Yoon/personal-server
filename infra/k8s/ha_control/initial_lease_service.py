@@ -26,6 +26,7 @@ from .windows_lease_pipe import CLIENT_FAILURES, PersistentLeaseProofClient, Pro
 
 
 SHA = re.compile(r'[a-f0-9]{64}\Z')
+COOPERATIVE_STOP_EXIT_CODE = 17
 HANDOFF_KEYS = {'attempt_id', 'legacy_plan_sha256', 'restore_receipt_sha256', 'activation_intent_sha256'}
 OBSERVER_KEYS = {'pipe_name', 'server_pid', 'key_sha256', 'windows_boot_sha256',
                  'wsl_boot_sha256', 'collector_sha256', 'client_sha256', 'marker_sha256'}
@@ -301,8 +302,10 @@ def native_recovery_observer(backend):
             sealed=getattr(backend.fence_adapter,'_unpublished_verified',None)==unpublished_scope(backend.plan)
         if params.get('collector_sha256') != expected or not sealed:
             raise TransitionBlocked('initial_rearm_offline_observer_required')
+    held_receipt = None
     if postboot:
-        _pin(getattr(backend.fence_adapter,'_postboot_stopped_sha256',None))
+        stopped_receipt = _pin(getattr(backend.fence_adapter, '_postboot_stopped_sha256', None))
+        held_receipt = _pin(postboot_scope(backend.plan).get('carryover_receipt_sha256', stopped_receipt))
     recovery = _recovery_predecessor(backend, handoff)
     plan = backend.plan
     params = plan.get('windows_recovery_observers')
@@ -351,7 +354,7 @@ def native_recovery_observer(backend):
                 raise TransitionBlocked(failure) from None
             clients[purpose] = stack.enter_context(client)
         yield WindowsRecoveryObserver(legacy, clients['held_admission'], clients.get('provider_isolation'),
-            handoff, recovery, getattr(backend.fence_adapter,'_postboot_stopped_sha256',None) if postboot else None)
+            handoff, recovery, held_receipt)
 
 
 @contextmanager
@@ -383,7 +386,46 @@ def native_transition_observer(backend):
         yield client.request
 
 
-def serve_initial(backend, journal_path, observer):
+@contextmanager
+def native_writer_stop():
+    """Open only the per-launch event provisioned by the Windows service host."""
+    name = os.environ.get('N100HA_INITIAL_STOP_EVENT')
+    if name is None:
+        yield None
+        return
+    error = 'initial_service_stop_channel_unverified'
+    if os.name != 'nt' or re.fullmatch(r'Local\\N100HAWriterStop-[a-f0-9]{32}', name) is None:
+        raise TransitionBlocked(error)
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    open_event = kernel.OpenEventW
+    open_event.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    open_event.restype = wintypes.HANDLE
+    wait = kernel.WaitForSingleObject
+    wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    wait.restype = wintypes.DWORD
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    handle = open_event(0x00100000, False, name)  # SYNCHRONIZE only.
+    if not handle:
+        raise TransitionBlocked(error)
+
+    def requested(seconds):
+        result = wait(handle, int(seconds * 1000))
+        if result not in (0, 258):
+            raise TransitionBlocked(error)
+        return result == 0
+
+    try:
+        yield requested
+    finally:
+        close(handle)
+
+
+def serve_initial(backend, journal_path, observer, *, stop_requested=None):
     """Never resume a started attempt. A heartbeat is evidence, not a permit.
 
     The supplied native observer must read the current protected owner intent,
@@ -392,7 +434,7 @@ def serve_initial(backend, journal_path, observer):
     exact service process when consuming a heartbeat.
     """
     handoff = _handoff(backend)
-    return _serve(backend, journal_path, observer, handoff)
+    return _serve(backend, journal_path, observer, handoff, stop_requested=stop_requested)
 
 
 def _recovery_predecessor(backend, handoff):
@@ -440,17 +482,18 @@ def _recovery_predecessor(backend, handoff):
     return recovery
 
 
-def serve_initial_recovery(backend, journal_path, observer):
+def serve_initial_recovery(backend, journal_path, observer, *, stop_requested=None):
     """Serve under native admission, which remains closed durably until published.
 
     The admission context must leave application activation disabled on any
     exit before publish, including process termination or uncertain revoke.
     """
     action = UNPUBLISHED_ACTION if 'initial_unpublished_recovery' in backend.plan else (POSTBOOT_ACTION if 'initial_recovery_postboot' in backend.plan else (REARM_ACTION if 'initial_recovery_rearm' in backend.plan else RECOVERY_ACTION))
-    return _serve(backend, journal_path, observer, _handoff(backend, action=action), recovering=True)
+    return _serve(backend, journal_path, observer, _handoff(backend, action=action),
+                  recovering=True, stop_requested=stop_requested)
 
 
-def _serve(backend, journal_path, observer, handoff, *, recovering=False):
+def _serve(backend, journal_path, observer, handoff, *, recovering=False, stop_requested=None):
     journal = Journal(journal_path)
     state = {'cluster': backend.plan['cluster'], 'generation': 1, 'timeline': 1, 'target': 'A', 'old': 'B'}
     if not recovering and 'initial_effect_quarantine' in backend.plan:
@@ -512,6 +555,8 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
         def exclusion(_, deadline):
             return boundary(observer.assert_exclusion_held, deadline)
 
+        if stop_requested is not None and stop_requested(0):
+            raise TransitionBlocked('initial_service_stop_before_open')
         journal.save(stable | {'phase': 'opening', 'sequence': 0})
         lease_type = InitialPgLeaseUnpublishedRecovery if unpublished is not None else ((InitialPgLeasePostbootResume if sameboot(postboot) else (InitialPgLeasePostbootAfterUnpublished if after_unpublished(postboot) else InitialPgLeasePostboot)) if postboot is not None else (InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease)))
         lease = lease_type(backend, closure, assert_exclusion_held=exclusion, **lease_options)
@@ -531,11 +576,17 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
                              windows_retry_until=started + INITIAL_PROOF_SECONDS, proof_started_monotonic=started)
                 if time.monotonic() >= started + INITIAL_PROOF_SECONDS:
                     raise TransitionBlocked('initial_service_proof_deadline_exceeded')
+                if stop_requested is not None and stop_requested(0):
+                    break
                 if recovery is not None and not first_publication:
                     admission_handle.publish()
                     admission.close()
                 first_publication = True
-                time.sleep(max(0, 1 - (time.monotonic() - started)))
+                delay = max(0, 1 - (time.monotonic() - started))
+                if stop_requested is None:
+                    time.sleep(delay)
+                elif stop_requested(delay):
+                    break
                 proof = lease.renew(state)
         except Exception as error:
             reason = str(error) if isinstance(error, TransitionBlocked) else None
@@ -557,3 +608,6 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False):
             if failure_code is not None:
                 terminal['failure_code'] = failure_code
             journal.save(terminal, windows_retry_until=time.monotonic() + 0.15)
+        if not revoked:
+            raise TransitionBlocked('initial_service_stop_revoke_unconfirmed')
+        return {'status': 'STOPPED', 'phase': 'local_revoke_observed', 'sequence': sequence}

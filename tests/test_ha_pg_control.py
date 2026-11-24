@@ -2705,6 +2705,53 @@ exit 0
         lease.open.assert_called_once()
         lease.revoke.assert_called_once()
 
+    def test_requested_initial_stop_writes_terminal_only_after_revoke(self):
+        from ha_control import initial_lease_service as service
+
+        backend = SimpleNamespace(plan={'cluster': 'initial_test'})
+        handoff = dict(attempt_id='a' * 64)
+        observer = MagicMock(spec=service.WindowsInitialObserver)
+        for revoked in (True, False):
+            with self.subTest(revoked=revoked), tempfile.TemporaryDirectory() as folder:
+                lease = MagicMock()
+                lease.proof_started = time.monotonic()
+                lease.open.return_value = 'f' * 64
+                journal = Path(folder) / 'controller-state.json'
+
+                def revoke(_):
+                    self.assertEqual(json.loads(journal.read_text())['phase'], 'serving')
+                    return revoked
+
+                lease.revoke.side_effect = revoke
+                stop = MagicMock(side_effect=(False, False, True))
+                with patch.object(service, 'InitialPgLease', return_value=lease):
+                    if revoked:
+                        result = service._serve(backend, journal, observer, handoff, stop_requested=stop)
+                        self.assertEqual(result, {'status': 'STOPPED', 'phase': 'local_revoke_observed',
+                                                  'sequence': 1})
+                    else:
+                        with self.assertRaisesRegex(TransitionBlocked, 'initial_service_stop_revoke_unconfirmed'):
+                            service._serve(backend, journal, observer, handoff, stop_requested=stop)
+                terminal = json.loads(journal.read_text())
+                self.assertEqual(terminal['phase'], 'local_revoke_observed' if revoked else 'lease_lost')
+                self.assertEqual(terminal['sequence'], 1)
+                self.assertNotIn('failure_code', terminal)
+                lease.renew.assert_not_called()
+                lease.revoke.assert_called_once()
+
+    def test_requested_initial_stop_before_open_keeps_authority_closed(self):
+        from ha_control import initial_lease_service as service
+
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Path(folder) / 'controller-state.json'
+            backend = SimpleNamespace(plan={'cluster': 'initial_test'})
+            observer = MagicMock(spec=service.WindowsInitialObserver)
+            with patch.object(service, 'InitialPgLease') as lease:
+                with self.assertRaisesRegex(TransitionBlocked, 'initial_service_stop_before_open'):
+                    service._serve(backend, journal, observer, {}, stop_requested=lambda _: True)
+                lease.assert_not_called()
+                self.assertFalse(journal.exists())
+
     def test_recovery_journal_requires_positive_admission_before_a_lease_can_open(self):
         from contextlib import contextmanager
         from ha_control import initial_lease_service as service

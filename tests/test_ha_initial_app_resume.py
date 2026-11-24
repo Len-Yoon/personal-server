@@ -559,4 +559,124 @@ class InitialAppResumeTests(unittest.TestCase):
             self.assertEqual({role for role,row in current.items() if row['started_at']!=original[role]['started_at']},
                              set(w.RECOVERY_START_ORDER[:3]))
 
+
+    def prepare_successor_carryover(self):
+        from ha_control import native_guest_postboot as postboot
+        original_prepare = self.prepare_sameboot_request
+        def prepare():
+            original_prepare()
+            self.old_plan = {'installation_id': self.request.args['installation_id'],
+                'initial_recovery_postboot': self.request.args['postboot'],
+                'initial_cutover_recovery': {'attempt_id': self.request.args['recovery_attempt_id']},
+                'initial_cutover_handoff': {'attempt_id': self.request.binding.attempt_id,
+                                          'legacy_plan_sha256': self.request.binding.plan_sha256}}
+            self.old_plan['connection_settings'] = {'private_endpoint': 'sensitive-marker-that-must-not-be-copied'}
+            self.old_plan_raw = wire._bytes(self.old_plan)
+            self.request = replace(self.request, args=self.request.args | {'postboot_plan_sha256': wire._digest(self.old_plan_raw)})
+            intent = json.loads(self.intent)
+            intent['args'] = self.request.args
+            self.intent = wire._bytes(intent)
+            self.intent_pin = wire._digest(self.intent)
+            self.intent_path.write_bytes(self.intent)
+        self.prepare_sameboot_request = prepare
+        self.prepare_numbered_request()
+        auth = self.attest_numbered()
+        self.failed_boundary = 'recovery_after:book-memo'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        head = self.continuation_stem + 'attempt-0001-'
+        self.successor_history = {'authorization_sha256': auth['authorization_sha256'],
+            'intent_sha256': wire._digest((self.stage/(head+'intent.json')).read_bytes()),
+            'progress_sha256': {'progress-ha-broker.json': wire._digest((self.stage/(head+'progress-ha-broker.json')).read_bytes())}}
+        self.old_request = self.request
+        successor = self.request.args['postboot'] | {'attempt_id': 'd'*64,
+            'predecessor_plan_sha256': wire._digest(self.old_plan_raw)}
+        self.request = replace(self.request, nonce='f'*64, sequence=8,
+            args=self.request.args | {'postboot': successor, 'postboot_plan_sha256': 'e'*64})
+        self.failed_boundary = None
+        self.commands.clear()
+        self.all_original = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.carryover = postboot.attest_carryover(self.request, predecessor_plan_raw=self.old_plan_raw,
+            predecessor_request=self.old_request, history=self.successor_history)
+        self.request = replace(self.request, args=self.request.args | {
+            'postboot': successor | {'carryover_receipt_sha256': self.carryover.receipt_sha256}})
+        return postboot
+
+    def attest_successor(self):
+        return resume.attest(self.request, service_instance_sha256='1'*64,
+            prior_intent_sha256=self.successor_history['intent_sha256'],
+            prior_progress_sha256=self.successor_history['progress_sha256'])
+
+    def test_successor_carryover_checks_exact_history_and_new_writer_authorization(self):
+        postboot = self.prepare_successor_carryover()
+        # Strict original observation still fails after attempted starts.
+        with self.assertRaises(TransitionBlocked):
+            postboot.observe(self.request, self.request.args['postboot']['stopped_attempt_id'],
+                             self.request.args['postboot_stopped_receipt_sha256'])
+        observed = postboot.observe_carryover(self.request, 'd'*64, self.carryover.receipt_sha256)
+        self.assertEqual(observed['history'], self.successor_history)
+        self.assertNotIn('predecessor_plan_json', observed)
+        self.assertEqual(observed['predecessor_postboot'], self.old_plan['initial_recovery_postboot'])
+        self.assertNotIn(b'sensitive-marker-that-must-not-be-copied',
+            postboot.carryover_path(self.request, 'd'*64).read_bytes())
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        self.assertEqual(self.commands, [])
+        self.attest_successor()
+        self.assertEqual(w.start_initial_recovery(self.request, self.windows).status, 'PASS')
+        self.assertEqual(self.commands, [('start', value['container_id']) for value in self.containers.values()])
+        self.assertTrue(all(path.read_bytes() == raw for path,raw in self.all_original.items()))
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+
+    def test_successor_carryover_checks_only_one_inventory_and_preserves_without_rescan(self):
+        postboot = self.prepare_successor_carryover()
+        with patch.object(postboot, 'current', wraps=postboot.current) as current:
+            postboot.observe_carryover(self.request, 'd'*64, self.carryover.receipt_sha256)
+            self.assertEqual(current.call_count, 1)
+        self.attest_successor()
+        body,value,_ = self.load()
+        with patch.object(postboot, 'current', wraps=postboot.current) as current:
+            resume.preserved(self.request, body, value, self.hold, self.active, b'hold')
+            self.assertEqual(current.call_count, 0)
+
+    def test_successor_carryover_rejects_reused_new_attempt_namespace(self):
+        self.prepare_successor_carryover()
+        path = self.stage/(resume.prefix(self.request)+'intent.json')
+        path.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):self.attest_successor()
+        self.assertEqual(self.commands, [])
+
+    def test_carryover_rejects_modified_raw_plan_before_creating_receipt(self):
+        postboot = self.prepare_successor_carryover()
+        new = replace(self.request, args=self.request.args | {'postboot': self.request.args['postboot'] | {'attempt_id': 'c'*64}})
+        with self.assertRaises(TransitionBlocked):
+            postboot.attest_carryover(new, predecessor_plan_raw=self.old_plan_raw+b' ',
+                predecessor_request=self.old_request, history=self.successor_history)
+        self.assertFalse(postboot.carryover_path(new, 'c'*64).exists())
+
+    def test_carryover_rejects_unbound_predecessor_nonce(self):
+        postboot = self.prepare_successor_carryover()
+        target = postboot.carryover_path(self.request, 'd'*64)
+        original = target.read_bytes()
+        # A different new attempt cannot authenticate a made-up old request.
+        new = replace(self.request, args=self.request.args | {'postboot': self.request.args['postboot'] | {'attempt_id': 'c'*64}})
+        with self.assertRaises(TransitionBlocked):
+            postboot.attest_carryover(new, predecessor_plan_raw=self.old_plan_raw,
+                predecessor_request=replace(self.old_request, nonce='0'*64), history=self.successor_history)
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_successor_carryover_rejects_live_drift_and_changed_history(self):
+        postboot = self.prepare_successor_carryover()
+        self.contracts['portal-web']['started_at'] = 'unrecorded-start'
+        with self.assertRaises(TransitionBlocked):
+            postboot.observe_carryover(self.request, 'd'*64, self.carryover.receipt_sha256)
+        self.contracts['portal-web']['started_at'] = 'original-postboot-stop'
+        self.attest_successor()
+        old_intent = self.stage/(self.continuation_stem+'attempt-0001-intent.json')
+        old_intent.write_bytes(old_intent.read_bytes()+b' ')
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        self.assertEqual(self.commands, [])
+
 if __name__=='__main__':unittest.main()

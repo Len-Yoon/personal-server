@@ -12,7 +12,7 @@ def paths(request, attempt):
     stage=worker.ROOT/request.binding.attempt_id
     return stage/('postboot-'+attempt+'-stop-intent.json'),stage/('postboot-'+attempt+'-stopped.json')
 
-def current(request):
+def current(request, *, inventory=None):
     raw,hold,prepared,active=worker._read_initial_recovery_hold(request)
     worker._need(wire._digest(raw)==request.args['hold_sha256'],ERROR)
     worker._assert_car_route_blocked(request,raw,prepared,active)
@@ -20,7 +20,8 @@ def current(request):
     worker._need(set(authorities)==set(worker.live._authority_paths().values())
         and all(wire._digest(worker.runtime._read(path,0,{0o444}))==pin for path,pin in authorities.items()),ERROR)
     contract,protected=worker._initial_recovery_inventory(request.binding,hold['containers'],
-        request.args['protected_inventory_sha256'],None,(hold['container_contracts'],request.args['protected_inventory_sha256']))
+        request.args['protected_inventory_sha256'],None,(hold['container_contracts'],request.args['protected_inventory_sha256']),
+        inventory=inventory)
     return raw,hold,contract,protected
 
 def closed_revision(request,args=None):
@@ -89,11 +90,16 @@ def stop(request, assert_closed):
         observe(request,args['postboot_attempt_id'],wire._digest(receipt))
         return wire.Receipt('PASS',wire._digest(receipt))
 
-def observe(request, attempt, expected, *, require_stopped=True):
+def observe(request, attempt, expected, *, require_stopped=True, _runtime=True):
     worker._need(wire._hash(expected),ERROR)
     _,done_path=paths(request,attempt)
     raw,record=worker._read_json(done_path)
-    holdraw,hold,contracts,protected=current(request)
+    if _runtime:
+        holdraw,hold,contracts,protected=current(request)
+    else:
+        worker._need(not require_stopped, ERROR)
+        holdraw,hold,_,_=worker._read_initial_recovery_hold(request)
+        contracts,protected=None,request.args['protected_inventory_sha256']
     keys={'schema_version','binding','args','hold_sha256','containers','container_contracts',
           'protected_inventory_sha256','closed_revision','closed_proof_sha256'}
     worker._need(wire._digest(raw)==expected and type(record) is dict and set(record)==keys
@@ -108,4 +114,138 @@ def observe(request, attempt, expected, *, require_stopped=True):
         and set(record['container_contracts'])==set(hold['containers']),ERROR)
     if require_stopped:
         worker._need(record['container_contracts']==contracts and all(value['running'] is False for value in contracts.values()),ERROR)
+    return record
+
+
+CARRYOVER_KIND = 'authenticated-postboot-app-carryover-v1'
+CARRYOVER_FIELDS = {'schema_version', 'kind', 'binding', 'postboot', 'recovery_args',
+    'predecessor_postboot', 'predecessor_request', 'history', 'hold_sha256', 'containers',
+    'container_contracts', 'protected_inventory_sha256'}
+
+
+def carryover_path(request, attempt):
+    worker._need(wire._hash(attempt), ERROR)
+    return worker.ROOT / request.binding.attempt_id / ('postboot-' + attempt + '-carryover-stopped.json')
+
+
+def _carryover_scope(request):
+    from .initial_postboot import scope, sameboot
+    value = scope({'initial_recovery_postboot': request.args['postboot'],
+                   'initial_cutover_recovery': {'attempt_id': request.args['recovery_attempt_id']},
+                   'initial_cutover_handoff': {'attempt_id': request.binding.attempt_id}})
+    worker._need(sameboot(value), ERROR)
+    value.pop('carryover_receipt_sha256', None)
+    # The new predecessor seal contains this receipt's digest; exclude that
+    # later seal pin to avoid a circular hash. The final plan pins both.
+    value.pop('predecessor_seal_sha256', None)
+    return value
+
+
+def _carryover_history(request, record):
+    """Revalidate the authenticated safe plan projection and exact old history pins."""
+    from . import initial_app_resume as resume
+    from .initial_postboot import scope, stopped_attempt
+    from dataclasses import replace
+    worker._need(set(record) == CARRYOVER_FIELDS and record['kind'] == CARRYOVER_KIND
+        and type(record['schema_version']) is int and record['schema_version'] == 1
+        and record['binding'] == request.binding.fields()
+        and type(record['predecessor_postboot']) is dict
+        and type(record['predecessor_request']) is dict, ERROR)
+    postboot = record['postboot']
+    worker._need(type(postboot) is dict and wire._hash(postboot['predecessor_plan_sha256']), ERROR)
+    previous_postboot = scope({'initial_recovery_postboot': record['predecessor_postboot'],
+        'initial_cutover_recovery': {'attempt_id': record['recovery_args']['recovery_attempt_id']},
+        'initial_cutover_handoff': {'attempt_id': request.binding.attempt_id}})
+    old = record['predecessor_request']
+    worker._need(set(old) == {'scope', 'args'} and type(old['scope']) is dict and type(old['args']) is dict, ERROR)
+    previous = replace(request, verb=wire.GUEST_START_INITIAL_POSTBOOT, args=old['args'],
+                       nonce=old['scope'].get('nonce'), sequence=old['scope'].get('sequence'))
+    wire._args(previous.verb, previous.node, previous.args)
+    worker._need(worker._scope(previous) == old['scope']
+        and wire._hash(previous.nonce) and type(previous.sequence) is int and 0 < previous.sequence <= wire.MAX_REQUESTS
+        and previous.args['postboot'] == previous_postboot
+        and previous.args['postboot_plan_sha256'] == postboot['predecessor_plan_sha256']
+        and postboot['attempt_id'] != previous_postboot['attempt_id']
+        and postboot['stopped_attempt_id'] == stopped_attempt(previous_postboot)
+        and all(previous.args[key] == record['recovery_args'][key] for key in (*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256'))
+        and previous.args['postboot_stopped_receipt_sha256'] == postboot['stopped_receipt_sha256'], ERROR)
+    raw, hold, prepared, active = worker._read_initial_recovery_hold(previous)
+    worker._need(wire._digest(raw) == record['hold_sha256'] == record['recovery_args']['hold_sha256']
+        and record['containers'] == hold['containers'], ERROR)
+    auth = resume._latest_history(previous, raw, hold, active, record['history'])
+    # This verifies the original stopped receipt with its original closed revision.
+    original = observe(previous, postboot['stopped_attempt_id'], postboot['stopped_receipt_sha256'], require_stopped=False, _runtime=False)
+    worker._need(auth['protected_inventory_sha256'] == original['protected_inventory_sha256']
+        == record['protected_inventory_sha256'] == record['recovery_args']['protected_inventory_sha256'], ERROR)
+    resume._confirm_progress_drift(record['container_contracts'], auth['container_contracts'],
+                                  len(record['history']['progress_sha256']))
+    return hold
+
+
+def attest_carryover(request, *, predecessor_plan_raw, predecessor_request, history):
+    """Trusted ROOT operation creates admission metadata, never a new stop or app start.
+
+    The caller separately pins this digest in the new plan and observer. The
+    original stopped receipt and every attempted writer record are preserved.
+    The final plan hash and new writer publication do not exist at this stage.
+    """
+    worker._need(request.verb == wire.GUEST_START_INITIAL_POSTBOOT
+        and type(predecessor_plan_raw) is bytes and type(predecessor_request) is wire.Request, ERROR)
+    from . import initial_app_resume as resume
+    from .initial_postboot import scope
+    postboot = _carryover_scope(request)
+    # Authenticate the exact input bytes in memory. Persist only the hash-only
+    # postboot projection; the Windows plan can contain connection settings.
+    worker._need(wire._digest(predecessor_plan_raw) == postboot['predecessor_plan_sha256']
+        == predecessor_request.args['postboot_plan_sha256'], ERROR)
+    old_plan = resume.decode(predecessor_plan_raw)
+    previous_postboot = scope(old_plan)
+    worker._need(previous_postboot == predecessor_request.args['postboot']
+        and old_plan['installation_id'] == request.args['installation_id']
+        and old_plan['initial_cutover_handoff']['attempt_id'] == request.binding.attempt_id
+        and old_plan['initial_cutover_handoff']['legacy_plan_sha256'] == request.binding.plan_sha256
+        and old_plan['initial_cutover_recovery']['attempt_id'] == request.args['recovery_attempt_id'], ERROR)
+    with worker._guest_mutation_descriptor():
+        raw, hold, contracts, protected = current(request)
+        record = {'schema_version': 1, 'kind': CARRYOVER_KIND, 'binding': request.binding.fields(),
+            'postboot': postboot, 'recovery_args': {key: request.args[key] for key in (*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256')},
+            'predecessor_postboot': previous_postboot,
+            'predecessor_request': {'scope': worker._scope(predecessor_request), 'args': predecessor_request.args},
+            'history': history, 'hold_sha256': wire._digest(raw), 'containers': hold['containers'],
+            'container_contracts': contracts, 'protected_inventory_sha256': protected}
+        _carryover_history(request, record)
+        worker._need(all(row['running'] is False for row in contracts.values()), ERROR)
+        target = carryover_path(request, postboot['attempt_id'])
+        body = wire._bytes(record)
+        worker._need(0 < len(body) <= 262144, ERROR)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(body); stream.flush(); os.fsync(stream.fileno())
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+        worker._need(worker.runtime._read(target, 0, {0o400}, limit=262144) == body, ERROR)
+        return wire.Receipt('PASS', wire._digest(body))
+
+
+def observe_carryover(request, attempt, expected, *, require_stopped=True, inventory=None):
+    """Only an explicitly pinned new-attempt admission can relax original StartedAt."""
+    from . import initial_app_resume as resume
+    worker._need(wire._hash(expected), ERROR)
+    raw = worker.runtime._read(carryover_path(request, attempt), 0, {0o400}, limit=262144)
+    worker._need(wire._digest(raw) == expected, ERROR)
+    record = resume.decode(raw)
+    worker._need(record.get('postboot', {}).get('attempt_id') == attempt, ERROR)
+    _carryover_history(request, record)
+    worker._need(all(request.args[key] == record['recovery_args'][key]
+        for key in (*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256'))
+        and request.args['postboot_stopped_receipt_sha256'] == record['postboot']['stopped_receipt_sha256'], ERROR)
+    if request.verb == wire.GUEST_START_INITIAL_POSTBOOT:
+        worker._need(_carryover_scope(request) == record['postboot']
+            and request.args['postboot'].get('carryover_receipt_sha256') == expected, ERROR)
+    if require_stopped:
+        _, _, contracts, protected = current(request, inventory=inventory)
+        worker._need(protected == record['protected_inventory_sha256'], ERROR)
+        worker._need(contracts == record['container_contracts']
+            and all(row['running'] is False for row in contracts.values()), ERROR)
     return record

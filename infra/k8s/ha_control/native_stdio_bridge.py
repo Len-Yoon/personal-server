@@ -307,6 +307,8 @@ def _args(verb, node, args):
     _need(node in nodes and type(args) is dict, "bridge_args_rejected")
     if verb in {GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION}:
         keys = (*keys, *rejoin_wal_evidence(args, "bridge_args_rejected"))
+    if verb == GUEST_OBSERVE_INITIAL_POSTBOOT and "postboot_carryover_receipt_sha256" in args:
+        keys = (*keys, "postboot_carryover_receipt_sha256")
     _need(set(args) == set(keys), "bridge_args_rejected")
     if verb == GUEST_START_INITIAL_REARM:
         from .initial_pg_lease import rearm_scope

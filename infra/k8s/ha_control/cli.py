@@ -167,11 +167,13 @@ def run(args):
             if args.command != 'serve' or not getattr(args, 'arm', False):
                 raise TransitionBlocked('initial_cutover_requires_explicit_serve')
             from .initial_lease_service import (native_initial_observer, native_recovery_observer,
-                                                serve_initial, serve_initial_recovery)
+                                                native_writer_stop, serve_initial, serve_initial_recovery)
             factory, serve = ((native_recovery_observer, serve_initial_recovery) if recovering
                               else (native_initial_observer, serve_initial))
-            with factory(backend) as observer:
-                return serve(backend, journal, observer)
+            with native_writer_stop() as stop_requested, factory(backend) as observer:
+                if stop_requested is None:
+                    return serve(backend, journal, observer)
+                return serve(backend, journal, observer, stop_requested=stop_requested)
         transition_service = args.command in {"transition-serve", "transition-rearm"}
         write_command = transition_service or args.command in {"advance", "serve"}
         if p.get("profile") == "enforced-vm-v1" and p["generation"] >= 2 and write_command:
@@ -290,6 +292,9 @@ def main(argv=None):
     except Exception:
         result = {"status": "BLOCKED", "reason": "controller_outcome_unknown"}
     print(json.dumps(result, sort_keys=True))
+    if args.command == "serve" and result.get("phase") == "local_revoke_observed" and result["status"] == "STOPPED":
+        from .initial_lease_service import COOPERATIVE_STOP_EXIT_CODE
+        return COOPERATIVE_STOP_EXIT_CODE
     return 0 if result["status"] in {"PASS", "STOPPED"} else 1
 
 

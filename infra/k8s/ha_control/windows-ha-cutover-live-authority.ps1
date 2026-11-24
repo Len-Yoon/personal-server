@@ -28,6 +28,9 @@ param(
     [string]$PostbootPredecessorPlanSha256,
     [string]$PostbootStoppedAttemptId,
     [string]$PostbootStoppedReceiptSha256,
+    [string]$PostbootCarryoverReceiptSha256,
+    [string]$WriterReleaseHostSha256,
+    [string]$ReleasedWriterTerminalSha256,
     [switch]$RecoveryContinuity,
     [switch]$Retire,
     [switch]$ObserveRetired,
@@ -126,6 +129,7 @@ namespace N100InitialPredecessorJsonV1 {
             $scopeKeys+=@('predecessor_kind')
         }
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
+        if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
         $expectedKind=if($same){'initial-wsl-cutover-postboot-resume'}elseif($tag){'initial-wsl-cutover-postboot-unpublished'}else{'initial-wsl-cutover-postboot'}
         if($v.kind -cne $expectedKind){throw $bad}
     }
@@ -457,6 +461,10 @@ try {
     $postbootResume=$postbootTagged -and $PostbootPredecessorKind -ceq 'published-postboot-sameboot-v1'
     if($postbootTagged -and (-not $postboot -or -not ($postbootUnpublished -or $postbootResume))){throw 'live_authority_postboot_scope'}
     $resumePins=@($PostbootPredecessorPlanSha256,$PostbootStoppedAttemptId,$PostbootStoppedReceiptSha256)
+    $hasCarryover=$PSBoundParameters.ContainsKey('PostbootCarryoverReceiptSha256')
+    if($hasCarryover -and (-not $postbootResume -or $PostbootCarryoverReceiptSha256 -cnotmatch $pattern)){
+        throw 'live_authority_postboot_scope'
+    }
     if(($postbootResume -and @($resumePins|Where-Object {$_ -cnotmatch $pattern}).Count) -or
        (-not $postbootResume -and @($resumePins|Where-Object {$_}).Count)){throw 'live_authority_postboot_scope'}
     $unpublished=$PSBoundParameters.ContainsKey('UnpublishedAttemptId') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorTerminalSha256') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorArgsSha256') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorPlanSha256') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorSealSha256')
@@ -470,6 +478,15 @@ try {
         throw 'live_authority_recovery_scope'
     }
     if ($RequireTerminalInitial -and -not $ReadPriorServiceArgs) { throw 'initial_service_retirement_scope' }
+    $cooperativeRelease=$PSBoundParameters.ContainsKey('WriterReleaseHostSha256')
+    $sealRelease=$PSBoundParameters.ContainsKey('ReleasedWriterTerminalSha256')
+    if(($sealRelease -and (-not $cooperativeRelease -or $ReleasedWriterTerminalSha256 -cnotmatch $pattern)) -or
+       ($cooperativeRelease -and ($WriterReleaseHostSha256 -cnotmatch $pattern -or
+       $ExpectedServiceInstanceSha256 -cnotmatch $pattern -or $ReadPriorServiceArgs -or
+       $ReadClosureReceipt -or $ReadRejoinReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or
+       $TransitionHandoffSha256 -or $TransitionBoundarySha256))){
+        throw 'writer_release_scope'
+    }
     if ($ReadRejoinReceipt) {
         if ($ReadPriorServiceArgs -or $ReadClosureReceipt -or $Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
             throw 'transition_rejoin_receipt_invalid'
@@ -536,6 +553,81 @@ try {
     }
     # Bind directly to the validated service key instead of enumerating Win32_Service.
     $service = Find-BoundService $plan
+    if ($cooperativeRelease) {
+        $hostPath=$service.PathName.Trim('"')
+        if($service.StartName -ine ('NT SERVICE\'+$plan.service_name) -or $service.ServiceType -cne 'Own Process' -or
+           $service.DesktopInteract -or $service.PathName -cnotmatch '\A"[A-Za-z]:\\[A-Za-z0-9_.\\-]+\\windows-service-host\.exe"\z' -or
+           (Get-FileHash -LiteralPath $hostPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $WriterReleaseHostSha256){
+            throw 'writer_release_host_unconfirmed'
+        }
+    }
+    if ($sealRelease) {
+        if($service.State -cne 'Stopped' -or $service.ProcessId -ne 0 -or $service.ExitCode -ne 0 -or
+           $service.ServiceSpecificExitCode -ne 0 -or
+           $service.StartMode -cnotin @('Manual','Disabled')){throw 'writer_release_stop_unconfirmed'}
+        $ClosureServiceSid=$identity
+        $terminal=Read-Scope $plan.state_path ($admins + $identity) -Immutable
+        $record=ConvertFrom-Json -InputObject $terminal.raw
+        $keys=@('activation_intent_sha256','attempt_id','controller_plan_sha256','generation','kind',
+                'legacy_plan_sha256','phase','restore_receipt_sha256','schema_version','sequence')
+        $kind='initial-wsl-cutover'
+        if($recovering){
+            $keys+=@('recovery','revision')
+            $kind='initial-wsl-cutover-recovery'
+            if($rearming){$keys+='rearm';$kind='initial-wsl-cutover-rearm'}
+            if($unpublished){$keys+='unpublished';$kind='initial-wsl-cutover-unpublished'}
+            if($postboot){
+                $keys+='postboot'
+                $kind=if($postbootResume){'initial-wsl-cutover-postboot-resume'}elseif($postbootUnpublished){'initial-wsl-cutover-postboot-unpublished'}else{'initial-wsl-cutover-postboot'}
+            }
+        }
+        if((Get-Digest $terminal.raw) -cne $ReleasedWriterTerminalSha256 -or $record.kind -cne $kind -or
+           (@($record.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (@($keys|Sort-Object -CaseSensitive)-join ',') -or
+           $record.phase -cne 'local_revoke_observed' -or $record.schema_version -ne 1 -or $record.generation -ne 1 -or
+           ($record.sequence -isnot [int] -and $record.sequence -isnot [long]) -or $record.sequence -lt 1 -or
+           $record.attempt_id -cne $AttemptId -or $record.legacy_plan_sha256 -cne $LegacyPlanSha256 -or
+           $record.controller_plan_sha256 -cne $plan.controller_plan_sha256 -or
+           ($recovering -and ($record.revision -ne $expectedRevision -or
+             $record.recovery.attempt_id -cne $RecoveryAttemptId -or
+             $record.recovery.predecessor_terminal_sha256 -cne $RecoveryPredecessorTerminalSha256 -or
+             $record.recovery.predecessor_service_sha256 -cne $RecoveryPredecessorServiceSha256))){
+            throw 'writer_release_terminal_unconfirmed'
+        }
+        $integerFields=@('schema_version','generation')
+        if($recovering){$integerFields+='revision'}
+        foreach($integer in $integerFields){
+            if($record.$integer -isnot [int] -and $record.$integer -isnot [long]){
+                throw 'writer_release_terminal_unconfirmed'
+            }
+        }
+        if($postboot -or $unpublished -or $rearming){
+            $null=Get-InitialPredecessorNumbers ([Text.UTF8Encoding]::new($false,$true).GetBytes($terminal.raw)) $ReleasedWriterTerminalSha256 $true
+            if($postboot -and $hasCarryover -ne ('carryover_receipt_sha256' -cin $record.postboot.PSObject.Properties.Name)){
+                throw 'writer_release_terminal_unconfirmed'
+            }
+            $scopeField=if($postboot){'postboot'}elseif($unpublished){'unpublished'}else{'rearm'}
+            $scope=$record.$scopeField
+            $prefix=if($postboot){'Postboot'}elseif($unpublished){'Unpublished'}else{'Rearm'}
+            foreach($key in $scope.PSObject.Properties.Name){
+                if($key -cin @('schema_version','closure_mode')){continue}
+                $parameter=$prefix+(($key.Split('_')|ForEach-Object {if($_ -ceq 'sha256'){'Sha256'}else{$_.Substring(0,1).ToUpperInvariant()+$_.Substring(1)}})-join '')
+                if(-not $PSBoundParameters.ContainsKey($parameter) -or $scope.$key -cne $PSBoundParameters[$parameter]){
+                    throw 'writer_release_terminal_unconfirmed'
+                }
+            }
+        }
+        if($service.StartMode -ceq 'Manual'){
+            if($service.ChangeStartMode('Disabled').ReturnValue -ne 0){throw 'initial_service_disable_unconfirmed'}
+        }
+        $settled=Find-BoundService $plan
+        Assert-Retired $settled
+        if($settled.ExitCode -ne 0 -or $settled.ServiceSpecificExitCode -ne 0 -or
+           (Read-Scope $plan.state_path ($admins + $identity) -Immutable).raw -cne $terminal.raw){
+            throw 'writer_release_terminal_unconfirmed'
+        }
+        [ordered]@{writer_release_sealed=$true;terminal_state_sha256=$ReleasedWriterTerminalSha256}|ConvertTo-Json -Compress
+        return
+    }
     if ($ReadPriorServiceArgs) {
         if ($service.State -cne 'Stopped' -or $service.ProcessId -ne 0 -or
             $service.StartMode -cnotin @('Manual','Disabled') -or
@@ -591,6 +683,15 @@ try {
             ('"' + $process.MainModule.FileName + '"') -ine $service.PathName -or
             $process.StartTime.ToUniversalTime().Ticks.ToString() -cne $plan.service_created_ticks) {
             throw 'live_authority_service'
+        }
+        if ($cooperativeRelease) {
+            if($service.AcceptStop -isnot [bool] -or $service.AcceptStop -or $service.StartMode -cne 'Manual' -or
+               $process.HasExited){throw 'writer_release_host_unconfirmed'}
+            $sc=Join-Path ([Environment]::SystemDirectory) 'sc.exe'
+            $null=& $sc control $service.Name 128
+            if($LASTEXITCODE -ne 0){throw 'writer_release_request_unconfirmed'}
+            [ordered]@{writer_release_requested=$true;service_instance_sha256=$ExpectedServiceInstanceSha256}|ConvertTo-Json -Compress
+            return
         }
         if ($Retire -or $ResumeRetire) {
             if ($Retire -and ($service.StartMode -cne 'Manual' -or $process.HasExited -or
@@ -661,6 +762,7 @@ try {
                 predecessor_seal_sha256=$PostbootPredecessorSealSha256;previous_windows_boot_sha256=$PostbootPreviousWindowsBootSha256;closure_mode='windows-offline-v1'}
             if($postbootTagged){$expected.predecessor_kind=$PostbootPredecessorKind}
             if($postbootResume){$expected.predecessor_plan_sha256=$PostbootPredecessorPlanSha256;$expected.stopped_attempt_id=$PostbootStoppedAttemptId;$expected.stopped_receipt_sha256=$PostbootStoppedReceiptSha256}
+            if($hasCarryover){$expected.carryover_receipt_sha256=$PostbootCarryoverReceiptSha256}
             $names=@($record.postboot.PSObject.Properties.Name|Sort-Object -CaseSensitive)
             if(($names -join ',') -cne (@($expected.Keys|Sort-Object -CaseSensitive) -join ',') -or
                ($record.postboot.schema_version -isnot [int] -and $record.postboot.schema_version -isnot [long]) -or $record.postboot.schema_version -ne 1){throw 'live_authority_postboot_scope'}

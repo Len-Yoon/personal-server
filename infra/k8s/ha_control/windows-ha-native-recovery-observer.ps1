@@ -101,6 +101,12 @@ public sealed class HaRecoveryGuestEndpoint : EndPoint
            $Config.postboot_stopped_receipt_sha256 -cnotmatch '\A[a-f0-9]{64}\z'){throw 'recovery_postboot_scope'}
         $script:recoveryPostbootReceipt=$Config.postboot_stopped_receipt_sha256
     }
+    if('postboot_carryover_receipt_sha256' -cin $Config.PSObject.Properties.Name){
+        if($null -eq $script:recoveryPostbootReceipt -or
+           $Config.postboot_carryover_receipt_sha256 -isnot [string] -or
+           $Config.postboot_carryover_receipt_sha256 -cnotmatch '\A[a-f0-9]{64}\z'){throw 'recovery_postboot_scope'}
+        $script:recoveryPostbootReceipt=$Config.postboot_carryover_receipt_sha256
+    }
 }
 
 function Get-HaRecoveryObservation([string]$Raw, [long]$Deadline) {

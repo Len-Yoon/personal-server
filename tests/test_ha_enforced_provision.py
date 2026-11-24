@@ -140,6 +140,14 @@ foreach($mode in @('authenticate','initialize','advance','stage-rejoin','observe
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }
 foreach($mode in @('serve','transition-serve','transition-rearm','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
+if(-not [EnforcedServiceV1.Settings]::WriterReleased('serve',$true,17)){throw 'cooperative_exit_unconfirmed'}
+if([EnforcedServiceV1.Settings]::WriterReleased('serve',$false,17) -or
+   [EnforcedServiceV1.Settings]::WriterReleased('serve',$true,0) -or
+   [EnforcedServiceV1.Settings]::WriterReleased('transition-serve',$true,17)){throw 'unexpected_writer_release_succeeded'}
+if($value.IsInitialWriter()){throw 'generic_serve_uses_writer_shutdown'}
+$initial=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('plan_path=C:\Private\plan.json',
+    ('plan_path=C:\ProgramData\N100HA-InitialCutover\'+('a'*40)+'\plan.json')))
+if(-not $initial.IsInitialWriter()){throw 'initial_writer_missing_shutdown'}
 $phases=[EnforcedServiceV1.StartupPhase]
 if([int]$phases::ArgsRead -ne 22 -or [int]$phases::Dispatch -ne 25 -or
    [int]$phases::PythonTree -ne 35 -or [int]$phases::PythonCreate -ne 39 -or

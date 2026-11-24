@@ -417,6 +417,8 @@ def start_initial_recovery(request, assert_windows_current):
         baseline = (hold["container_contracts"], args["protected_inventory_sha256"])
         if resume is not None:
             baseline = (resume[1]['container_contracts'], resume[1]['protected_inventory_sha256'])
+        if postboot and args['postboot'].get('carryover_receipt_sha256'):
+            _need(resume is not None, error)
         if postboot and resume is None:
             from .native_guest_postboot import observe
             from .initial_postboot import stopped_attempt, sameboot
@@ -427,7 +429,7 @@ def start_initial_recovery(request, assert_windows_current):
         def observe_inventory(stopped, deadline):
             # The live lease observer also reads Docker during a recovery.
             # Avoid concurrent CLI process churn while checking the same layout.
-            reader = (lambda: restore._observer_inventory(deadline)) if numbered_attempt else None
+            reader = (lambda: restore._observer_inventory(deadline)) if numbered_attempt or (postboot and args['postboot'].get('carryover_receipt_sha256')) else None
             return _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
                                                stopped, baseline, inventory=reader)
 
@@ -1430,10 +1432,13 @@ def handle(request, assert_windows_current=None, *, provider_inventory=None):
             from .native_guest_postboot import stop
             return stop(request,assert_windows_current)
         if request.verb == GUEST_OBSERVE_INITIAL_POSTBOOT:
-            from .native_guest_postboot import observe
+            from .native_guest_postboot import observe, observe_carryover
             with _guest_mutation_descriptor():
-                observe(request,request.args['postboot_attempt_id'],request.args['postboot_stopped_receipt_sha256'])
-                return Receipt('PASS',request.args['postboot_stopped_receipt_sha256'])
+                if 'postboot_carryover_receipt_sha256' in request.args:
+                    observe_carryover(request, request.args['postboot_attempt_id'], request.args['postboot_carryover_receipt_sha256'], inventory=provider_inventory)
+                else:
+                    observe(request,request.args['postboot_attempt_id'],request.args['postboot_stopped_receipt_sha256'])
+                return Receipt('PASS', request.args.get('postboot_carryover_receipt_sha256', request.args['postboot_stopped_receipt_sha256']))
         if request.verb == GUEST_OBSERVE_INITIAL_RECOVERY_HOLD:
             return observe_initial_recovery_hold(request)
         if request.verb == GUEST_OBSERVE_CAR_ISOLATION:

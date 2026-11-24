@@ -331,8 +331,12 @@ class PostbootStoppedInventoryTests(unittest.TestCase):
         hold.update(node='A',binding=binding.fields(),attempt_id='7'*64)
         frame={'version':1,'purpose':'held_admission','nonce':'8'*64,'hold_sha256':wire._digest(b'hold'),'guest_boot_sha256':binding.boot('A')}
         calls=[]
-        def handle(request):
+        def handle(request, **kwargs):
             calls.append(request)
+            if "postboot_carryover_receipt_sha256" in request.args:
+                self.assertIsNotNone(kwargs.get("provider_inventory"))
+                wire._args(request.verb, request.node, request.args)
+                return wire.Receipt("PASS", request.args["postboot_carryover_receipt_sha256"])
             return wire.Receipt('PASS','9'*64 if request.verb==wire.GUEST_OBSERVE_INITIAL_POSTBOOT else wire._digest(b'hold'))
         boot=SimpleNamespace(read_bytes=lambda:b'boot')
         with patch.object(listener.worker,'_read_json',return_value=(b'hold',hold)), \
@@ -347,6 +351,12 @@ class PostbootStoppedInventoryTests(unittest.TestCase):
             self.assertEqual(calls[-1].verb,wire.GUEST_OBSERVE_INITIAL_POSTBOOT)
             self.assertIn(wire.GUEST_OBSERVE_INITIAL_POSTBOOT,listener.worker.VERBS)
             with self.assertRaises(wire.BridgeRejected):postboot.observe(frame)
+            carried=listener.Observer(frame['hold_sha256'],binding.boot('A'),postboot_attempt_id='b'*64,
+                postboot_stopped_receipt_sha256='9'*64,postboot_carryover_receipt_sha256='c'*64)
+            self.assertEqual(carried.observe(frame)['observation_sha256'],'c'*64)
+            self.assertEqual(calls[-1].args['postboot_stopped_receipt_sha256'],'9'*64)
+            self.assertEqual(calls[-1].args['postboot_attempt_id'],'b'*64)
+
 
     def test_held_admission_requires_exact_postboot_receipt_not_original_hold(self):
         from types import SimpleNamespace
@@ -822,6 +832,32 @@ class SamebootPostbootSealTests(unittest.TestCase):
         acceptance.update(postboot=value,resume_evidence_sha256=digest(files[FILES[4]]))
         files[FILES[5]]=encode(acceptance)
         return plan,files
+
+    def test_carryover_seal_keeps_original_stop_and_binds_fresh_admission_digest(self):
+        plan,files=self.fixture()
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        digest=lambda raw:hashlib.sha256(raw).hexdigest()
+        value=plan['initial_recovery_postboot']
+        original_stop=files[FILES[6]]
+        value['carryover_receipt_sha256']='e'*64
+        pre=json.loads(files[FILES[3]])
+        pre['guests']['A']['container_inventory_sha256']='e'*64
+        files[FILES[3]]=encode(pre)
+        value['predecessor_seal_sha256']=digest(files[FILES[3]])
+        resumed=json.loads(files[FILES[4]])
+        resumed.update(guests=pre['guests'],predecessor_seal_sha256=value['predecessor_seal_sha256'])
+        resumed['guest_observation_sha256']['A']='e'*64
+        files[FILES[4]]=encode(resumed)
+        acceptance=json.loads(files[FILES[5]])
+        acceptance.update(postboot=value,resume_evidence_sha256=digest(files[FILES[4]]))
+        files[FILES[5]]=encode(acceptance)
+        self.assertEqual(validate_seal(plan,'a'*64,files),value)
+        self.assertEqual(files[FILES[6]],original_stop)
+        resumed['guest_observation_sha256']['A']=value['stopped_receipt_sha256']
+        files[FILES[4]]=encode(resumed)
+        acceptance['resume_evidence_sha256']=digest(files[FILES[4]])
+        files[FILES[5]]=encode(acceptance)
+        with self.assertRaises(TransitionBlocked):validate_seal(plan,'a'*64,files)
 
     def test_same_boot_closed_thirteen_and_original_closed_eleven_are_separate(self):
         from ha_control.initial_unpublished import derive_predecessor

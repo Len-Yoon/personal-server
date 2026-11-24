@@ -375,6 +375,8 @@ class WindowsActivationLease:
                 for field in ('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'):
                     name='Postboot'+''.join(part.title() for part in field.split('_'))
                     postboot_parameters[name]=checked_postboot[field]
+                if 'carryover_receipt_sha256' in checked_postboot:
+                    postboot_parameters['PostbootCarryoverReceiptSha256']=checked_postboot['carryover_receipt_sha256']
         rearm_parameters = {}
         if rearm is not None:
             from .initial_pg_lease import rearm_scope
@@ -472,6 +474,8 @@ class WindowsActivationLease:
                 for field in ('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'):
                     name='Postboot'+''.join(part.title() for part in field.split('_'))
                     postboot_parameters[name]=checked_postboot[field]
+                if 'carryover_receipt_sha256' in checked_postboot:
+                    postboot_parameters['PostbootCarryoverReceiptSha256']=checked_postboot['carryover_receipt_sha256']
         rearm_parameters = {}
         if rearm is not None:
             from .initial_pg_lease import rearm_scope
