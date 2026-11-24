@@ -37,11 +37,15 @@ Intel N100 한 대에서 Portal을 포함한 개인 서비스 7개를 운영합�
 
 아래는 기존 실제 서비스 캡처입니다. 기능을 보여주는 화면이며, 시각·수치·상태는 촬영 당시 기준입니다. [이미지 출처와 촬영 범위](docs/images/README.md)
 
-### Portal · 서비스 허브와 전체 검색
 
-서비스를 한곳에서 찾아 열 수 있고, 뉴스·책·영상의 검색 대상을 고를 수 있습니다.
+<details>
+<summary>Portal · 서비스 허브와 전체 검색</summary>
 
-![Portal 서비스 카드와 전체 검색 대상 선택](docs/images/portal-dashboard.png)
+  서비스를 한곳에서 찾아 열 수 있고, 뉴스·책·영상의 검색 대상을 고를 수 있습니다.
+
+![Portal 서비스 카드와 전체 검색 대상 선택](docs/images/portal-dashboard.png) 
+</details>
+
 
 <details>
 <summary>뉴스 허브 · 수집 상태와 주제별 기사</summary>
