@@ -243,7 +243,7 @@ function Test-RuntimeRearmMode([bool]$RecoveryMode,[string]$Attempt,[string]$Arg
 }
 function Read-RearmRuntimeService([string]$Root,$Spec){
     $service=@(Get-CimInstance Win32_Service -Filter ("Name='"+$Spec.ServiceName+"'") -OperationTimeoutSec 5 -ErrorAction Stop)
-    $pattern='\A"'+[regex]::Escape($Root)+'\\(?:host|rearm-[a-f0-9]{64}\\host)\\windows-service-host\.exe"\z'
+    $pattern='\A"'+[regex]::Escape($Root)+'\\(?:(?:rearm|postboot)-[a-f0-9]{64}\\)?host\\windows-service-host\.exe"\z'
     if($service.Count -ne 1 -or $service[0].Name -cne $Spec.ServiceName -or
        $service[0].State -cne 'Stopped' -or $service[0].StartMode -cnotin @('Manual','Disabled') -or
        $service[0].ProcessId -ne 0 -or $service[0].StartName -ine ('NT SERVICE\'+$Spec.ServiceName) -or

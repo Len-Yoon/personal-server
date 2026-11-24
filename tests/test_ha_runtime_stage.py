@@ -122,10 +122,17 @@ foreach($mode in @('Manual','Disabled')){
  $copy=$good.Clone();$copy.StartMode=$mode;$copy.PathName='"'+$root+'\rearm-'+('b'*64)+'\host\windows-service-host.exe"'
  $script:row=[pscustomobject]$copy;$null=Read-RearmRuntimeService $root $spec
 }
+$postboot='\postboot-'+('b'*64)+'\host\windows-service-host.exe'
+$copy=$good.Clone();$copy.PathName='"'+$root+$postboot+'"'
+$script:row=[pscustomobject]$copy;$null=Read-RearmRuntimeService $root $spec
 foreach($drift in @(@{State='Running'},@{ProcessId=4},@{StartMode='Auto'},@{ServiceType='Share Process'},
  @{DesktopInteract=$true},@{DesktopInteract=$null},@{StartName='LocalSystem'},@{Name='different'},
  @{PathName='"C:\elsewhere\windows-service-host.exe"'},@{PathName=('"'+$root+'\host\windows-service-host.exe" extra')},
- @{PathName=('"'+$root+'\rearm-invalid\host\windows-service-host.exe"')})){
+ @{PathName=('"'+$root+'\rearm-invalid\host\windows-service-host.exe"')},
+ @{PathName=('"'+$root+$postboot.Replace(('b'*64),('b'*63))+'"')},
+ @{PathName=('"'+$root+$postboot.Replace(('b'*64),('B'*64))+'"')},
+ @{PathName=('"'+$root+'\nested'+$postboot+'"')},@{PathName=('"'+$root+'-other'+$postboot+'"')},
+ @{PathName=('"'+$root+$postboot+'" extra')})){
  $copy=$good.Clone();foreach($key in $drift.Keys){$copy[$key]=$drift[$key]};$script:row=[pscustomobject]$copy
  try{Read-RearmRuntimeService $root $spec;throw 'fixture_accepted_service'}
  catch{if($_.Exception.Message -cne 'runtime_stage_rearm_service'){throw}}
