@@ -301,6 +301,78 @@ class InitialAppResumeTests(unittest.TestCase):
             w.start_initial_recovery(self.request,self.windows)
         self.assertEqual(self.commands,[])
 
+    def prepare_prestart_request(self):
+        self.prepare_partial_request()
+        partial=self.attest_partial()
+        self.failed_boundary='recovery_before:ha-broker'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(self.commands,[])
+        self.partial_stem=self.stem+'resume-partial-'
+        self.partial_intent=self.stage/(self.partial_stem+'intent.json')
+        self.partial_authorization=resume.path(self.request,partial=True)
+        self.prior_partial={'authorization_sha256':partial['authorization_sha256'],
+                            'intent_sha256':wire._digest(self.partial_intent.read_bytes())}
+        self.lineage_original.update({self.partial_intent:self.partial_intent.read_bytes(),
+                                      self.partial_authorization:self.partial_authorization.read_bytes()})
+        self.request=replace(self.request,nonce='0'*64,sequence=4)
+        self.failed_boundary=None
+        self.challenges.clear()
+
+    def attest_prestart(self, *, lineage=None):
+        return resume.attest(self.request,service_instance_sha256='e'*64,prior_intent_sha256=self.intent_pin,
+                             prior_progress_sha256={},prior_resume=self.lineage,
+                             prior_partial=self.prior_partial if lineage is None else lineage)
+
+    def test_sameboot_prestart_uses_unchanged_partial_baseline_and_preserves_all_evidence(self):
+        self.prepare_prestart_request()
+        result=self.attest_prestart()
+        body,value,stem=resume.load(self.request,b'hold',self.hold,self.prepared,self.active,
+                                    partial=True,prestart=True)
+        self.assertEqual(value['prior_partial'],self.prior_partial)
+        self.assertEqual(wire._digest(body),result['authorization_sha256'])
+        self.assertEqual(stem,self.partial_stem+'prestart-')
+        self.assertEqual(w.start_initial_recovery(self.request,self.windows).status,'PASS')
+        self.assertEqual(self.commands,[('start',v['container_id']) for v in self.containers.values()])
+        self.assertTrue(all(path.read_bytes()==original for path,original in self.lineage_original.items()))
+        self.assertTrue((self.stage/(stem+'done.json')).exists())
+        for action in (self.attest_prestart,lambda:w.start_initial_recovery(self.request,self.windows)):
+            with self.assertRaises(TransitionBlocked):
+                action()
+        self.assertEqual(len(self.commands),8)
+
+    def test_sameboot_prestart_rejects_partial_progress_or_completion(self):
+        self.prepare_prestart_request()
+        for suffix in ('progress-ha-broker.json','done.json','unknown.json'):
+            path=self.stage/(self.partial_stem+suffix)
+            path.write_bytes(b'{}')
+            with self.assertRaises(TransitionBlocked):
+                self.attest_prestart()
+            path.unlink()
+        self.assertFalse(resume.path(self.request,partial=True,prestart=True).exists())
+
+    def test_sameboot_prestart_rejects_started_at_drift_even_with_no_progress(self):
+        self.prepare_prestart_request()
+        self.contracts['ha-broker']['started_at']='after-partial-interruption'
+        with self.assertRaises(TransitionBlocked):
+            self.attest_prestart()
+        self.assertEqual(self.commands,[])
+
+    def test_sameboot_prestart_rejects_unbound_or_changed_predecessor_records(self):
+        self.prepare_prestart_request()
+        for key in ('authorization_sha256','intent_sha256'):
+            with self.assertRaises(TransitionBlocked):
+                self.attest_prestart(lineage=self.prior_partial|{key:'4'*64})
+        self.attest_prestart()
+        body,value,_=resume.load(self.request,b'hold',self.hold,self.prepared,self.active,
+                                 partial=True,prestart=True)
+        self.partial_intent.write_bytes(self.partial_intent.read_bytes()+b' ')
+        with self.assertRaises(TransitionBlocked):
+            resume.preserved(self.request,body,value,self.hold,self.active,b'hold')
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(self.commands,[])
+
     def test_partial_stop_snapshot_allows_changed_start_times_under_real_inventory_contract(self):
         from ha_control import native_guest_postboot as postboot
         self.prepare_sameboot_request()
