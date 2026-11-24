@@ -303,8 +303,8 @@ namespace N100InitialPredecessorJsonV1 {
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
         if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
         $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
-        if($same -and @($transitionKeys|Where-Object {$_ -cin $scope.PSObject.Properties.Name}).Count -gt 0){
-            if('carryover_receipt_sha256' -cnotin $scope.PSObject.Properties.Name -or
+        if(@($transitionKeys|Where-Object {$_ -cin $scope.PSObject.Properties.Name}).Count){
+            if(-not $same -or 'carryover_receipt_sha256' -cnotin $scope.PSObject.Properties.Name -or
                $scope.previous_service_image_sha256 -ceq $scope.successor_service_image_sha256){throw $bad}
             $scopeKeys+=$transitionKeys
         }
