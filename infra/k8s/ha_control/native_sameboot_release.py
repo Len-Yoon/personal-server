@@ -546,7 +546,8 @@ if($record.phase -cnotin @('lease_lost','local_revoke_observed')){throw 'release
 $keys=@('activation_intent_sha256','attempt_id','controller_plan_sha256','generation','kind','legacy_plan_sha256',
         'phase','postboot','recovery','restore_receipt_sha256','revision','schema_version','sequence')
 if('failure_code' -cin $record.PSObject.Properties.Name){
- if($record.phase -cne 'lease_lost' -or $record.failure_code -isnot [string] -or $record.failure_code -cnotmatch '^[a-z0-9_]{1,100}$'){throw 'release_terminal'}
+ # The journal retains the failure code when local revocation succeeds too.
+ if($record.failure_code -isnot [string] -or $record.failure_code -cnotmatch '\A[a-z][a-z0-9_]{0,95}\z'){throw 'release_terminal'}
  $keys+='failure_code'
 }
 if((@($record.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (@($keys|Sort-Object -CaseSensitive)-join ',')){throw 'release_terminal'}

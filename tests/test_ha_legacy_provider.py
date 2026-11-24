@@ -479,6 +479,38 @@ class SamebootReleaseTest(unittest.TestCase):
                 self.release.observe_guest_retired(provider, Mock(return_value="a" * 64))
             self.assertEqual(dispatch.call_count, 1)
 
+    def test_windows_stopped_journal_retains_failure_after_local_revocation(self):
+        source = self.release.WINDOWS_BODY
+        start = source.index("if($record.phase -cnotin")
+        end = source.index("if($cfg.mode -ceq 'snapshot')", start)
+        validator = source[start:end]
+        script = r'''
+$ErrorActionPreference='Stop'
+$record=[pscustomobject]@{activation_intent_sha256='a';attempt_id='b';controller_plan_sha256='c';
+    generation=1;kind='initial-wsl-cutover-postboot-resume';legacy_plan_sha256='d';
+    phase='local_revoke_observed';postboot=@{};recovery=@{};restore_receipt_sha256='e';
+    revision=16;schema_version=1;sequence=2;failure_code='legacy_pipe_response_timeout_postcommit'}
+function Test-Terminal { VALIDATOR }
+Test-Terminal
+$record.phase='lease_lost'
+Test-Terminal
+foreach($malformed in @('0invalid',"valid_code`n",'',12)){
+    $record.failure_code=$malformed
+    $accepted=$false
+    try {Test-Terminal;$accepted=$true} catch {if($_.Exception.Message -cne 'release_terminal'){throw}}
+    if($accepted){throw 'accepted_malformed_failure_code'}
+}
+$record.phase='serving'
+$record.failure_code='valid_code'
+$accepted=$false
+try {Test-Terminal;$accepted=$true} catch {if($_.Exception.Message -cne 'release_terminal'){throw}}
+if($accepted){throw 'accepted_serving'}
+exit 0
+'''.replace("VALIDATOR", validator)
+        result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_windows_script_never_stops_running_service_and_closes_exact_pair(self):
         pair = self.pair()
         source = self.release.WINDOWS_BODY
