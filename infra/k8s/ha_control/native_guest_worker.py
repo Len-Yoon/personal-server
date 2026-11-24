@@ -409,7 +409,10 @@ def start_initial_recovery(request, assert_windows_current):
             baseline = (resume[1]['container_contracts'], resume[1]['protected_inventory_sha256'])
         if postboot:
             from .native_guest_postboot import observe
-            stopped = observe(request,args['postboot']['attempt_id'],args['postboot_stopped_receipt_sha256'])
+            from .initial_postboot import stopped_attempt, sameboot
+            if sameboot(args['postboot']):
+                _need(args['postboot_stopped_receipt_sha256']==args['postboot']['stopped_receipt_sha256'],error)
+            stopped = observe(request,stopped_attempt(args['postboot']),args['postboot_stopped_receipt_sha256'])
             baseline = (stopped['container_contracts'],args['protected_inventory_sha256'])
         _initial_recovery_inventory(request.binding, containers, args["protected_inventory_sha256"],
                                     set(containers), baseline)
@@ -432,12 +435,10 @@ def start_initial_recovery(request, assert_windows_current):
                                                       None, baseline)
             _need(all(contract[role]["started_at"] != baseline[0][role]["started_at"]
                       for role in started), error)
-            if resume is not None:
+            if resume is not None or postboot:
                 _need(all(contract[role]["started_at"] == baseline[0][role]["started_at"]
                           for role in containers if role not in started), error)
-            current = runtime._inventory()
-            _need(all(current[value["container_id"]]["State"]["Running"] is (role in started)
-                      for role, value in containers.items()), error)
+            _need(all(contract[role]["running"] is (role in started) for role in containers), error)
 
         def check(boundary):
             deadline = time.monotonic() + ACTIVATION_GUEST_CHECK_SECONDS

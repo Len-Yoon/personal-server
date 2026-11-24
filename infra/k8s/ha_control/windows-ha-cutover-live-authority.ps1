@@ -25,6 +25,9 @@ param(
     [string]$UnpublishedPredecessorPlanSha256,
     [string]$UnpublishedPredecessorSealSha256,
     [string]$PostbootPredecessorKind,
+    [string]$PostbootPredecessorPlanSha256,
+    [string]$PostbootStoppedAttemptId,
+    [string]$PostbootStoppedReceiptSha256,
     [switch]$RecoveryContinuity,
     [switch]$Retire,
     [switch]$ObserveRetired,
@@ -101,8 +104,8 @@ namespace N100InitialPredecessorJsonV1 {
     $text=[Text.UTF8Encoding]::new($false,$true).GetString($Raw)
     $null=[N100InitialPredecessorJsonV1.Json]::Object($text,65536);$v=ConvertFrom-Json $text
     $names=@($v.PSObject.Properties.Name)
-    if($v.kind -isnot [string] -or $v.kind -cnotin @('initial-wsl-cutover-rearm','initial-wsl-cutover-unpublished')){throw $bad}
-    $field=if($v.kind -ceq 'initial-wsl-cutover-rearm'){'rearm'}else{'unpublished'}
+    if($v.kind -isnot [string] -or $v.kind -cnotin @('initial-wsl-cutover-rearm','initial-wsl-cutover-unpublished','initial-wsl-cutover-postboot','initial-wsl-cutover-postboot-unpublished','initial-wsl-cutover-postboot-resume')){throw $bad}
+    $field=if($v.kind -ceq 'initial-wsl-cutover-rearm'){'rearm'}elseif($v.kind -ceq 'initial-wsl-cutover-unpublished'){'unpublished'}else{'postboot'}
     $expected=@('schema_version','kind','generation','attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256','controller_plan_sha256','recovery','revision','phase','sequence',$field)
     $hasFailure='failure_code' -cin $names;if($hasFailure){$expected+=@('failure_code')}
     if((@($names|Sort-Object -CaseSensitive) -join ',') -cne (@($expected|Sort-Object -CaseSensitive) -join ',')){throw $bad}
@@ -113,11 +116,24 @@ namespace N100InitialPredecessorJsonV1 {
     foreach($key in @('attempt_id','predecessor_service_sha256','predecessor_terminal_sha256')){if($v.recovery.$key -isnot [string] -or $v.recovery.$key -cnotmatch '\A[a-f0-9]{64}\z'){throw $bad}}
     $scope=$v.$field
     $scopeKeys=@('schema_version','attempt_id','closure_mode','predecessor_args_sha256','predecessor_terminal_sha256')
-    if($field -ceq 'rearm'){$scopeKeys+=@('predecessor_binding_sha256')}else{$scopeKeys+=@('predecessor_plan_sha256','predecessor_seal_sha256')}
+    if($field -ceq 'rearm'){$scopeKeys+=@('predecessor_binding_sha256')}elseif($field -ceq 'unpublished'){$scopeKeys+=@('predecessor_plan_sha256','predecessor_seal_sha256')}else{
+        if(-not $Published){throw $bad}
+        $scopeKeys+=@('predecessor_binding_sha256','predecessor_seal_sha256','previous_windows_boot_sha256')
+        $tag='predecessor_kind' -cin $scope.PSObject.Properties.Name
+        $same=$tag -and $scope.predecessor_kind -ceq 'published-postboot-sameboot-v1'
+        if($tag){
+            if($scope.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1')){throw $bad}
+            $scopeKeys+=@('predecessor_kind')
+        }
+        if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
+        $expectedKind=if($same){'initial-wsl-cutover-postboot-resume'}elseif($tag){'initial-wsl-cutover-postboot-unpublished'}else{'initial-wsl-cutover-postboot'}
+        if($v.kind -cne $expectedKind){throw $bad}
+    }
     if((@($scope.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne (@($scopeKeys|Sort-Object -CaseSensitive) -join ',') -or ($scope.schema_version -isnot [int] -and $scope.schema_version -isnot [long]) -or $scope.schema_version -ne 1 -or $scope.closure_mode -isnot [string] -or $scope.closure_mode -cne 'windows-offline-v1'){throw $bad}
-    foreach($key in $scopeKeys){if($key -notin @('schema_version','closure_mode') -and ($scope.$key -isnot [string] -or $scope.$key -cnotmatch '\A[a-f0-9]{64}\z')){throw $bad}}
+    foreach($key in $scopeKeys){if($key -notin @('schema_version','closure_mode','predecessor_kind') -and ($scope.$key -isnot [string] -or $scope.$key -cnotmatch '\A[a-f0-9]{64}\z')){throw $bad}}
+    if($scope.attempt_id -cin @($v.attempt_id,$v.recovery.attempt_id) -or ($field -ceq 'postboot' -and $same -and $scope.attempt_id -ceq $scope.stopped_attempt_id)){throw $bad}
     $r=[long]$v.revision
-    if(($field -ceq 'rearm' -and $r -ne 6) -or ($field -ceq 'unpublished' -and ($r -lt 8 -or $r -gt 2147483644 -or ($r % 2) -ne 0))){throw $bad}
+    if(($field -ceq 'rearm' -and $r -ne 6) -or ($field -cne 'rearm' -and ($r -lt 8 -or $r -gt 2147483644 -or ($r % 2) -ne 0))){throw $bad}
     if($hasFailure -and ($v.failure_code -isnot [string] -or $v.failure_code -cnotmatch '\A[a-z][a-z0-9_]{0,95}\z')){throw $bad}
     if($Published){if($v.sequence -lt 1){throw $bad}}else{
         if(-not $hasFailure){throw $bad}
@@ -436,8 +452,13 @@ try {
        $RearmAttemptId -ceq $AttemptId)){throw 'live_authority_rearm_scope'}
     $postboot=$PSBoundParameters.ContainsKey('PostbootAttemptId') -or $PSBoundParameters.ContainsKey('PostbootPredecessorTerminalSha256') -or $PSBoundParameters.ContainsKey('PostbootPredecessorBindingSha256') -or $PSBoundParameters.ContainsKey('PostbootPredecessorArgsSha256') -or $PSBoundParameters.ContainsKey('PostbootPredecessorSealSha256') -or $PSBoundParameters.ContainsKey('PostbootPreviousWindowsBootSha256')
     if($postboot -and (-not $recovering -or $rearming -or $PostbootAttemptId -cnotmatch $pattern -or $PostbootPredecessorTerminalSha256 -cnotmatch $pattern -or $PostbootPredecessorBindingSha256 -cnotmatch $pattern -or $PostbootPredecessorArgsSha256 -cnotmatch $pattern -or $PostbootPredecessorSealSha256 -cnotmatch $pattern -or $PostbootPreviousWindowsBootSha256 -cnotmatch $pattern -or $PostbootAttemptId -ceq $RecoveryAttemptId -or $PostbootAttemptId -ceq $AttemptId)){throw 'live_authority_postboot_scope'}
-    $postbootUnpublished=$PSBoundParameters.ContainsKey('PostbootPredecessorKind')
-    if($postbootUnpublished -and (-not $postboot -or $PostbootPredecessorKind -cne 'published-unpublished-recovery-v1')){throw 'live_authority_postboot_scope'}
+    $postbootTagged=$PSBoundParameters.ContainsKey('PostbootPredecessorKind')
+    $postbootUnpublished=$postbootTagged -and $PostbootPredecessorKind -ceq 'published-unpublished-recovery-v1'
+    $postbootResume=$postbootTagged -and $PostbootPredecessorKind -ceq 'published-postboot-sameboot-v1'
+    if($postbootTagged -and (-not $postboot -or -not ($postbootUnpublished -or $postbootResume))){throw 'live_authority_postboot_scope'}
+    $resumePins=@($PostbootPredecessorPlanSha256,$PostbootStoppedAttemptId,$PostbootStoppedReceiptSha256)
+    if(($postbootResume -and @($resumePins|Where-Object {$_ -cnotmatch $pattern}).Count) -or
+       (-not $postbootResume -and @($resumePins|Where-Object {$_}).Count)){throw 'live_authority_postboot_scope'}
     $unpublished=$PSBoundParameters.ContainsKey('UnpublishedAttemptId') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorTerminalSha256') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorArgsSha256') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorPlanSha256') -or $PSBoundParameters.ContainsKey('UnpublishedPredecessorSealSha256')
     if($unpublished -and (-not $recovering -or $rearming -or $postboot -or $UnpublishedAttemptId -cnotmatch $pattern -or $UnpublishedPredecessorTerminalSha256 -cnotmatch $pattern -or $UnpublishedPredecessorArgsSha256 -cnotmatch $pattern -or $UnpublishedPredecessorPlanSha256 -cnotmatch $pattern -or $UnpublishedPredecessorSealSha256 -cnotmatch $pattern -or $UnpublishedAttemptId -ceq $RecoveryAttemptId -or $UnpublishedAttemptId -ceq $AttemptId)){throw 'live_authority_unpublished_scope'}
     if ($RecoveryContinuity -and -not $recovering) { throw 'live_authority_recovery_scope' }
@@ -502,7 +523,10 @@ try {
         $pin=if($unpublished){$UnpublishedPredecessorTerminalSha256}else{$PostbootPredecessorTerminalSha256}
         $prior=Read-Scope (Join-Path $root $leaf) $admins -Immutable
         $numbers=Get-InitialPredecessorNumbers ([Text.UTF8Encoding]::new($false,$true).GetBytes($prior.raw)) $pin $postboot
-        if($postboot -and (($postbootUnpublished -and $numbers.terminal.kind -cne 'initial-wsl-cutover-unpublished') -or (-not $postbootUnpublished -and $numbers.terminal.kind -cne 'initial-wsl-cutover-rearm'))){throw 'live_authority_postboot_scope'}
+        if($postboot){
+            $kindWrong=if($postbootResume){$numbers.terminal.kind -cnotin @('initial-wsl-cutover-postboot','initial-wsl-cutover-postboot-unpublished','initial-wsl-cutover-postboot-resume')}elseif($postbootUnpublished){$numbers.terminal.kind -cne 'initial-wsl-cutover-unpublished'}else{$numbers.terminal.kind -cne 'initial-wsl-cutover-rearm'}
+            if($kindWrong){throw 'live_authority_postboot_scope'}
+        }
         $expectedRevision=$numbers.opened
     }
 
@@ -584,7 +608,7 @@ try {
         $saved = Read-Scope $plan.state_path ($admins + $identity)
         $record = ConvertFrom-Json -InputObject $saved.raw
         $age = ([DateTime]::UtcNow - $saved.write_time).TotalMilliseconds
-        $kind = if ($unpublished) {'initial-wsl-cutover-unpublished'} elseif ($postbootUnpublished) {'initial-wsl-cutover-postboot-unpublished'} elseif ($postboot) {'initial-wsl-cutover-postboot'} elseif ($rearming) {'initial-wsl-cutover-rearm'} elseif ($recovering) { 'initial-wsl-cutover-recovery' } else { 'initial-wsl-cutover' }
+        $kind = if ($unpublished) {'initial-wsl-cutover-unpublished'} elseif ($postbootResume) {'initial-wsl-cutover-postboot-resume'} elseif ($postbootUnpublished) {'initial-wsl-cutover-postboot-unpublished'} elseif ($postboot) {'initial-wsl-cutover-postboot'} elseif ($rearming) {'initial-wsl-cutover-rearm'} elseif ($recovering) { 'initial-wsl-cutover-recovery' } else { 'initial-wsl-cutover' }
         if ($record.phase -cne 'serving' -or $record.kind -cne $kind -or $record.schema_version -ne 1 -or
             $record.generation -ne 1 -or $record.sequence -lt 1 -or $record.attempt_id -cne $AttemptId -or
             $record.legacy_plan_sha256 -cne $LegacyPlanSha256 -or $record.controller_plan_sha256 -cne $plan.controller_plan_sha256 -or
@@ -635,7 +659,8 @@ try {
             $expected=[ordered]@{schema_version=1;attempt_id=$PostbootAttemptId;predecessor_terminal_sha256=$PostbootPredecessorTerminalSha256;
                 predecessor_binding_sha256=$PostbootPredecessorBindingSha256;predecessor_args_sha256=$PostbootPredecessorArgsSha256;
                 predecessor_seal_sha256=$PostbootPredecessorSealSha256;previous_windows_boot_sha256=$PostbootPreviousWindowsBootSha256;closure_mode='windows-offline-v1'}
-            if($postbootUnpublished){$expected.predecessor_kind=$PostbootPredecessorKind}
+            if($postbootTagged){$expected.predecessor_kind=$PostbootPredecessorKind}
+            if($postbootResume){$expected.predecessor_plan_sha256=$PostbootPredecessorPlanSha256;$expected.stopped_attempt_id=$PostbootStoppedAttemptId;$expected.stopped_receipt_sha256=$PostbootStoppedReceiptSha256}
             $names=@($record.postboot.PSObject.Properties.Name|Sort-Object -CaseSensitive)
             if(($names -join ',') -cne (@($expected.Keys|Sort-Object -CaseSensitive) -join ',') -or
                ($record.postboot.schema_version -isnot [int] -and $record.postboot.schema_version -isnot [long]) -or $record.postboot.schema_version -ne 1){throw 'live_authority_postboot_scope'}

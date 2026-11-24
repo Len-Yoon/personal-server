@@ -73,20 +73,25 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False, unpublished=False, postboot_after_unpublished=False, predecessor_terminal=None, predecessor_sha256=None):
-    _need(sum(bool(v) for v in (rearmed,postboot,unpublished,postboot_after_unpublished))<=1
-          and (not (unpublished or postboot_after_unpublished) or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
+def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False, unpublished=False, postboot_after_unpublished=False, postboot_resume=False, predecessor_terminal=None, predecessor_sha256=None):
+    _need(sum(bool(v) for v in (rearmed,postboot,unpublished,postboot_after_unpublished,postboot_resume))<=1
+          and (not (unpublished or postboot_after_unpublished or postboot_resume) or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
     _need(not (rearmed and postboot) and (not postboot or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
     _need(not rearmed or (recovery_deadline is not None and generation is None), "guest_live_pg_binding_unconfirmed")
     _need(recovery_deadline is None or generation is None, "guest_live_pg_binding_unconfirmed")
     if generation is None:
         primary, partner, epoch, timeline = "A", "B", 1, 1
-        if postboot or unpublished or postboot_after_unpublished:
+        if postboot or unpublished or postboot_after_unpublished or postboot_resume:
             from .initial_unpublished import derive_predecessor
             revision=derive_predecessor(predecessor_terminal,predecessor_sha256,published=not unpublished)[1]
             if not unpublished:
-                _need((json.loads(predecessor_terminal)['kind']=='initial-wsl-cutover-unpublished')==postboot_after_unpublished,
-                    'guest_live_pg_binding_unconfirmed')
+                kind=json.loads(predecessor_terminal)['kind']
+                if postboot_resume:
+                    from .initial_postboot import RESUME_KIND
+                    _need(kind in {'initial-wsl-cutover-postboot','initial-wsl-cutover-postboot-unpublished',RESUME_KIND},'guest_live_pg_binding_unconfirmed')
+                else:
+                    _need(kind==('initial-wsl-cutover-unpublished' if postboot_after_unpublished else 'initial-wsl-cutover-rearm'),
+                        'guest_live_pg_binding_unconfirmed')
         else:
             _need(predecessor_terminal is None and predecessor_sha256 is None,"guest_live_pg_binding_unconfirmed")
             revision=6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2)
@@ -246,10 +251,11 @@ def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, p
           and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
           and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
-    from .initial_postboot import after_unpublished
+    from .initial_postboot import after_unpublished, sameboot
     retry_predecessor=after_unpublished(checked)
+    resuming=sameboot(checked)
     observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline,
-        postboot=not retry_predecessor,postboot_after_unpublished=retry_predecessor,
+        postboot=not (retry_predecessor or resuming),postboot_after_unpublished=retry_predecessor,postboot_resume=resuming,
         predecessor_terminal=_predecessor_terminal(checked,pins,recovery_attempt_id),predecessor_sha256=checked['predecessor_terminal_sha256'])
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
           and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds

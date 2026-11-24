@@ -770,4 +770,238 @@ class ContinuationDerivationTests(unittest.TestCase):
             with patch.object(guest.worker.runtime,'_read',return_value=raw),self.assertRaises(TransitionBlocked):guest.closed_revision(changed)
         with patch.object(guest.worker.runtime,'_read',side_effect=(raw,raw+b' ')),self.assertRaises(TransitionBlocked):guest.closed_revision(request)
 
+class SamebootPostbootSealTests(unittest.TestCase):
+    def fixture(self,chain=False):
+        from ha_control.initial_postboot import SAMEBOOT_KIND,RESUME_KIND
+        encode=lambda value:json.dumps(value,sort_keys=True).encode()
+        digest=lambda raw:hashlib.sha256(raw).hexdigest()
+        if chain:
+            oldplan,oldfiles=self.fixture()
+            oldrevision=14
+        else:
+            oldplan,oldfiles=PostbootAfterUnpublishedSealTests().fixture(10)
+            oldrevision=12
+        oldplan=deepcopy(oldplan);oldplan['source_commit']='c'*40
+        oldbinding=json.loads(oldfiles[FILES[1]])
+        settings=dict(line.split('=',1) for line in oldfiles[FILES[2]].decode().splitlines())
+        from pathlib import PureWindowsPath
+        oldplan['initial_service_start']={'service_image_path_sha256':oldbinding['service_image_path_sha256'],
+            'binding_path':str(PureWindowsPath(settings['plan_path']).parent/('initial-recovery-service-'+oldplan['initial_cutover_recovery']['attempt_id']+'.json'))}
+        oldvalue=oldplan['initial_recovery_postboot']
+        oldpin=digest(encode(oldplan))
+        prior=json.loads(oldfiles[FILES[0]])
+        prior.pop('unpublished',None)
+        prior.update(kind=RESUME_KIND if chain else 'initial-wsl-cutover-postboot-unpublished',
+            postboot=oldvalue,controller_plan_sha256=oldpin,revision=oldrevision,sequence=200,
+            phase='lease_lost',failure_code='initial_service_handoff_unverified')
+        binding=json.loads(oldfiles[FILES[1]]);binding['controller_plan_sha256']=oldpin
+        args=oldfiles[FILES[2]].decode().splitlines()
+        args=[('plan_sha256='+oldpin) if line.startswith('plan_sha256=') else line for line in args]
+        plan=deepcopy(oldplan)
+        value=envelope()|dict(attempt_id='1234'*16,predecessor_kind=SAMEBOOT_KIND,
+            predecessor_plan_sha256=oldpin,stopped_attempt_id=oldvalue.get('stopped_attempt_id',oldvalue['attempt_id']),
+            stopped_receipt_sha256=digest(oldfiles[FILES[6]]),previous_windows_boot_sha256='6'*64)
+        if chain:value['attempt_id']='4321'*16
+        plan['initial_recovery_postboot']=value
+        files={FILES[0]:encode(prior),FILES[1]:encode(binding),FILES[2]:('\n'.join(args)+'\n').encode(),
+               FILES[6]:oldfiles[FILES[6]],'postboot-predecessor-plan.json':encode(oldplan)}
+        for name,key in zip(FILES[:3],('predecessor_terminal_sha256','predecessor_binding_sha256','predecessor_args_sha256')):
+            value[key]=digest(files[name])
+        pre=json.loads(oldfiles[FILES[3]])
+        pre.update(windows_boot_sha256='6'*64,closed_revision=oldrevision+1,
+            predecessor_terminal_sha256=value['predecessor_terminal_sha256'],predecessor_binding_sha256=value['predecessor_binding_sha256'],
+            predecessor_args_sha256=value['predecessor_args_sha256'])
+        files[FILES[3]]=encode(pre);value['predecessor_seal_sha256']=digest(files[FILES[3]])
+        resumed=json.loads(oldfiles[FILES[4]])
+        resumed.pop('saved',None);resumed.pop('resumed',None)
+        resumed.update(previous_windows_boot_sha256='6'*64,closed_revision=oldrevision+1,
+            observed={'A':'Running','B':'Running'},closed_pair_sha256=pre['closed_pair_sha256'],
+            predecessor_seal_sha256=value['predecessor_seal_sha256'])
+        files[FILES[4]]=encode(resumed)
+        acceptance=json.loads(oldfiles[FILES[5]])
+        acceptance.update(postboot=value,resume_evidence_sha256=digest(files[FILES[4]]))
+        files[FILES[5]]=encode(acceptance)
+        return plan,files
+
+    def test_same_boot_closed_thirteen_and_original_closed_eleven_are_separate(self):
+        from ha_control.initial_unpublished import derive_predecessor
+        plan,files=self.fixture()
+        self.assertEqual(validate_seal(plan,'a'*64,files),plan['initial_recovery_postboot'])
+        self.assertEqual(json.loads(files[FILES[6]])['closed_revision'],11)
+        self.assertEqual(json.loads(files[FILES[3]])['closed_revision'],13)
+        self.assertEqual(derive_predecessor(files[FILES[0]],plan['initial_recovery_postboot']['predecessor_terminal_sha256'],published=True),(13,14,15))
+        with self.assertRaises(TransitionBlocked):
+            derive_predecessor(files[FILES[0]],plan['initial_recovery_postboot']['predecessor_terminal_sha256'],published=False)
+
+    def test_same_contract_can_continue_with_original_stop_tuple_preserved(self):
+        plan,files=self.fixture(chain=True)
+        self.assertEqual(validate_seal(plan,'a'*64,files),plan['initial_recovery_postboot'])
+        self.assertEqual(json.loads(files[FILES[6]])['closed_revision'],11)
+        self.assertEqual(json.loads(files[FILES[3]])['closed_revision'],15)
+        self.assertEqual(plan['initial_recovery_postboot']['stopped_attempt_id'],'0'*64)
+
+    def test_tag_and_all_pins_are_required_and_other_modes_stay_exclusive(self):
+        from ha_control.initial_postboot import SAMEBOOT_FIELDS
+        plan,files=self.fixture()
+        for key in SAMEBOOT_FIELDS|{'predecessor_kind'}:
+            changed=deepcopy(plan);changed['initial_recovery_postboot'].pop(key)
+            with self.subTest(key=key),self.assertRaises(TransitionBlocked):scope(changed)
+        for key in ('initial_unpublished_recovery','initial_recovery_rearm'):
+            changed=deepcopy(plan);changed[key]={}
+            with self.subTest(key=key),self.assertRaises(TransitionBlocked):scope(changed)
+        for key in ('stopped_attempt_id','stopped_receipt_sha256','predecessor_plan_sha256'):
+            changed=deepcopy(plan);changed['initial_recovery_postboot'][key]='f'*64
+            with self.subTest(key=key),self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
+
+    def test_boot_and_raw_identity_changes_refuse_before_authority(self):
+        plan,files=self.fixture()
+        for key in ('windows_boot_sha256',):
+            changed=deepcopy(plan);changed['windows_initial_observer'][key]='f'*64
+            with self.assertRaises(TransitionBlocked):validate_seal(changed,'a'*64,files)
+        for name in set(files)-{FILES[5]}:
+            with self.subTest(name=name),self.assertRaises(TransitionBlocked):
+                validate_seal(plan,'a'*64,files|{name:files[name]+b' '})
+        changed=deepcopy(plan);changed['initial_recovery_postboot']['predecessor_kind']='published-unpublished-recovery-v1'
+        with self.assertRaises(TransitionBlocked):scope(changed)
+
+    def test_repin_cannot_rewrite_original_stop_revision_or_current_pair(self):
+        plan,files=self.fixture()
+        # A changed receipt cannot be substituted even by updating just the
+        # successor scope: predecessor custody/seal/acceptance remain bound.
+        stopped=json.loads(files[FILES[6]]);stopped['closed_revision']=13
+        files[FILES[6]]=json.dumps(stopped).encode()
+        plan['initial_recovery_postboot']['stopped_receipt_sha256']=hashlib.sha256(files[FILES[6]]).hexdigest()
+        with self.assertRaises(TransitionBlocked):validate_seal(plan,'a'*64,files)
+
+
+    def test_native_sdk_passes_exact_tag_and_original_stop_pins(self):
+        from types import SimpleNamespace
+        from ha_control import native_windows_activation as native
+        plan,files=self.fixture();value=plan['initial_recovery_postboot'];prior=json.loads(files[FILES[0]])
+        custody=SimpleNamespace(binding=SimpleNamespace(plan_sha256=prior['legacy_plan_sha256'],attempt_id=prior['attempt_id']),live_sha256='3'*64)
+        lease=native.WindowsActivationLease(custody,r'C:\fixture\binding.json',
+            {'first_write_proof_sha256':'4'*64,'service_instance_sha256':'5'*64})
+        heartbeat={'windows_generation':1,'windows_generation_sha256':'a'*64,'live_lease_sha256':'b'*64}
+        with patch.object(native,'fixed_script',return_value='fixture') as script:
+            lease.verify_recovery_publication(lambda *args:heartbeat,prior['recovery'],native.time.monotonic()+2,
+                observe_pair=lambda **kwargs:'c'*64,assert_guard=lambda:None,postboot=value,predecessor_terminal=files[FILES[0]])
+            values=script.call_args.args[2]
+            self.assertEqual(values['PostbootPredecessorKind'],'published-postboot-sameboot-v1')
+            self.assertEqual(values['PostbootStoppedAttemptId'],value['stopped_attempt_id'])
+            self.assertEqual(values['PostbootStoppedReceiptSha256'],value['stopped_receipt_sha256'])
+            self.assertEqual(values['PostbootPredecessorPlanSha256'],value['predecessor_plan_sha256'])
+
+    def test_postboot_acceptance_holds_configured_stopped_receipt_on_executed_path(self):
+        from tempfile import TemporaryDirectory
+        runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)
+        plan,files=self.fixture();value=plan['initial_recovery_postboot']
+        old=json.loads(files['postboot-predecessor-plan.json']);binding=json.loads(files[FILES[1]])
+        source=ROOT/'infra/k8s/ha_control/windows-ha-start-initial-service.ps1'
+        with TemporaryDirectory() as folder:
+            base=Path(folder);host=base/'host';host.mkdir()
+            args=files[FILES[2]].decode().splitlines()
+            changes={'plan_path':str(base/'prior'/'plan.json'),'service_name':plan['windows_enforced']['service_name'],
+                     'service_sid':plan['windows_enforced']['service_sid'],'host_sha256':plan['windows_enforced']['service_image_sha256']}
+            args=[key+'='+changes.get(key,val) for key,val in (line.split('=',1) for line in args)]
+            raw=('\n'.join(args)+'\n').encode();(host/'service.args').write_bytes(raw)
+            (base/'postboot-predecessor-args.txt').write_bytes(raw)
+            value['predecessor_args_sha256']=hashlib.sha256(raw).hexdigest()
+            binding['state_path']=str(base/'prior'/'journal'/'controller-state.json')
+            fixture=base/'fixture.json'
+            fixture.write_text(json.dumps({'plan':plan,'binding':binding,'terminal':json.loads(files[FILES[0]])}))
+            script=base/'exercise.ps1'
+            script.write_text(r"""$ErrorActionPreference='Stop'
+$fixture=ConvertFrom-Json ([IO.File]::ReadAllText($args[0]))
+$root=[IO.Path]::GetDirectoryName($args[0]);$planPath=Join-Path $root 'plan.json'
+$fixtureService=[pscustomobject]@{Name=$fixture.plan.windows_enforced.service_name;State='Stopped';StartMode='Disabled';ProcessId=0;
+    StartName=('NT SERVICE\'+$fixture.plan.windows_enforced.service_name);ServiceType='Own Process';DesktopInteract=$false;
+    PathName=('"'+(Join-Path $root 'host/host.exe')+'"')}
+function FixtureDigest([string]$text){$h=[Security.Cryptography.SHA256]::Create();try{[BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+$fixture.binding.service_image_path_sha256=FixtureDigest $fixtureService.PathName
+$boot=[datetime]::Parse('2026-11-20T00:00:00Z').ToUniversalTime()
+$fixture.plan.windows_initial_observer.windows_boot_sha256=FixtureDigest ($boot.Ticks.ToString())
+$script:checked=[Collections.Generic.List[string]]::new()
+function Assert-UnpublishedTcbPath([string]$Path){$script:checked.Add($Path)}
+function Assert-Executable([string]$Path,[string]$Pin){}
+function Get-CimInstance([string]$ClassName,[string]$Filter,[int]$OperationTimeoutSec){if($ClassName -ceq 'Win32_OperatingSystem'){return [pscustomobject]@{LastBootUpTime=$boot}};return $fixtureService}
+function Read-PinnedJson([string]$Path,[string]$Pin){if($Path -ceq $planPath){return $fixture.plan};if($Path.EndsWith('postboot-predecessor-binding.json')){return $fixture.binding};if($Path.EndsWith('postboot-predecessor-state.json')){return $fixture.terminal};throw 'fixture_unexpected_read'}
+$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($args[1],[ref]$tokens,[ref]$errors)
+foreach($name in @('Assert-PostbootEnvelope','Seal-HaInitialPostbootAcceptance')){
+    $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+    $text=$node.Extent.Text
+    if($name -ceq 'Seal-HaInitialPostbootAcceptance'){
+        $text=$text.Replace('foreach($entry in $actual){',"[pscustomobject]@{actual=@(`$actual);checked=@(`$script:checked)}|ConvertTo-Json -Depth 8 -Compress;return;foreach(`$entry in `$actual){")
+    }
+    . ([scriptblock]::Create($text))
+}
+$hashPattern='\A[a-f0-9]{64}\z'
+Seal-HaInitialPostbootAcceptance $planPath ('a'*64)
+""")
+            result=subprocess.run([runtime,'-NoProfile','-File',str(script),str(fixture),str(source)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            observed=json.loads(result.stdout)
+            self.assertEqual(len(observed['actual']),5)
+            self.assertEqual(observed['actual'][-1],{'path':str(base/'prior'/'postboot-stopped-inventory.json'),'pin':value['stopped_receipt_sha256']})
+            self.assertEqual(set(observed['checked']),{row['path'] for row in observed['actual']})
+
+    def test_powershell_derivation_matches_python_and_rejects_malformed_terminal(self):
+        from tempfile import TemporaryDirectory
+        from ha_control.initial_unpublished import derive_predecessor
+        runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)
+        _,files=self.fixture();prior=json.loads(files[FILES[0]])
+        variants=[prior,prior|{'revision':True},prior|{'revision':13},prior|{'sequence':0},
+                  prior|{'kind':'initial-wsl-cutover-unpublished'},prior|{'extra':'1'*64}]
+        changed=deepcopy(prior);changed['postboot']['predecessor_kind']='published-postboot-sameboot-v1';variants.append(changed)
+        with TemporaryDirectory() as folder:
+            rawpath=Path(folder)/'terminal.json'
+            for filename in ('windows-ha-start-initial-service.ps1','windows-ha-cutover-live-authority.ps1'):
+                source=ROOT/'infra/k8s/ha_control'/filename
+                for index,value in enumerate(variants):
+                    raw=json.dumps(value).encode();pin=hashlib.sha256(raw).hexdigest();rawpath.write_bytes(raw)
+                    command=("$ErrorActionPreference='Stop';$tokens=$null;$errors=$null;"
+                        "$ast=[Management.Automation.Language.Parser]::ParseFile('"+str(source)+"',[ref]$tokens,[ref]$errors);"
+                        "$node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-InitialPredecessorNumbers'},$true);"
+                        "Invoke-Expression $node.Extent.Text;try{$r=Get-InitialPredecessorNumbers ([IO.File]::ReadAllBytes('"+str(rawpath)+"')) '"+pin+"' $true;"
+                        "$r|Select-Object closed,opened,revoked|ConvertTo-Json -Compress}catch{exit 3}")
+                    result=subprocess.run([runtime,'-NoProfile','-Command',command],capture_output=True,text=True)
+                    with self.subTest(source=filename,index=index):
+                        if index==0:
+                            self.assertEqual(result.returncode,0,result.stderr)
+                            self.assertEqual(json.loads(result.stdout),dict(zip(('closed','opened','revoked'),derive_predecessor(raw,pin,published=True))))
+                        else:self.assertEqual(result.returncode,3,result.stderr)
+
+
+class SamebootPostbootPgTests(PostbootPgTests):
+    def postboot_lease(self):
+        from ha_control.initial_pg_lease import InitialPgLeasePostbootResume
+        callback=self.recovery_lease().assert_legacy_closed
+        plan,files=SamebootPostbootSealTests().fixture()
+        self.revision=13
+        self.backend.fence_adapter._predecessor_terminal=files[FILES[0]]
+        self.backend.plan.update(_approval_action=ACTION,initial_recovery_postboot=plan['initial_recovery_postboot'])
+        return InitialPgLeasePostbootResume(self.backend,callback)
+
+    # Reuse fixtures, not inherited old-mode assertions with fixed 7/8 stamps.
+    def test_fixed_eight_renew_and_nine_revoke_preserve_prior_probes(self):
+        lease=self.postboot_lease();lease.open(self.state);self.assertEqual(self.revision,14)
+        self.now+=timedelta(seconds=1);lease.renew(self.state)
+        self.assertTrue(lease.revoke(self.state));self.assertEqual(self.revision,15)
+        self.assertFalse(self.opened)
+
+    def test_wrong_revision_and_foreign_expiry_cannot_be_adopted(self):
+        from ha_control.initial_pg_lease import InitialPgLeasePostbootResume
+        for wrong in (7,9,11,12,14,15):
+            self.setUp();lease=self.postboot_lease();self.revision=wrong
+            with self.subTest(wrong=wrong),self.assertRaises(TransitionBlocked):lease.open(self.state)
+        self.setUp();lease=self.postboot_lease();lease.open(self.state)
+        self.assertFalse(InitialPgLeasePostbootResume(self.backend,lease.assert_legacy_closed).revoke(self.state))
+
+    def test_changed_envelope_and_ambiguous_commit_fail_closed(self):
+        lease=self.postboot_lease();self.lost_commit=True
+        with self.assertRaisesRegex(TransitionBlocked,'fixture_commit_response_lost'):lease.open(self.state)
+        self.assertEqual(self.revision,15)
+        self.setUp();lease=self.postboot_lease();lease.open(self.state)
+        self.backend.plan['initial_recovery_postboot']['stopped_attempt_id']='f'*64
+        with self.assertRaises(TransitionBlocked):lease.renew(self.state)
+
 if __name__=='__main__':unittest.main()

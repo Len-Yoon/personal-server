@@ -706,20 +706,22 @@ class InitialPgLeasePostboot(InitialPgLeaseRecovery):
     _revoked_revision = 9
     _allow_postboot = True
     _unpublished_predecessor = False
+    _sameboot_predecessor = False
 
     def _bind(self, state):
         from .initial_postboot import scope
         previous = self.postboot
         super()._bind(state)
         selected = scope(self.backend.plan)
-        from .initial_postboot import after_unpublished
-        if after_unpublished(selected)!=self._unpublished_predecessor:
+        from .initial_postboot import after_unpublished, sameboot, predecessor_matches
+        if (sameboot(selected)!=self._sameboot_predecessor
+                or (not sameboot(selected) and after_unpublished(selected)!=self._unpublished_predecessor)):
             _deny('initial_postboot_scope_unverified')
         raw=getattr(self.backend.fence_adapter,'_predecessor_terminal',None)
         from .initial_unpublished import derive_predecessor
         revisions=derive_predecessor(raw,selected['predecessor_terminal_sha256'],published=True)
         import json
-        if after_unpublished(selected)!=(json.loads(raw)['kind']=='initial-wsl-cutover-unpublished'):
+        if not predecessor_matches(selected,json.loads(raw)['kind']):
             _deny('initial_postboot_scope_unverified')
         self._set_predecessor_revisions(raw,revisions)
         if previous is not None and previous != selected:
@@ -771,3 +773,8 @@ class InitialPgLeasePostbootAfterUnpublished(InitialPgLeasePostboot):
     _open_revision = 10
     _revoked_revision = 11
     _unpublished_predecessor = True
+
+
+class InitialPgLeasePostbootResume(InitialPgLeasePostboot):
+    """One explicit same-boot successor, retaining the original stopped tuple."""
+    _sameboot_predecessor = True

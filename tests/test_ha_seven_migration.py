@@ -37,7 +37,7 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 class InitialRecoveryRestartTests(unittest.TestCase):
     def exercise_restart(self, *, failed_boundary=None, uncertain_start=None, stale_hold=False, already_started=False,
-                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False, postboot=False, unpublished=False):
+                         delayed_inventory=False, delayed_local=False, cleanup_failure=False, rearming=False, postboot=False, unpublished=False, sameboot=False):
         from contextlib import ExitStack
         worker, wire = native_guest_worker, native_stdio_bridge
         binding = wire.Binding('1'*64, '2'*64, '3'*64, '4'*64, '5'*64)
@@ -50,9 +50,11 @@ class InitialRecoveryRestartTests(unittest.TestCase):
                              'closure_mode': 'windows-offline-v1'}
             args['rearm_plan_sha256'] = 'a'*64
             verb = wire.GUEST_START_INITIAL_REARM
-        if postboot:
-            from tests.test_ha_postboot import envelope
-            args.update(postboot=envelope(),postboot_plan_sha256='a'*64,postboot_stopped_receipt_sha256='b'*64)
+        if postboot or sameboot:
+            from tests.test_ha_postboot import envelope, SamebootPostbootSealTests
+            value=SamebootPostbootSealTests().fixture()[0]['initial_recovery_postboot'] if sameboot else envelope()
+            args.update(postboot=value,postboot_plan_sha256='a'*64,
+                postboot_stopped_receipt_sha256=value['stopped_receipt_sha256'] if sameboot else 'b'*64)
             verb=wire.GUEST_START_INITIAL_POSTBOOT
         if unpublished:
             from tests.test_ha_postboot import UnpublishedSealTests
@@ -67,14 +69,16 @@ class InitialRecoveryRestartTests(unittest.TestCase):
         active = {'authority_files': {str(authority_path): wire._digest(b'authority')}}
         pins = SimpleNamespace(installation_id=args['installation_id'], node='A', attempt_id=binding.attempt_id,
                                spec_sha256=wire._digest(b'{"guest_ip":"127.0.0.1","pg_a":"127.0.0.1","node":"A"}'))
-        runtime_state = {row['container_id']: {'State': {'Running': False}} for row in containers.values()}
+        runtime_state = {row['container_id']: {'State': {'Running': False,'StartedAt':'old'}} for row in containers.values()}
         commands, proofs, records = [], [], {}
 
         clock = [0.0]
         def inventory(*_args, **_options):
             if delayed_inventory and self.proofs:
                 clock[0] += 8
-            return ({role: {"started_at": "new"} for role in containers}, "pinned")
+            return ({role: {"started_at":runtime_state[row["container_id"]]["State"]["StartedAt"],
+                           "running":runtime_state[row["container_id"]]["State"]["Running"]}
+                     for role,row in containers.items()}, "pinned")
 
         def local_proof(*_args, **_options):
             if delayed_local:
@@ -84,7 +88,7 @@ class InitialRecoveryRestartTests(unittest.TestCase):
         def docker(*command, **options):
             commands.append(command)
             if command[0] == 'start':
-                runtime_state[command[1]]['State']['Running'] = True
+                runtime_state[command[1]]['State'].update(Running=True,StartedAt='new')
                 if command[1] == uncertain_start:
                     raise OSError('uncertain docker response')
             elif command[0] == 'stop':
@@ -123,8 +127,8 @@ class InitialRecoveryRestartTests(unittest.TestCase):
             postboot_proof = stack.enter_context(patch.object(worker.live, 'observe_postboot_a_lease', side_effect=local_proof))
             unpublished_proof=stack.enter_context(patch.object(worker.live,'observe_unpublished_a_lease',side_effect=local_proof))
             from ha_control import native_guest_postboot
-            stack.enter_context(patch.object(native_guest_postboot,'observe',return_value={'container_contracts':hold['container_contracts']}))
-            stack.enter_context(patch.object(worker.runtime, '_inventory', side_effect=lambda: copy.deepcopy(runtime_state)))
+            stopped_observer=stack.enter_context(patch.object(native_guest_postboot,'observe',return_value={'container_contracts':hold['container_contracts']}))
+            redundant_inventory=stack.enter_context(patch.object(worker.runtime, '_inventory', side_effect=lambda: copy.deepcopy(runtime_state)))
             stack.enter_context(patch.object(worker.runtime, '_read', side_effect=read))
             stack.enter_context(patch.object(worker.runtime, '_write', side_effect=write))
             stack.enter_context(patch.object(worker.runtime, '_docker', side_effect=docker))
@@ -135,6 +139,8 @@ class InitialRecoveryRestartTests(unittest.TestCase):
                 stage.mkdir()
                 (stage / ('recovery-'+args['recovery_attempt_id']+'-start-intent.json')).touch()
             result = worker.start_initial_recovery(request, windows)
+            self.stopped_observer=stopped_observer
+            redundant_inventory.assert_not_called()
             self.unpublished_proof_count=unpublished_proof.call_count
             self.postboot_proof_count = postboot_proof.call_count
             self.rearm_proof_count = rearm_proof.call_count
@@ -197,6 +203,15 @@ class InitialRecoveryRestartTests(unittest.TestCase):
         self.assertEqual(self.rearm_proof_count,0)
         self.assertEqual(self.postboot_proof_count,len(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
         self.assertTrue(all(path.name.startswith('postboot-'+'0'*64) for path in self.records))
+
+    def test_sameboot_resume_keeps_original_stop_attempt_and_uses_new_intent(self):
+        result=self.exercise_restart(sameboot=True)
+        self.assertEqual(result.status,'PASS')
+        self.assertEqual(self.commands,[('start',f'{index:064x}') for index in range(1,9)])
+        self.assertEqual(self.stopped_observer.call_args.args[1],'0'*64)
+        self.assertTrue(all(path.name.startswith('postboot-'+('1234'*16)) for path in self.records))
+        self.assertEqual(self.postboot_proof_count,len(native_stdio_bridge.RECOVERY_START_BOUNDARIES))
+        self.assertEqual((self.original_proof_count,self.rearm_proof_count,self.unpublished_proof_count),(0,0,0))
 
     def test_postboot_never_starts_after_delayed_sample_or_inventory(self):
         for option in ('delayed_inventory','delayed_local'):

@@ -487,9 +487,9 @@ class InitialWindowsGate:
                 self._postboot_stopped_sha256 = None
                 self._postboot_verified = None
                 if 'initial_recovery_postboot' in verified[0]:
-                    from .initial_postboot import FILES, validate_seal
+                    from .initial_postboot import FILES, files_for, validate_seal
                     snapshots = {name: stack.enter_context(native.protected_file(
-                        self.plan_path.with_name(name), 65536, private_reader=sid)) for name in FILES}
+                        self.plan_path.with_name(name), 65536, private_reader=sid)) for name in files_for(verified[0])}
                     self._postboot_verified = validate_seal(verified[0], verified[1], snapshots)
                     self._predecessor_terminal=snapshots[FILES[0]]
                     self._postboot_stopped_sha256 = _decode(snapshots['postboot-resume-evidence.json'])['postboot_stopped_receipt_sha256']

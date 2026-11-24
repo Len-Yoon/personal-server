@@ -370,6 +370,11 @@ class WindowsActivationLease:
                 'PostbootPreviousWindowsBootSha256': checked_postboot['previous_windows_boot_sha256']}
             if 'predecessor_kind' in checked_postboot:
                 postboot_parameters['PostbootPredecessorKind']=checked_postboot['predecessor_kind']
+            from .initial_postboot import sameboot
+            if sameboot(checked_postboot):
+                for field in ('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'):
+                    name='Postboot'+''.join(part.title() for part in field.split('_'))
+                    postboot_parameters[name]=checked_postboot[field]
         rearm_parameters = {}
         if rearm is not None:
             from .initial_pg_lease import rearm_scope
@@ -388,8 +393,8 @@ class WindowsActivationLease:
                 and prior['attempt_id']==self.custody.binding.attempt_id
                 and prior['legacy_plan_sha256']==self.custody.binding.plan_sha256,error)
             if postboot is not None:
-                from .initial_postboot import after_unpublished
-                bridge._need(after_unpublished(postboot)==(prior['kind']=='initial-wsl-cutover-unpublished'),error)
+                from .initial_postboot import predecessor_matches
+                bridge._need(predecessor_matches(postboot,prior['kind']),error)
         else:
             bridge._need(predecessor_terminal is None,error)
         binding = self.custody.binding
@@ -462,6 +467,11 @@ class WindowsActivationLease:
                 'PostbootPreviousWindowsBootSha256': checked_postboot['previous_windows_boot_sha256']}
             if 'predecessor_kind' in checked_postboot:
                 postboot_parameters['PostbootPredecessorKind']=checked_postboot['predecessor_kind']
+            from .initial_postboot import sameboot
+            if sameboot(checked_postboot):
+                for field in ('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'):
+                    name='Postboot'+''.join(part.title() for part in field.split('_'))
+                    postboot_parameters[name]=checked_postboot[field]
         rearm_parameters = {}
         if rearm is not None:
             from .initial_pg_lease import rearm_scope
@@ -480,8 +490,8 @@ class WindowsActivationLease:
                 and prior['attempt_id']==self.custody.binding.attempt_id
                 and prior['legacy_plan_sha256']==self.custody.binding.plan_sha256,error)
             if postboot is not None:
-                from .initial_postboot import after_unpublished
-                bridge._need(after_unpublished(postboot)==(prior['kind']=='initial-wsl-cutover-unpublished'),error)
+                from .initial_postboot import predecessor_matches
+                bridge._need(predecessor_matches(postboot,prior['kind']),error)
         else:
             bridge._need(predecessor_terminal is None,error)
         binding = self.custody.binding

@@ -43,7 +43,9 @@ def derive_predecessor(raw, expected_sha256, *, published):
         prior=json.loads(raw.decode('utf-8'),object_pairs_hook=pairs)
     except (ValueError,UnicodeError,RecursionError):
         need(False)
-    field={'initial-wsl-cutover-rearm':'rearm',KIND:'unpublished'}.get(prior.get('kind')) if type(prior) is dict else None
+    field={'initial-wsl-cutover-rearm':'rearm',KIND:'unpublished',
+        'initial-wsl-cutover-postboot':'postboot','initial-wsl-cutover-postboot-unpublished':'postboot',
+        'initial-wsl-cutover-postboot-resume':'postboot'}.get(prior.get('kind')) if type(prior) is dict else None
     common={'schema_version','kind','generation','attempt_id','legacy_plan_sha256','restore_receipt_sha256',
             'activation_intent_sha256','controller_plan_sha256','recovery','revision','phase','sequence'}
     need(field is not None and set(prior) in (common|{field},common|{field,'failure_code'})
@@ -64,9 +66,15 @@ def derive_predecessor(raw, expected_sha256, *, published):
         from .initial_pg_lease import rearm_scope
         rearm_scope(context|{'initial_recovery_rearm':prior[field]})
         need(prior['revision']==6)
-    else:
+    elif field=='unpublished':
         scope(context|{'initial_unpublished_recovery':prior[field]})
         need(prior['revision']>=8)
+    else:
+        from .initial_postboot import scope as postboot_scope, sameboot, after_unpublished, RESUME_KIND
+        previous=postboot_scope(context|{'initial_recovery_postboot':prior[field]})
+        need(published and prior['revision']>=8
+             and (sameboot(previous)==(prior['kind']==RESUME_KIND))
+             and (sameboot(previous) or after_unpublished(previous)==(prior['kind']=='initial-wsl-cutover-postboot-unpublished')))
     if published:
         need(prior['sequence']>0)
     elif field=='rearm':
