@@ -23,11 +23,24 @@ from .initial_postboot import scope, sameboot, TRANSITION_FIELDS
 from .initial_unpublished import derive_predecessor
 
 ERROR = 'successor_app_start_unverified'
+# The measured paired read needs about 2.5s; reserve the existing live-read
+# margin for one fresh observation, without extending its caller's deadline.
+_READ_RETRY_RESERVE_SECONDS = 2.65
 
 
 def need(condition):
     if not condition:
         raise TransitionBlocked(ERROR)
+
+
+def _snapshot_prior_resume(value):
+    if value is None:
+        return None
+    need(type(value) is dict and set(value) == {'authorization_sha256', 'intent_sha256', 'progress_sha256'}
+         and wire._hash(value['authorization_sha256']) and wire._hash(value['intent_sha256'])
+         and type(value['progress_sha256']) is dict
+         and all(type(key) is str and wire._hash(pin) for key, pin in value['progress_sha256'].items()))
+    return json.loads(wire._bytes(value))
 
 
 def sample_pair(plan, plan_pin, terminal_raw, challenge, incarnation, *, connect=None):
@@ -192,6 +205,7 @@ class PairedAuthorityBoundary:
         inputs.validate()
         need(callable(powershell) and type(deadline) in (int, float) and math.isfinite(deadline))
         self.call, self.inputs, self.deadline, self.phase = powershell, inputs, deadline, 0
+        self.renewal_race = False
 
     def powershell(self, source, deadline):
         need(time.monotonic() < deadline <= self.deadline)
@@ -239,11 +253,11 @@ $python='{python_path}'
 $file=Get-Item -LiteralPath $python -Force -ErrorAction Stop
 if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
  (Get-FileHash -LiteralPath $python -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{cfg.python_sha256}'){{throw 'successor_python_pin'}}
+$body=[Text.UTF8Encoding]::new($false,$true).GetString([Convert]::FromBase64String('{encoded}'))
 $first=@(& $authority)
 if($first.Count -ne 1){{throw 'successor_before_shape'}}
 $before=ConvertFrom-Json $first[0]
 $offset=$clock.Elapsed.TotalSeconds
-$body=[Text.UTF8Encoding]::new($false,$true).GetString([Convert]::FromBase64String('{encoded}'))
 $rows=@($body|& $python -I -B - $before.service_incarnation_sha256)
 if($LASTEXITCODE -ne 0 -or $rows.Count -ne 1){{throw 'successor_pair_unverified'}}
 $last=@(& $authority)
@@ -264,6 +278,9 @@ if($last.Count -ne 1){{throw 'successor_after_shape'}}
         need(self.phase == 1 and time.monotonic() < deadline <= self.deadline and challenge == self.challenge)
         before, after, pair = (self.result[key] for key in ('before', 'after', 'pair'))
         need(type(before) is dict and type(after) is dict
+             and all(set(value) == {'windows_generation', 'service_incarnation_sha256', 'heartbeat_sequence', 'live_lease_sha256'}
+                     and type(value['windows_generation']) is int and value['windows_generation'] == 1
+                     and wire._hash(value['live_lease_sha256']) for value in (before, after))
              and before['service_incarnation_sha256'] == after['service_incarnation_sha256'] == service_incarnation_sha256
              and type(before['heartbeat_sequence']) is int and type(after['heartbeat_sequence']) is int
              and 0 < before['heartbeat_sequence'] <= after['heartbeat_sequence']
@@ -271,7 +288,6 @@ if($last.Count -ne 1){{throw 'successor_after_shape'}}
                   or before['live_lease_sha256'] == after['live_lease_sha256']))
         need(type(pair) is dict and set(pair) == {'proof_sha256', 'lease_sha256', 'observations', 'child_elapsed_seconds'}
              and wire._hash(pair['proof_sha256']) and wire._hash(pair['lease_sha256'])
-             and pair['lease_sha256'] in (before['live_lease_sha256'], after['live_lease_sha256'])
              and type(pair['observations']) is dict and set(pair['observations']) == {'A', 'B'})
         elapsed = pair['child_elapsed_seconds']
         need(type(elapsed) in (int, float) and math.isfinite(elapsed)
@@ -285,13 +301,16 @@ if($last.Count -ne 1){{throw 'successor_after_shape'}}
             expiries.append(self.started + max(0, self.result['offset'] + at - .05) + remaining)
         valid_until = min(expiries)
         need(valid_until - time.monotonic() > 1)
+        if pair['lease_sha256'] not in (before['live_lease_sha256'], after['live_lease_sha256']):
+            self.renewal_race = after['heartbeat_sequence'] - before['heartbeat_sequence'] <= 1
+            need(False)
         self.phase = 2
         return {'proof_sha256': pair['proof_sha256'], 'lease_sha256': pair['lease_sha256'],
                 'valid_until_monotonic': valid_until}
 
 
 def guest_attest(dispatcher, request, launcher, manifest_sha256, service_instance_sha256,
-                 prior_intent_sha256, prior_progress_sha256, deadline, *, assert_guard):
+                 prior_intent_sha256, prior_progress_sha256, deadline, *, assert_guard, prior_resume=None):
     """Run native root-only carryover attestation over pinned SSH, once."""
     need(type(dispatcher) is ssh.GuestSshDispatcher and dispatcher.binding == request.binding
          and type(launcher) is bytes and wire._digest(launcher) == dispatcher.launcher_sha256
@@ -299,17 +318,19 @@ def guest_attest(dispatcher, request, launcher, manifest_sha256, service_instanc
          and wire._hash(prior_intent_sha256) and type(prior_progress_sha256) is dict
          and all(type(key) is str and wire._hash(pin) for key, pin in prior_progress_sha256.items())
          and callable(assert_guard))
+    prior_resume = _snapshot_prior_resume(prior_resume)
     marker = b'from ha_control.native_guest_worker import main\nraise SystemExit(main())'
     need(launcher.count(marker) == 1 and manifest_sha256.encode() in launcher)
     # Native attest authenticates the carryover receipt and preserves attempt 8.
     data = {'binding': request.binding.fields(), 'node': request.node, 'verb': request.verb,
             'sequence': request.sequence, 'nonce': request.nonce, 'args': request.args,
-            'instance': service_instance_sha256, 'intent': prior_intent_sha256, 'progress': prior_progress_sha256}
+            'instance': service_instance_sha256, 'intent': prior_intent_sha256, 'progress': prior_progress_sha256,
+            'prior_resume': prior_resume}
     code = 'import json\nCFG=' + repr(data) + '\n' + launcher.split(marker)[0].decode() + """
 from ha_control import native_stdio_bridge as wire
 from ha_control.initial_app_resume import attest
 request=wire.Request(wire.Binding(**CFG['binding']),CFG['node'],CFG['verb'],CFG['sequence'],CFG['nonce'],CFG['args'])
-result=attest(request,service_instance_sha256=CFG['instance'],prior_intent_sha256=CFG['intent'],prior_progress_sha256=CFG['progress'])
+result=attest(request,service_instance_sha256=CFG['instance'],prior_intent_sha256=CFG['intent'],prior_progress_sha256=CFG['progress'],**({} if CFG['prior_resume'] is None else {'prior_resume':CFG['prior_resume']}))
 print(json.dumps(result,sort_keys=True,separators=(',',':')))
 """
     compile(code, '<successor-app-attestation>', 'exec')
@@ -378,11 +399,22 @@ class SuccessorAppStage:
         self.consumed = False
 
     def _proof(self, deadline, guard):
-        boundary = PairedAuthorityBoundary(self.powershell, self.proof_inputs, deadline)
-        return self.lease.verify_recovery_continuity(
-            boundary.powershell, self.plan['initial_cutover_recovery'], deadline,
-            observe_pair=boundary.observe_pair, assert_guard=guard, postboot=self.postboot,
-            predecessor_terminal=self.terminal)
+        remaining = deadline - time.monotonic()
+        first_deadline = deadline - _READ_RETRY_RESERVE_SECONDS if remaining > 2 * _READ_RETRY_RESERVE_SECONDS else deadline
+        for attempt in range(2):
+            limit = first_deadline if attempt == 0 else deadline
+            boundary = PairedAuthorityBoundary(self.powershell, self.proof_inputs, limit)
+            try:
+                return self.lease.verify_recovery_continuity(
+                    boundary.powershell, self.plan['initial_cutover_recovery'], limit,
+                    observe_pair=boundary.observe_pair, assert_guard=guard, postboot=self.postboot,
+                    predecessor_terminal=self.terminal)
+            except (TransitionBlocked, wire.BridgeRejected) as error:
+                timeout = type(error) is wire.BridgeRejected and str(error) in {
+                    'guest_ssh_deadline_exceeded', 'bridge_deadline_exceeded'}
+                if attempt or not (boundary.renewal_race or timeout) or deadline - time.monotonic() < _READ_RETRY_RESERVE_SECONDS:
+                    raise
+                guard()
 
     def preflight(self, deadline, *, assert_guard):
         """Read-only proof; no authorization is published and no app is started."""
@@ -478,7 +510,7 @@ if((Digest ([IO.File]::ReadAllText($cfg.binding_path,$utf))) -cne $cfg.instance)
                 'writers': ['A'], 'standby_node': 'B', 'synchronous': True,
                 'instance_sha256': self.lease.service_instance_sha256, 'predecessor_instance_stopped': True}
 
-    def start(self, request, deadline, *, assert_guard, issued, record):
+    def start(self, request, deadline, *, assert_guard, issued, record, prior_resume=None):
         """Journal before attestation/dispatch; never automatically repeat a start."""
         need(not self.consumed and type(request) is wire.Request and request.binding == self.dispatcher.binding
              and request.node == 'A' and request.verb == wire.GUEST_START_INITIAL_POSTBOOT
@@ -491,13 +523,15 @@ if((Digest ([IO.File]::ReadAllText($cfg.binding_path,$utf))) -cne $cfg.instance)
              and request.args['hold_sha256'] == self.plan['windows_recovery_observers']['hold_sha256'])
         request = wire.Request(request.binding, request.node, request.verb, request.sequence, request.nonce,
                                json.loads(wire._bytes(request.args)))
+        prior_resume = _snapshot_prior_resume(prior_resume)
         assert_guard()
         self.preflight(deadline, assert_guard=assert_guard)
         self.consumed = True
         issued(request)
         authorization = guest_attest(self.dispatcher, request, self.launcher, self.manifest,
                                      self.lease.service_instance_sha256, self.prior_intent, self.prior_progress,
-                                     deadline, assert_guard=assert_guard)
+                                     deadline, assert_guard=assert_guard,
+                                     **({} if prior_resume is None else {'prior_resume': prior_resume}))
         record('authorization', authorization)
         request_scope = {'version': wire.VERSION, 'binding': request.binding.fields(), 'node': request.node,
                          'boot_sha256': request.binding.boot(request.node), 'verb': request.verb,

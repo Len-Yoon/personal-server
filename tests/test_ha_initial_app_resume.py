@@ -610,10 +610,90 @@ class InitialAppResumeTests(unittest.TestCase):
             'postboot': successor | {'carryover_receipt_sha256': self.carryover.receipt_sha256}})
         return postboot
 
-    def attest_successor(self):
-        return resume.attest(self.request, service_instance_sha256='1'*64,
+    def attest_successor(self, *, prior_resume=None, service_instance='1'*64):
+        return resume.attest(self.request, service_instance_sha256=service_instance,
             prior_intent_sha256=self.successor_history['intent_sha256'],
-            prior_progress_sha256=self.successor_history['progress_sha256'])
+            prior_progress_sha256=self.successor_history['progress_sha256'], prior_resume=prior_resume)
+
+    def prepare_interrupted_successor(self):
+        self.prepare_successor_carryover()
+        authorization = self.attest_successor()
+        self.failed_boundary = 'recovery_after:crawler-worker'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request, self.windows)
+        self.failed_boundary = None
+        stem = resume.prefix(self.request) + 'resume-'
+        journal = {p.name.removeprefix(stem): wire._digest(p.read_bytes())
+                   for p in self.stage.iterdir() if p.name.startswith(stem)}
+        link = {'authorization_sha256': authorization['authorization_sha256'],
+                'intent_sha256': journal.pop('intent.json'), 'progress_sha256': journal}
+        self.assertEqual(len(journal), 3)
+        self.assertFalse(any(row['running'] for row in self.contracts.values()))
+        self.request = replace(self.request, nonce='0'*64, sequence=self.request.sequence+1)
+        self.commands.clear()
+        return link
+
+    def test_interrupted_carryover_resumes_with_exact_lineage(self):
+        link = self.prepare_interrupted_successor()
+        before = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        result = self.attest_successor(prior_resume=link)
+        self.assertEqual(w.start_initial_recovery(self.request,self.windows).status, 'PASS')
+        self.assertEqual(self.commands,[('start',v['container_id']) for v in self.containers.values()])
+        self.assertTrue(all(path.read_bytes()==raw for path,raw in before.items()))
+        stem = resume.prefix(self.request)+'resume-partial-'
+        new = resume.decode((self.stage/(stem+'intent.json')).read_bytes())
+        self.assertEqual(new['resume_authorization_sha256'],result['authorization_sha256'])
+        with self.assertRaises(TransitionBlocked):
+            self.attest_successor(prior_resume=link)
+
+    def test_interrupted_carryover_rejects_wrong_instance_tampering_and_drift(self):
+        link = self.prepare_interrupted_successor()
+        with self.assertRaises(TransitionBlocked):
+            self.attest_successor(prior_resume=link,service_instance='2'*64)
+        with self.assertRaises(TransitionBlocked):
+            self.attest_successor(prior_resume=link|{'intent_sha256':'9'*64})
+        unexpected = self.stage/(resume.prefix(self.request)+'intent.json')
+        unexpected.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):
+            self.attest_successor(prior_resume=link)
+        unexpected.unlink()
+        role = self.contracts['youtube-memo']
+        started = role['started_at']
+        role['started_at'] = 'unexpected'
+        with self.assertRaises(TransitionBlocked):
+            self.attest_successor(prior_resume=link)
+        role['started_at'] = started
+        self.attest_successor(prior_resume=link)
+        role['started_at'] = 'after-attest'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(self.commands,[])
+
+    def test_carryover_partial_baseline_reads_real_stopped_inventory_with_drift(self):
+        self.prepare_successor_carryover()
+        objects = {pin['container_id']:{
+            'Name':role,'Image':pin['image_id'],'Config':{'Labels':{
+                'com.docker.compose.service':role,w.runtime.ATTEMPT_LABEL:self.request.binding.attempt_id}},
+            'HostConfig':{'RestartPolicy':{'Name':'no'},'AutoRemove':False},'RestartCount':0,
+            'Mounts':[],'State':{'Running':False,'Paused':False,'Restarting':False,'OOMKilled':False,
+                'Dead':False,'Status':'exited','Pid':0,'ExitCode':143,'StartedAt':'1','FinishedAt':'3'},
+        } for role,pin in self.containers.items()}
+        protected = w.runtime.inventory_sha256({})
+        with patch.object(w,'_initial_recovery_inventory',REAL_INVENTORY), \
+             patch.object(w.restore,'_observer_inventory',return_value=objects):
+            baseline,_ = REAL_INVENTORY(self.request.binding,self.containers,protected,None,inventory=lambda:objects)
+            for role in w.RECOVERY_START_ORDER[:4]:
+                objects[self.containers[role]['container_id']]['State']['StartedAt'] = '2'
+            stem = resume.prefix(self.request)
+            lineage = {'progress_sha256': {role:'a'*64 for role in w.RECOVERY_START_ORDER[:3]}}
+            carry = {'container_contracts':baseline,'protected_inventory_sha256':protected}
+            with patch.object(resume,'_carryover_lineage',return_value=carry):
+                current,actual,next_stem = resume._authorization_baseline(self.request,b'hold',self.hold,
+                    self.prepared,self.active,{'carryover_receipt_sha256':'a'*64,'prior_resume':lineage},self.stage,stem)
+            self.assertEqual(actual,protected)
+            self.assertEqual(next_stem,stem+'resume-partial-')
+            self.assertEqual({role for role,row in current.items() if row['started_at'] != baseline[role]['started_at']},
+                             set(w.RECOVERY_START_ORDER[:4]))
 
     def test_successor_carryover_checks_exact_history_and_new_writer_authorization(self):
         postboot = self.prepare_successor_carryover()
@@ -984,5 +1064,113 @@ class SuccessorAppWiringTests(unittest.TestCase):
         boundary.powershell(source,time.monotonic()+5.9)
         with self.assertRaises(TransitionBlocked):
             boundary.observe_pair(challenge='4'*64,service_incarnation_sha256='1'*64,deadline=time.monotonic()+5.9)
+
+class SuccessorAuthorityTimingTests(unittest.TestCase):
+    def fixture(self):
+        return SuccessorAppWiringTests().fixture()
+
+    def test_retry_reserves_same_absolute_deadline_and_uses_fresh_boundary(self):
+        app, stage, _ = self.fixture()
+        seen = []
+        def verify(read, recovery, deadline, **kwargs):
+            seen.append((read.__self__, deadline))
+            if len(seen) == 1:
+                raise wire.BridgeRejected('guest_ssh_deadline_exceeded')
+            return 'a' * 64
+        stage.lease.verify_recovery_continuity = verify
+        with patch.object(app.time, 'monotonic', return_value=100):
+            self.assertEqual(stage._proof(106, lambda: None), 'a' * 64)
+        self.assertEqual([deadline for _, deadline in seen], [103.35, 106])
+        self.assertIsNot(seen[0][0], seen[1][0])
+
+    def test_short_budget_and_exhausted_reserve_never_retry(self):
+        app, stage, _ = self.fixture()
+        for deadline, after in ((105.28, 103), (106, 103.4)):
+            with self.subTest(deadline=deadline), patch.object(app.time, 'monotonic') as clock:
+                clock.return_value = 100
+                calls = []
+                def verify(read, recovery, limit, **kwargs):
+                    calls.append(limit)
+                    clock.return_value = after
+                    raise wire.BridgeRejected('guest_ssh_deadline_exceeded')
+                stage.lease.verify_recovery_continuity = verify
+                with self.assertRaises(wire.BridgeRejected):
+                    stage._proof(deadline, lambda: None)
+                self.assertEqual(len(calls), 1)
+                if deadline == 105.28:
+                    self.assertEqual(calls, [deadline])
+
+    def test_only_read_timeouts_retry_once_and_guard_can_stop_retry(self):
+        app, stage, _ = self.fixture()
+        from unittest.mock import Mock
+        for error in (TransitionBlocked('bad_native_scope'), wire.BridgeRejected('guest_ssh_exit_unconfirmed')):
+            verify = Mock(side_effect=error)
+            stage.lease.verify_recovery_continuity = verify
+            with patch.object(app.time, 'monotonic', return_value=100), self.assertRaises(type(error)):
+                stage._proof(106, lambda: None)
+            self.assertEqual(verify.call_count, 1)
+        verify = Mock(side_effect=wire.BridgeRejected('guest_ssh_deadline_exceeded'))
+        stage.lease.verify_recovery_continuity = verify
+        with patch.object(app.time, 'monotonic', return_value=100), self.assertRaises(wire.BridgeRejected):
+            stage._proof(106, lambda: None)
+        self.assertEqual(verify.call_count, 2)
+        verify.reset_mock()
+        guard = Mock(side_effect=TransitionBlocked('guard_lost'))
+        with patch.object(app.time, 'monotonic', return_value=100), self.assertRaisesRegex(TransitionBlocked, 'guard_lost'):
+            stage._proof(106, guard)
+        self.assertEqual(verify.call_count, 1)
+
+    def test_renewal_race_reobserves_all_facts_with_new_challenge(self):
+        app, stage, _ = self.fixture()
+        native = {'windows_generation': 1, 'service_incarnation_sha256': '1'*64,
+                  'heartbeat_sequence': 2, 'live_lease_sha256': '2'*64}
+        output = {'before': native, 'after': native | {'heartbeat_sequence': 3},
+                  'pair': {'proof_sha256': '3'*64, 'lease_sha256': 'f'*64,
+                           'observations': {'A': [.1, 4.0], 'B': [.2, 3.5]}, 'child_elapsed_seconds': .3},
+                  'offset': .2, 'elapsed': .6}
+        commands, challenges = [], []
+        def powershell(command, deadline):
+            commands.append(command)
+            value = copy.deepcopy(output)
+            if len(commands) == 2:
+                value['pair']['lease_sha256'] = '2'*64
+            return value
+        def verify(read, recovery, deadline, *, observe_pair, **kwargs):
+            challenge = str(len(challenges)+4)*64
+            challenges.append(challenge)
+            source = "native -RecoveryContinuity -PriorSha256 '" + challenge + "'"
+            before = read(source, deadline)
+            paired = observe_pair(challenge=challenge, service_incarnation_sha256=before['service_incarnation_sha256'], deadline=deadline)
+            self.assertEqual(read(source, deadline)['heartbeat_sequence'], 3)
+            return paired
+        stage.powershell = powershell
+        stage.lease.verify_recovery_continuity = verify
+        with patch.object(app.time, 'monotonic', return_value=100):
+            proof = stage._proof(106, lambda: None)
+        self.assertEqual(challenges, ['4'*64, '5'*64])
+        self.assertEqual(len(commands), 2)
+        self.assertLess(commands[0].index('$body='), commands[0].index('$first='))
+        self.assertAlmostEqual(proof['valid_until_monotonic'], 103.85)
+        for field, value in (('service_incarnation_sha256', '9'*64), ('heartbeat_sequence', 5)):
+            with self.subTest(field=field):
+                output['after'] = native | {field: value}
+                commands.clear(); challenges.clear()
+                with patch.object(app.time, 'monotonic', return_value=100), self.assertRaises(TransitionBlocked):
+                    stage._proof(106, lambda: None)
+                self.assertEqual(len(commands), 1)
+
+    def test_start_snapshots_partial_lineage_before_callbacks(self):
+        app, stage, request = self.fixture()
+        lineage = {'authorization_sha256': '1'*64, 'intent_sha256': '2'*64,
+                   'progress_sha256': {'progress-ha-broker.json': '3'*64}}
+        expected = copy.deepcopy(lineage)
+        def proof(*args):
+            lineage['progress_sha256'].clear()
+            return '4'*64
+        stage.dispatcher.start_initial_postboot = lambda *args, **kwargs: wire.Receipt('PASS', '5'*64)
+        with patch.object(stage, '_proof', side_effect=proof), patch.object(app, 'guest_attest', return_value={'authorization_sha256': '6'*64}) as attest:
+            stage.start(request, 1e20, assert_guard=lambda: None, issued=lambda _: None,
+                        record=lambda *args: None, prior_resume=lineage)
+        self.assertEqual(attest.call_args.kwargs['prior_resume'], expected)
 
 if __name__=='__main__':unittest.main()

@@ -6,6 +6,7 @@ Original hold/intent/progress remain immutable. No new RPC or revision exists.
 import json
 import os
 import re
+import time
 from dataclasses import replace
 from . import native_stdio_bridge as wire
 from .controller import TransitionBlocked
@@ -147,15 +148,19 @@ def _read_predecessor_authorization(request,raw,hold,active,pin,*,partial=False,
                             continuation=continuation,numbered_attempt=numbered_attempt)
     return previous,authorization
 
-def _resume_lineage(request,raw,hold,active,stage,stem,original_intent,service_instance,lineage):
+def _resume_lineage(request,raw,hold,active,stage,stem,original_intent,service_instance,lineage,*,carryover=None):
     from . import native_guest_worker as w
     need(request.verb==wire.GUEST_START_INITIAL_POSTBOOT and supports(request)
          and type(lineage) is dict and set(lineage)=={'authorization_sha256','intent_sha256','progress_sha256'}
          and wire._hash(lineage['intent_sha256']) and type(lineage['progress_sha256']) is dict
          and 0<len(lineage['progress_sha256'])<len(w.RECOVERY_START_ORDER))
     previous,authorization=_read_predecessor_authorization(request,raw,hold,active,lineage['authorization_sha256'])
+    progress = {} if carryover is None else carryover['history']['progress_sha256']
     need(authorization['service_instance_sha256']==service_instance
-         and authorization['prior_intent_sha256']==original_intent and authorization['prior_progress_sha256']=={})
+         and authorization['prior_intent_sha256']==original_intent and authorization['prior_progress_sha256']==progress)
+    if carryover is not None:
+        need(authorization['container_contracts']==carryover['container_contracts']
+             and authorization['protected_inventory_sha256']==carryover['protected_inventory_sha256'])
     _prior_attempt(previous,hold,active,stage,stem+'resume-',lineage['intent_sha256'],
                    lineage['progress_sha256'],'partial-',authorization_pin=lineage['authorization_sha256'])
     return authorization['container_contracts']
@@ -275,7 +280,7 @@ def _validate_authorization(request,raw,hold,active,value,*,partial,prestart=Fal
     if request.args.get('postboot', {}).get('carryover_receipt_sha256'):
         fields = fields | {'carryover_receipt_sha256'}
         need(value.get('carryover_receipt_sha256') == request.args['postboot']['carryover_receipt_sha256']
-             and not partial and not prestart and not continuation and not numbered_attempt)
+             and not prestart and not continuation and not numbered_attempt)
     if prestart:
         fields=fields|{'prior_partial'}
     if continuation:
@@ -290,16 +295,37 @@ def _validate_authorization(request,raw,hold,active,value,*,partial,prestart=Fal
          and wire._hash(value['service_instance_sha256']) and value['containers']==hold['containers']
          and value['authority_files']==active['authority_files'])
 
+def _carryover_lineage(request,raw,hold,active,value,stage,stem,*,require_stopped):
+    from .native_guest_postboot import observe_carryover
+    partial = 'prior_resume' in value
+    receipt = observe_carryover(request, request.args['postboot']['attempt_id'], value['carryover_receipt_sha256'],
+                                require_stopped=require_stopped and not partial)
+    need(value['prior_intent_sha256']==receipt['history']['intent_sha256']
+         and value['prior_progress_sha256']==receipt['history']['progress_sha256'])
+    if partial:
+        need(not any(p.name.startswith(stem) and not p.name.startswith(stem+'resume-')
+                     for p in stage.iterdir()))
+        _resume_lineage(request,raw,hold,active,stage,stem,value['prior_intent_sha256'],
+                        value['service_instance_sha256'],value['prior_resume'],carryover=receipt)
+    return receipt
+
 def _authorization_baseline(request,raw,hold,prepared,active,value,stage,stem):
     from . import native_guest_worker as w
     if 'carryover_receipt_sha256' in value:
-        from .native_guest_postboot import observe_carryover
-        receipt = observe_carryover(request, request.args['postboot']['attempt_id'], value['carryover_receipt_sha256'])
-        need(value['prior_intent_sha256'] == receipt['history']['intent_sha256']
-             and value['prior_progress_sha256'] == receipt['history']['progress_sha256'])
-        need(not any(p.name.startswith(stem) for p in stage.iterdir()))
-        stem += 'resume-'
-        return receipt['container_contracts'], receipt['protected_inventory_sha256'], stem
+        receipt = _carryover_lineage(request,raw,hold,active,value,stage,stem,require_stopped=True)
+        if 'prior_resume' not in value:
+            need(not any(p.name.startswith(stem) for p in stage.iterdir()))
+            return receipt['container_contracts'], receipt['protected_inventory_sha256'], stem+'resume-'
+        resume_stem = stem+'resume-partial-'
+        need(not any(p.name.startswith(resume_stem) for p in stage.iterdir()))
+        w._assert_car_route_blocked(request,raw,prepared,active)
+        contracts,protected = w._initial_recovery_inventory(
+            request.binding,hold['containers'],receipt['protected_inventory_sha256'],None,
+            (receipt['container_contracts'],receipt['protected_inventory_sha256']),
+            inventory=lambda:w.restore._observer_inventory(time.monotonic()+wire.ACTIVATION_BOUNDARY_SECONDS))
+        need(protected==receipt['protected_inventory_sha256'])
+        _confirm_progress_drift(contracts,receipt['container_contracts'],len(value['prior_resume']['progress_sha256']))
+        return contracts,protected,resume_stem
     if 'numbered_attempt' in value:
         original = _resume_lineage(request, raw, hold, active, stage, stem, value['prior_intent_sha256'],
                                    value['service_instance_sha256'], value['prior_resume'])
@@ -381,7 +407,7 @@ def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_
         need(wire._digest(raw)==request.args['hold_sha256'] and not os.path.lexists(target))
         carryover_pin = request.args.get('postboot', {}).get('carryover_receipt_sha256')
         if carryover_pin:
-            need(not partial and prior_partial is None and prior_prestart is None and prior_attempt is None)
+            need(prior_partial is None and prior_prestart is None and prior_attempt is None)
             stage, stem = w.ROOT/request.binding.attempt_id, prefix(request)
         else:
             stage,stem=prior(request,hold,active,prior_intent_sha256,prior_progress_sha256)
@@ -442,8 +468,8 @@ def preserved(request,body,value,hold,active,raw):
                 numbered_attempt=numbered_attempt)
     need(w.runtime._read(target,0,{0o400},limit=131072)==body)
     if 'carryover_receipt_sha256' in value:
-        from .native_guest_postboot import observe_carryover
-        observe_carryover(request, request.args['postboot']['attempt_id'], value['carryover_receipt_sha256'], require_stopped=False)
+        _carryover_lineage(request,raw,hold,active,value,w.ROOT/request.binding.attempt_id,prefix(request),
+                           require_stopped=False)
         return
     stage,stem=prior(request,hold,active,value['prior_intent_sha256'],value['prior_progress_sha256'])
     if partial:
