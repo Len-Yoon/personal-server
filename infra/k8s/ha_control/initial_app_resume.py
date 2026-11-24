@@ -7,6 +7,7 @@ import json
 import os
 from . import native_stdio_bridge as wire
 from .controller import TransitionBlocked
+from .initial_postboot import sameboot, scope, stopped_attempt
 
 ERROR='initial_app_resume_unverified'
 FIELDS={'schema_version','request','args','hold_sha256','service_instance_sha256',
@@ -16,14 +17,27 @@ FIELDS={'schema_version','request','args','hold_sha256','service_instance_sha256
 def need(value):
     if not value:raise TransitionBlocked(ERROR)
 
+def supports(request):
+    return request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED or (
+        request.verb==wire.GUEST_START_INITIAL_POSTBOOT and sameboot(request.args.get('postboot')))
+
 def prefix(request):
-    need(request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED and request.node=='A')
+    need(supports(request) and request.node=='A')
     wire._args(request.verb,request.node,request.args)
-    return 'unpublished-'+request.args['unpublished']['attempt_id']+'-start-'
+    if request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED:
+        return 'unpublished-'+request.args['unpublished']['attempt_id']+'-start-'
+    args=request.args
+    value=scope({'initial_recovery_postboot':args['postboot'],
+        'initial_cutover_recovery':{'attempt_id':args['recovery_attempt_id']},
+        'initial_cutover_handoff':{'attempt_id':request.binding.attempt_id}})
+    need(args['postboot_stopped_receipt_sha256']==value['stopped_receipt_sha256'])
+    return 'postboot-'+value['attempt_id']+'-start-'
 
 def path(request):
     from . import native_guest_worker as w
-    return w.ROOT/('initial-app-resume-'+request.args['unpublished']['attempt_id']+'.json')
+    if request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED:
+        return w.ROOT/('initial-app-resume-'+request.args['unpublished']['attempt_id']+'.json')
+    return w.ROOT/('initial-app-resume-'+prefix(request).removesuffix('-start-')+'.json')
 
 def decode(raw):
     def pairs(items):
@@ -37,6 +51,8 @@ def prior(request,hold,active,intent_pin,progress_pins):
     stage=w.ROOT/request.binding.attempt_id;stem=prefix(request)
     need(wire._hash(intent_pin) and type(progress_pins) is dict
          and all(type(name) is str and wire._hash(pin) for name,pin in progress_pins.items()))
+    if request.verb==wire.GUEST_START_INITIAL_POSTBOOT:
+        need(not progress_pins)
     names={p.name[len(stem):] for p in stage.iterdir() if p.name.startswith(stem) and not p.name.startswith(stem+'resume-')}
     need(names=={'intent.json',*progress_pins})
     raw=w.runtime._read(stage/(stem+'intent.json'),0,{0o600},limit=131072)
@@ -62,6 +78,11 @@ def prior(request,hold,active,intent_pin,progress_pins):
 
 def stopped(request,raw,hold,prepared,active):
     from . import native_guest_worker as w
+    if request.verb==wire.GUEST_START_INITIAL_POSTBOOT:
+        from .native_guest_postboot import observe
+        args=request.args
+        record=observe(request,stopped_attempt(args['postboot']),args['postboot_stopped_receipt_sha256'])
+        return record['container_contracts'],record['protected_inventory_sha256']
     w._assert_car_route_blocked(request,raw,prepared,active)
     authorities={w.runtime.ROOT/name:pin for name,pin in active['authority_files'].items()}
     need(set(authorities)==set(w.live._authority_paths().values())
@@ -79,16 +100,19 @@ def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_
     here substitutes for the fresh Native/paired/local-PG checks at dispatch.
     """
     from . import native_guest_worker as w
-    need(wire._hash(service_instance_sha256));prefix(request)
+    need(wire._hash(service_instance_sha256) and wire._hash(request.nonce)
+         and type(request.sequence) is int and 0<request.sequence<=wire.MAX_REQUESTS)
+    prefix(request)
     with w._guest_mutation_descriptor():
         raw,hold,prepared,active=w._read_initial_recovery_hold(request)
         need(wire._digest(raw)==request.args['hold_sha256'] and not os.path.lexists(path(request)))
         stage,stem=prior(request,hold,active,prior_intent_sha256,prior_progress_sha256)
         need(not any(p.name.startswith(stem+'resume-') for p in stage.iterdir()))
         contracts,protected=stopped(request,raw,hold,prepared,active)
-        order=w.RECOVERY_START_ORDER;changed={role for role,row in contracts.items()
-            if row['started_at']!=hold['container_contracts'][role]['started_at']}
-        need(set(order[:len(prior_progress_sha256)])<=changed<=set(order[:len(prior_progress_sha256)+1]))
+        if request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED:
+            order=w.RECOVERY_START_ORDER;changed={role for role,row in contracts.items()
+                if row['started_at']!=hold['container_contracts'][role]['started_at']}
+            need(set(order[:len(prior_progress_sha256)])<=changed<=set(order[:len(prior_progress_sha256)+1]))
         value={'schema_version':1,'request':w._scope(request),'args':request.args,
             'hold_sha256':wire._digest(raw),'service_instance_sha256':service_instance_sha256,
             'prior_intent_sha256':prior_intent_sha256,'prior_progress_sha256':prior_progress_sha256,

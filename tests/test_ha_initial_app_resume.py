@@ -64,6 +64,7 @@ class InitialAppResumeTests(unittest.TestCase):
             (w,'GuestWorker',lambda req:SimpleNamespace(_prepared_pins=lambda *_:(object(),pins,{}))),
             (w.live,'_authority_paths',lambda:{'test':self.authority}),
             (w.live,'observe_unpublished_a_lease',lambda *a,**kw:'d'*64),
+            (w.live,'observe_postboot_a_lease',lambda *a,**kw:'d'*64),
             (w.runtime,'_read',read),(w.runtime,'_write',write),(w.runtime,'_docker',docker),
             (w.runtime,'_inventory',lambda:{v['container_id']:{'State':{'Running':self.contracts[r]['running']}} for r,v in self.containers.items()}),
             (w.activation,'_tls',lambda _: (object(),'leaf')),(w.activation,'_wait_for_app',lambda *a,**kw:None)):
@@ -128,5 +129,91 @@ class InitialAppResumeTests(unittest.TestCase):
         self.attest();body,value,_=self.load()
         p=self.stage/(self.stem+next(iter(self.progress_pins)));p.write_bytes(b'{}')
         with self.assertRaises(TransitionBlocked):resume.preserved(self.request,body,value,self.hold,self.active)
+
+    def prepare_sameboot_request(self):
+        from tests.test_ha_postboot import SamebootPostbootSealTests
+        value=SamebootPostbootSealTests().fixture()[0]['initial_recovery_postboot'].copy()
+        args={key:self.request.args[key] for key in (*wire.INITIAL_RECOVERY_ARGS,'hold_sha256')}
+        stopped_attempt=value['stopped_attempt_id']
+        for row in self.contracts.values():
+            row['started_at']='original-postboot-stop'
+        record=wire._bytes({'schema_version':1,'binding':self.request.binding.fields(),
+            'args':args|{'postboot_attempt_id':stopped_attempt},'hold_sha256':args['hold_sha256'],
+            'containers':self.containers,'container_contracts':self.contracts,
+            'protected_inventory_sha256':args['protected_inventory_sha256'],
+            'closed_revision':7,'closed_proof_sha256':'a'*64})
+        self.stopped_path=self.stage/('postboot-'+stopped_attempt+'-stopped.json')
+        self.stopped_path.write_bytes(record)
+        value['stopped_receipt_sha256']=wire._digest(record)
+        args.update(postboot=value,postboot_plan_sha256='a'*64,postboot_stopped_receipt_sha256=wire._digest(record))
+        self.request=replace(self.request,verb=wire.GUEST_START_INITIAL_POSTBOOT,args=args)
+        self.stem=resume.prefix(self.request)
+        self.progress_pins={}
+        old=replace(self.request,nonce='9'*64,sequence=1)
+        self.intent=wire._bytes({'schema_version':1,'status':'INTENT',**w._scope(old),'args':args,
+            'containers':self.containers,'authority_files':self.active['authority_files'],
+            'proof':{'windows_proof_sha256':'c'*64,'guest_proof_sha256':'d'*64},'automatic_retry_permitted':False})
+        self.intent_pin=wire._digest(self.intent)
+        self.intent_path=self.stage/(self.stem+'intent.json')
+        self.intent_path.write_bytes(self.intent)
+
+    def test_sameboot_resume_uses_original_stop_baseline_and_one_shot_namespace(self):
+        self.prepare_sameboot_request()
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(self.commands,[])
+        result=self.attest()
+        body,_,stem=self.load()
+        self.assertEqual(stem,self.stem+'resume-')
+        self.assertEqual(resume.path(self.request).name,'initial-app-resume-postboot-'+self.request.args['postboot']['attempt_id']+'.json')
+        self.assertEqual(w.start_initial_recovery(self.request,self.windows).status,'PASS')
+        self.assertEqual(self.commands,[('start',v['container_id']) for v in self.containers.values()])
+        self.assertEqual(self.intent_path.read_bytes(),self.intent)
+        self.assertEqual(wire._digest(self.stopped_path.read_bytes()),self.request.args['postboot_stopped_receipt_sha256'])
+        self.assertEqual(wire._digest(body),result['authorization_sha256'])
+        for challenge,boundary in self.challenges:
+            self.assertEqual(challenge,wire._digest(wire._bytes({'request':w._scope(self.request),
+                'hold_sha256':self.request.args['hold_sha256'],'boundary':boundary,
+                'postboot':self.request.args['postboot'],'postboot_plan_sha256':self.request.args['postboot_plan_sha256'],
+                'resume_authorization_sha256':wire._digest(body)})))
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(len(self.commands),8)
+
+    def test_sameboot_resume_rejects_any_original_progress_done_or_started_container(self):
+        self.prepare_sameboot_request()
+        role=w.RECOVERY_START_ORDER[0]
+        name='progress-'+role+'.json'
+        progress=wire._bytes({'intent_sha256':self.intent_pin,'started':[role],
+            'proof':{'windows_proof_sha256':'c'*64,'guest_proof_sha256':'d'*64}})
+        p=self.stage/(self.stem+name)
+        p.write_bytes(progress)
+        for pins in ({},{name:wire._digest(progress)}):
+            self.progress_pins=pins
+            with self.assertRaises(TransitionBlocked):
+                self.attest()
+        p.unlink()
+        self.progress_pins={}
+        done=self.stage/(self.stem+'done.json')
+        done.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):
+            self.attest()
+        done.unlink()
+        self.contracts[role]['started_at']='changed-since-stop'
+        with self.assertRaises(TransitionBlocked):
+            self.attest()
+        self.assertFalse(resume.path(self.request).exists())
+
+    def test_sameboot_resume_rejects_wrong_stop_hash_and_tampered_receipt(self):
+        self.prepare_sameboot_request()
+        request=self.request
+        self.request=replace(request,args=request.args|{'postboot_stopped_receipt_sha256':'f'*64})
+        with self.assertRaises(TransitionBlocked):
+            self.attest()
+        self.request=request
+        self.attest()
+        self.stopped_path.write_bytes(self.stopped_path.read_bytes()+b' ')
+        with self.assertRaises(TransitionBlocked):
+            self.load()
 
 if __name__=='__main__':unittest.main()

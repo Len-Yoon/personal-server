@@ -378,6 +378,7 @@ def _assert_car_route_blocked(request, raw, prepared, active):
 
 def start_initial_recovery(request, assert_windows_current):
     """Restart the installed containers while retaining the recovery hold."""
+    from . import initial_app_resume
     error = "guest_initial_recovery_start_unverified"
     _need(callable(assert_windows_current), error)
     _args(request.verb, request.node, request.args)
@@ -394,8 +395,7 @@ def start_initial_recovery(request, assert_windows_current):
         intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                  for name in ("intent", "progress", "done"))
         resume = None
-        if unpublished:
-            from . import initial_app_resume
+        if initial_app_resume.supports(request):
             if os.path.lexists(initial_app_resume.path(request)):
                 resume = initial_app_resume.load(request, raw, hold, prepared, active)
                 prefix = resume[2]
@@ -407,7 +407,7 @@ def start_initial_recovery(request, assert_windows_current):
         baseline = (hold["container_contracts"], args["protected_inventory_sha256"])
         if resume is not None:
             baseline = (resume[1]['container_contracts'], resume[1]['protected_inventory_sha256'])
-        if postboot:
+        if postboot and resume is None:
             from .native_guest_postboot import observe
             from .initial_postboot import stopped_attempt, sameboot
             if sameboot(args['postboot']):
