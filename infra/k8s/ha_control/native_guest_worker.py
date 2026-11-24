@@ -396,8 +396,9 @@ def start_initial_recovery(request, assert_windows_current):
                                                  for name in ("intent", "progress", "done"))
         resume = None
         if initial_app_resume.supports(request):
-            if os.path.lexists(initial_app_resume.path(request)):
-                resume = initial_app_resume.load(request, raw, hold, prepared, active)
+            partial = postboot and os.path.lexists(initial_app_resume.path(request, partial=True))
+            if partial or os.path.lexists(initial_app_resume.path(request)):
+                resume = initial_app_resume.load(request, raw, hold, prepared, active, partial=partial)
                 prefix = resume[2]
                 intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                          for name in ("intent", "progress", "done"))
@@ -426,7 +427,7 @@ def start_initial_recovery(request, assert_windows_current):
 
         def unchanged():
             if resume is not None:
-                initial_app_resume.preserved(request, resume[0], resume[1], hold, active)
+                initial_app_resume.preserved(request, resume[0], resume[1], hold, active, raw)
             _need(_read_initial_recovery_hold(request)[:2] == (raw, hold), error)
             _assert_car_route_blocked(request, raw, prepared, active)
             _need(all(_digest(runtime._read(path, 0, {0o444})) == pin

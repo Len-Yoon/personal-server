@@ -13,6 +13,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'infra/k8s'))
 from ha_control import initial_app_resume as resume, native_guest_worker as w, native_stdio_bridge as wire
 from ha_control.controller import TransitionBlocked
 
+REAL_INVENTORY=w._initial_recovery_inventory
+
 class InitialAppResumeTests(unittest.TestCase):
     def setUp(self):
         from tests.test_ha_postboot import UnpublishedSealTests
@@ -45,15 +47,16 @@ class InitialAppResumeTests(unittest.TestCase):
         self.spec=b'{"guest_ip":"127.0.0.1","pg_a":"127.0.0.1","node":"A"}'
         (self.stage/'guest-spec.json').write_bytes(self.spec)
         pins=SimpleNamespace(installation_id=args['installation_id'],node='A',attempt_id=binding.attempt_id,spec_sha256=wire._digest(self.spec))
-        self.commands=[];self.challenges=[];self.failed_boundary=None
+        self.commands=[];self.challenges=[];self.failed_boundary=None;self.start_sequence=0
         def read(path,*a,**kw):return Path(path).read_bytes()
         def write(path,body,*a):
             with Path(path).open('xb') as out:out.write(body)
         def docker(*command,**kw):
             self.commands.append(command)
             if command[0]=='start':
+                self.start_sequence+=1
                 role=next(r for r,v in self.containers.items() if v['container_id']==command[1])
-                self.contracts[role].update(running=True,started_at='resumed')
+                self.contracts[role].update(running=True,started_at='started-'+str(self.start_sequence))
             if command[0]=='stop':
                 for role,pin in self.containers.items():
                     if pin['container_id'] in command[3:]:self.contracts[role]['running']=False
@@ -128,7 +131,7 @@ class InitialAppResumeTests(unittest.TestCase):
     def test_preserved_auth_or_progress_mutation_rejects(self):
         self.attest();body,value,_=self.load()
         p=self.stage/(self.stem+next(iter(self.progress_pins)));p.write_bytes(b'{}')
-        with self.assertRaises(TransitionBlocked):resume.preserved(self.request,body,value,self.hold,self.active)
+        with self.assertRaises(TransitionBlocked):resume.preserved(self.request,body,value,self.hold,self.active,b'hold')
 
     def prepare_sameboot_request(self):
         from tests.test_ha_postboot import SamebootPostbootSealTests
@@ -215,5 +218,111 @@ class InitialAppResumeTests(unittest.TestCase):
         self.stopped_path.write_bytes(self.stopped_path.read_bytes()+b' ')
         with self.assertRaises(TransitionBlocked):
             self.load()
+
+    def prepare_partial_request(self):
+        self.prepare_sameboot_request()
+        first=self.attest()
+        self.failed_boundary='recovery_after:car-care-worker'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        stem=self.stem+'resume-'
+        paths={p.name.removeprefix(stem):p for p in self.stage.iterdir() if p.name.startswith(stem)}
+        self.lineage={'authorization_sha256':first['authorization_sha256'],
+            'intent_sha256':wire._digest(paths.pop('intent.json').read_bytes()),
+            'progress_sha256':{name:wire._digest(p.read_bytes()) for name,p in paths.items()}}
+        self.lineage_original={p:p.read_bytes() for p in self.stage.iterdir()}
+        self.lineage_original[resume.path(self.request)]=resume.path(self.request).read_bytes()
+        self.request=replace(self.request,nonce='f'*64,sequence=3)
+        self.failed_boundary=None
+        self.commands.clear()
+        self.challenges.clear()
+
+    def attest_partial(self, *, lineage=None, instance='e'*64):
+        return resume.attest(self.request,service_instance_sha256=instance,prior_intent_sha256=self.intent_pin,
+                             prior_progress_sha256={},prior_resume=self.lineage if lineage is None else lineage)
+
+    def test_sameboot_partial_restarts_checked_prefix_and_preserves_both_attempts(self):
+        self.prepare_partial_request()
+        self.assertEqual(set(self.lineage['progress_sha256']),{'progress-ha-broker.json','progress-book-memo.json'})
+        self.assertEqual({role for role,row in self.contracts.items() if row['started_at']!='original-postboot-stop'},
+                         {'ha-broker','book-memo','car-care-worker'})
+        result=self.attest_partial()
+        body,value,stem=resume.load(self.request,b'hold',self.hold,self.prepared,self.active,partial=True)
+        self.assertEqual(value['prior_resume'],self.lineage)
+        self.assertEqual(wire._digest(body),result['authorization_sha256'])
+        self.assertEqual(stem,self.stem+'resume-partial-')
+        self.assertEqual(w.start_initial_recovery(self.request,self.windows).status,'PASS')
+        self.assertEqual(self.commands,[('start',v['container_id']) for v in self.containers.values()])
+        record=json.loads((self.stage/(stem+'intent.json')).read_bytes())
+        self.assertEqual(record['resume_authorization_sha256'],result['authorization_sha256'])
+        self.assertTrue((self.stage/(stem+'done.json')).exists())
+        self.assertTrue(all(path.read_bytes()==original for path,original in self.lineage_original.items()))
+        for action in (self.attest_partial,lambda:w.start_initial_recovery(self.request,self.windows)):
+            with self.assertRaises(TransitionBlocked):
+                action()
+        self.assertEqual(len(self.commands),8)
+
+    def test_sameboot_partial_rejects_wrong_lineage_writer_or_unexpected_runtime_state(self):
+        self.prepare_partial_request()
+        for key in ('authorization_sha256','intent_sha256'):
+            with self.assertRaises(TransitionBlocked):
+                self.attest_partial(lineage=self.lineage|{key:'4'*64})
+        with self.assertRaises(TransitionBlocked):
+            self.attest_partial(instance='4'*64)
+        role='portal-web'
+        self.contracts[role]['started_at']='unexpected-start'
+        with self.assertRaises(TransitionBlocked):
+            self.attest_partial()
+        self.contracts[role]['started_at']='original-postboot-stop'
+        self.contracts['car-care-worker']['running']=True
+        with self.assertRaises(TransitionBlocked):
+            self.attest_partial()
+        self.contracts['car-care-worker']['running']=False
+        self.contracts['book-memo']['started_at']='original-postboot-stop'
+        with self.assertRaises(TransitionBlocked):
+            self.attest_partial()
+        self.assertEqual(self.commands,[])
+
+    def test_sameboot_partial_rechecks_previous_progress_and_blocks_predecessor_completion(self):
+        self.prepare_partial_request()
+        stem=self.stem+'resume-'
+        done=self.stage/(stem+'done.json')
+        done.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):
+            self.attest_partial()
+        done.unlink()
+        self.attest_partial()
+        p=self.stage/(stem+'progress-book-memo.json')
+        body,value,_=resume.load(self.request,b'hold',self.hold,self.prepared,self.active,partial=True)
+        p.write_bytes(p.read_bytes()+b' ')
+        with self.assertRaises(TransitionBlocked):
+            resume.preserved(self.request,body,value,self.hold,self.active,b'hold')
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(self.commands,[])
+
+    def test_partial_stop_snapshot_allows_changed_start_times_under_real_inventory_contract(self):
+        from ha_control import native_guest_postboot as postboot
+        self.prepare_sameboot_request()
+        binding=self.request.binding
+        objects={pin['container_id']:{
+            'Name':role,'Image':pin['image_id'],'Config':{'Labels':{
+                'com.docker.compose.service':role,w.runtime.ATTEMPT_LABEL:binding.attempt_id}},
+            'HostConfig':{'RestartPolicy':{'Name':'no'},'AutoRemove':False},'RestartCount':0,
+            'Mounts':[],'State':{'Running':False,'Paused':False,'Restarting':False,'OOMKilled':False,
+                'Dead':False,'Status':'exited','Pid':0,'ExitCode':143,'StartedAt':'1','FinishedAt':'3'},
+        } for role,pin in self.containers.items()}
+        protected=w.runtime.inventory_sha256({})
+        with patch.object(w,'_initial_recovery_inventory',REAL_INVENTORY),patch.object(w.runtime,'_inventory',return_value=objects):
+            original,_=REAL_INVENTORY(binding,self.containers,protected,None)
+            postboot_record={'container_contracts':original,'protected_inventory_sha256':protected}
+            for role in w.RECOVERY_START_ORDER[:3]:
+                objects[self.containers[role]['container_id']]['State']['StartedAt']='2'
+            with patch.object(postboot,'observe',return_value=postboot_record):
+                current,current_protected=resume.stopped(self.request,b'hold',self.hold,self.prepared,self.active,prior_baseline=original)
+            self.assertEqual(current_protected,protected)
+            self.assertTrue(all(row['running'] is False for row in current.values()))
+            self.assertEqual({role for role,row in current.items() if row['started_at']!=original[role]['started_at']},
+                             set(w.RECOVERY_START_ORDER[:3]))
 
 if __name__=='__main__':unittest.main()
