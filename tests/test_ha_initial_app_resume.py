@@ -373,6 +373,84 @@ class InitialAppResumeTests(unittest.TestCase):
             w.start_initial_recovery(self.request,self.windows)
         self.assertEqual(self.commands,[])
 
+    def prepare_continuation_request(self):
+        self.prepare_prestart_request()
+        authorization=self.attest_prestart()
+        self.prestart_baseline=copy.deepcopy(self.contracts)
+        self.failed_boundary='recovery_after:book-memo'
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.prestart_stem=self.partial_stem+'prestart-'
+        self.prestart_authorization=resume.path(self.request,partial=True,prestart=True)
+        self.prestart_intent=self.stage/(self.prestart_stem+'intent.json')
+        self.prestart_progress=self.stage/(self.prestart_stem+'progress-ha-broker.json')
+        self.prior_prestart={'authorization_sha256':authorization['authorization_sha256'],
+                             'intent_sha256':wire._digest(self.prestart_intent.read_bytes()),
+                             'progress_sha256':{'progress-ha-broker.json':wire._digest(self.prestart_progress.read_bytes())}}
+        self.lineage_original.update({path:path.read_bytes() for path in
+            (self.prestart_authorization,self.prestart_intent,self.prestart_progress)})
+        self.request=replace(self.request,nonce='a'*64,sequence=5)
+        self.failed_boundary=None
+        self.commands.clear()
+        self.challenges.clear()
+
+    def attest_continuation(self, *, lineage=None):
+        return resume.attest(self.request,service_instance_sha256='e'*64,prior_intent_sha256=self.intent_pin,
+                             prior_progress_sha256={},prior_resume=self.lineage,prior_partial=self.prior_partial,
+                             prior_prestart=self.prior_prestart if lineage is None else lineage)
+
+    def test_sameboot_continuation_resumes_progress_relative_to_latest_baseline(self):
+        self.prepare_continuation_request()
+        result=self.attest_continuation()
+        body,value,stem=resume.load(self.request,b'hold',self.hold,self.prepared,self.active,
+                                    partial=True,prestart=True,continuation=True)
+        self.assertEqual(value['prior_prestart'],self.prior_prestart)
+        self.assertEqual(wire._digest(body),result['authorization_sha256'])
+        self.assertEqual(stem,self.prestart_stem+'continuation-')
+        self.assertEqual(w.start_initial_recovery(self.request,self.windows).status,'PASS')
+        self.assertEqual(self.commands,[('start',v['container_id']) for v in self.containers.values()])
+        self.assertTrue(all(path.read_bytes()==original for path,original in self.lineage_original.items()))
+        self.assertTrue((self.stage/(stem+'done.json')).exists())
+        for action in (self.attest_continuation,lambda:w.start_initial_recovery(self.request,self.windows)):
+            with self.assertRaises(TransitionBlocked):
+                action()
+        self.assertEqual(len(self.commands),8)
+
+    def test_sameboot_continuation_rejects_missing_progress_or_wrong_started_at(self):
+        self.prepare_continuation_request()
+        with self.assertRaises(TransitionBlocked):
+            self.attest_continuation(lineage=self.prior_prestart|{'progress_sha256':{}})
+        for role, timestamp in (('portal-web','unexpected'),('ha-broker',self.prestart_baseline['ha-broker']['started_at'])):
+            before=self.contracts[role]['started_at']
+            self.contracts[role]['started_at']=timestamp
+            with self.assertRaises(TransitionBlocked):
+                self.attest_continuation()
+            self.contracts[role]['started_at']=before
+        self.contracts['ha-broker']['running']=True
+        with self.assertRaises(TransitionBlocked):
+            self.attest_continuation()
+        self.assertEqual(self.commands,[])
+
+    def test_sameboot_continuation_rejects_wrong_pins_or_predecessor_completion(self):
+        self.prepare_continuation_request()
+        for key in ('authorization_sha256','intent_sha256'):
+            with self.assertRaises(TransitionBlocked):
+                self.attest_continuation(lineage=self.prior_prestart|{key:'4'*64})
+        done=self.stage/(self.prestart_stem+'done.json')
+        done.write_bytes(b'{}')
+        with self.assertRaises(TransitionBlocked):
+            self.attest_continuation()
+        done.unlink()
+        self.attest_continuation()
+        body,value,_=resume.load(self.request,b'hold',self.hold,self.prepared,self.active,
+                                 partial=True,prestart=True,continuation=True)
+        self.prestart_progress.write_bytes(self.prestart_progress.read_bytes()+b' ')
+        with self.assertRaises(TransitionBlocked):
+            resume.preserved(self.request,body,value,self.hold,self.active,b'hold')
+        with self.assertRaises(TransitionBlocked):
+            w.start_initial_recovery(self.request,self.windows)
+        self.assertEqual(self.commands,[])
+
     def test_partial_stop_snapshot_allows_changed_start_times_under_real_inventory_contract(self):
         from ha_control import native_guest_postboot as postboot
         self.prepare_sameboot_request()

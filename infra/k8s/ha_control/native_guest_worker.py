@@ -396,10 +396,14 @@ def start_initial_recovery(request, assert_windows_current):
                                                  for name in ("intent", "progress", "done"))
         resume = None
         if initial_app_resume.supports(request):
-            prestart = postboot and os.path.lexists(initial_app_resume.path(request, partial=True, prestart=True))
+            continuation = postboot and os.path.lexists(initial_app_resume.path(
+                request, partial=True, prestart=True, continuation=True))
+            prestart = continuation or (postboot and os.path.lexists(initial_app_resume.path(
+                request, partial=True, prestart=True)))
             partial = prestart or (postboot and os.path.lexists(initial_app_resume.path(request, partial=True)))
             if partial or os.path.lexists(initial_app_resume.path(request)):
-                resume = initial_app_resume.load(request, raw, hold, prepared, active, partial=partial, prestart=prestart)
+                resume = initial_app_resume.load(request, raw, hold, prepared, active,
+                                                 partial=partial, prestart=prestart, continuation=continuation)
                 prefix = resume[2]
                 intent_path, progress_path, done_path = (stage / (prefix + name + ".json")
                                                          for name in ("intent", "progress", "done"))

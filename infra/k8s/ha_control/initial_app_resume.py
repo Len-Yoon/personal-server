@@ -34,14 +34,14 @@ def prefix(request):
     need(args['postboot_stopped_receipt_sha256']==value['stopped_receipt_sha256'])
     return 'postboot-'+value['attempt_id']+'-start-'
 
-def path(request, *, partial=False, prestart=False):
+def path(request, *, partial=False, prestart=False, continuation=False):
     from . import native_guest_worker as w
-    need(not prestart or partial)
+    need((not prestart or partial) and (not continuation or prestart))
     if request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED:
         need(not partial)
         return w.ROOT/('initial-app-resume-'+request.args['unpublished']['attempt_id']+'.json')
     stem=prefix(request).removesuffix('-start-')
-    suffix='-partial-prestart' if prestart else '-partial' if partial else ''
+    suffix='-continuation' if continuation else '-partial-prestart' if prestart else '-partial' if partial else ''
     return w.ROOT/('initial-app-resume-'+stem+suffix+'.json')
 
 def decode(raw):
@@ -88,10 +88,10 @@ def _prior_attempt(request,hold,active,stage,stem,intent_pin,progress_pins,succe
              and value['intent_sha256']==intent_pin and value['started']==sorted(order[:index+1])
              and type(value['proof']) is dict and set(value['proof'])=={'windows_proof_sha256','guest_proof_sha256'}
              and all(wire._hash(pin) for pin in value['proof'].values()))
-def _read_predecessor_authorization(request,raw,hold,active,pin,*,partial=False):
+def _read_predecessor_authorization(request,raw,hold,active,pin,*,partial=False,prestart=False):
     from . import native_guest_worker as w
     need(wire._hash(pin))
-    body=w.runtime._read(path(request,partial=partial),0,{0o400},limit=131072)
+    body=w.runtime._read(path(request,partial=partial,prestart=prestart),0,{0o400},limit=131072)
     need(wire._digest(body)==pin)
     authorization=decode(body)
     need(type(authorization.get('request')) is dict)
@@ -100,7 +100,7 @@ def _read_predecessor_authorization(request,raw,hold,active,pin,*,partial=False)
     need(wire._hash(nonce) and nonce!=request.nonce
          and type(sequence) is int and 0<sequence<=wire.MAX_REQUESTS)
     previous=replace(request,nonce=nonce,sequence=sequence)
-    _validate_authorization(previous,raw,hold,active,authorization,partial=partial)
+    _validate_authorization(previous,raw,hold,active,authorization,partial=partial,prestart=prestart)
     return previous,authorization
 
 def _resume_lineage(request,raw,hold,active,stage,stem,original_intent,service_instance,lineage):
@@ -131,6 +131,25 @@ def _prestart_lineage(request,raw,hold,active,stage,stem,value):
                    {},'prestart-',authorization_pin=lineage['authorization_sha256'])
     return authorization
 
+def _continuation_lineage(request,raw,hold,active,stage,stem,value,partial_authorization):
+    from . import native_guest_worker as w
+    lineage=value['prior_prestart']
+    need(type(lineage) is dict and set(lineage)=={'authorization_sha256','intent_sha256','progress_sha256'}
+         and wire._hash(lineage['intent_sha256']) and type(lineage['progress_sha256']) is dict
+         and 0<len(lineage['progress_sha256'])<len(w.RECOVERY_START_ORDER))
+    previous,authorization=_read_predecessor_authorization(request,raw,hold,active,
+        lineage['authorization_sha256'],partial=True,prestart=True)
+    need(authorization['service_instance_sha256']==value['service_instance_sha256']
+         and authorization['prior_intent_sha256']==value['prior_intent_sha256']
+         and authorization['prior_progress_sha256']=={}
+         and authorization['prior_resume']==value['prior_resume']
+         and authorization['prior_partial']==value['prior_partial']
+         and authorization['container_contracts']==partial_authorization['container_contracts']
+         and authorization['protected_inventory_sha256']==partial_authorization['protected_inventory_sha256'])
+    _prior_attempt(previous,hold,active,stage,stem+'resume-partial-prestart-',lineage['intent_sha256'],
+                   lineage['progress_sha256'],'continuation-',authorization_pin=lineage['authorization_sha256'])
+    return authorization
+
 def stopped(request,raw,hold,prepared,active,*,prior_baseline=None):
     from . import native_guest_worker as w
     if request.verb==wire.GUEST_START_INITIAL_POSTBOOT:
@@ -153,12 +172,14 @@ def stopped(request,raw,hold,prepared,active,*,prior_baseline=None):
     need(all(row['running'] is False for row in contracts.values()))
     return contracts,protected
 
-def _validate_authorization(request,raw,hold,active,value,*,partial,prestart=False):
+def _validate_authorization(request,raw,hold,active,value,*,partial,prestart=False,continuation=False):
     from . import native_guest_worker as w
     fields=FIELDS|({'prior_resume'} if partial else set())
     if prestart:
         fields=fields|{'prior_partial'}
-    need((not prestart or partial) and set(value)==fields
+    if continuation:
+        fields=fields|{'prior_prestart'}
+    need((not prestart or partial) and (not continuation or prestart) and set(value)==fields
          and type(value['schema_version']) is int and value['schema_version']==1
          and wire._bytes(value['request'])==wire._bytes(w._scope(request)) and wire._bytes(value['args'])==wire._bytes(request.args)
          and value['hold_sha256']==wire._digest(raw)==request.args['hold_sha256']
@@ -170,6 +191,7 @@ def _authorization_baseline(request,raw,hold,prepared,active,value,stage,stem):
     lineage=value.get('prior_resume')
     prior_baseline=None
     predecessor=None
+    latest=None
     count=len(value['prior_progress_sha256'])
     if 'prior_resume' in value:
         prior_baseline=_resume_lineage(request,raw,hold,active,stage,stem,value['prior_intent_sha256'],
@@ -177,9 +199,13 @@ def _authorization_baseline(request,raw,hold,prepared,active,value,stage,stem):
         need(type(prior_baseline) is dict)
         if 'prior_partial' in value:
             predecessor=_prestart_lineage(request,raw,hold,active,stage,stem,value)
+        if 'prior_prestart' in value:
+            latest=_continuation_lineage(request,raw,hold,active,stage,stem,value,predecessor)
         stem+='resume-partial-'
         if predecessor is not None:
             stem+='prestart-'
+        if latest is not None:
+            stem+='continuation-'
         count=len(lineage['progress_sha256'])
     else:
         stem+='resume-'
@@ -187,16 +213,20 @@ def _authorization_baseline(request,raw,hold,prepared,active,value,stage,stem):
     contracts,protected=stopped(request,raw,hold,prepared,active,prior_baseline=prior_baseline)
     if prior_baseline is not None or request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED:
         baseline=prior_baseline if prior_baseline is not None else hold['container_contracts']
+        if latest is not None:
+            baseline=latest['container_contracts']
+            count=len(value['prior_prestart']['progress_sha256'])
+            need(protected==latest['protected_inventory_sha256'])
         order=w.RECOVERY_START_ORDER
         need(set(contracts)==set(baseline)==set(order) and all(row['running'] is False for row in contracts.values()))
         changed={role for role,row in contracts.items() if row['started_at']!=baseline[role]['started_at']}
         need(set(order[:count])<=changed<=set(order[:count+1]))
-    if predecessor is not None:
+    if predecessor is not None and latest is None:
         need(contracts==predecessor['container_contracts'] and protected==predecessor['protected_inventory_sha256'])
     return contracts,protected,stem
 
 def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_sha256,
-           prior_resume=None,prior_partial=None):
+           prior_resume=None,prior_partial=None,prior_prestart=None):
     """Trusted operator calls after fresh current-publication proof; metadata only.
 
     Root must pin the returned authorization hash, this new request nonce, and
@@ -204,14 +234,16 @@ def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_
     here substitutes for the fresh Native/paired/local-PG checks at dispatch.
     A partial postboot continuation also pins the first authorization, intent,
     and every recorded progress receipt. One further authorization requires
-    a partial intent without progress or a subsequent container start.
+    a partial intent without progress or a subsequent container start. A
+    continuation pins the prestart attempt's exact progress and its baseline.
     """
     from . import native_guest_worker as w
     need(wire._hash(service_instance_sha256) and wire._hash(request.nonce)
          and type(request.sequence) is int and 0<request.sequence<=wire.MAX_REQUESTS)
     prefix(request)
     partial=prior_resume is not None
-    target=path(request,partial=partial,prestart=prior_partial is not None)
+    target=path(request,partial=partial,prestart=prior_partial is not None,
+                continuation=prior_prestart is not None)
     with w._guest_mutation_descriptor():
         raw,hold,prepared,active=w._read_initial_recovery_hold(request)
         need(wire._digest(raw)==request.args['hold_sha256'] and not os.path.lexists(target))
@@ -224,6 +256,8 @@ def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_
             value['prior_resume']=prior_resume
         if prior_partial is not None:
             value['prior_partial']=prior_partial
+        if prior_prestart is not None:
+            value['prior_prestart']=prior_prestart
         contracts,protected,_=_authorization_baseline(request,raw,hold,prepared,active,value,stage,stem)
         value.update(container_contracts=contracts,protected_inventory_sha256=protected)
         body=wire._bytes(value)
@@ -238,11 +272,12 @@ def attest(request,*,service_instance_sha256,prior_intent_sha256,prior_progress_
             'prior_progress_sha256':prior_progress_sha256,'service_instance_sha256':service_instance_sha256,
             'container_count':8,'containers_started':False,'database_changed':False}
 
-def load(request,raw,hold,prepared,active,*,partial=False,prestart=False):
+def load(request,raw,hold,prepared,active,*,partial=False,prestart=False,continuation=False):
     """Called only under the installed worker mutation descriptor."""
     from . import native_guest_worker as w
-    body=w.runtime._read(path(request,partial=partial,prestart=prestart),0,{0o400},limit=131072);value=decode(body)
-    _validate_authorization(request,raw,hold,active,value,partial=partial,prestart=prestart)
+    target=path(request,partial=partial,prestart=prestart,continuation=continuation)
+    body=w.runtime._read(target,0,{0o400},limit=131072);value=decode(body)
+    _validate_authorization(request,raw,hold,active,value,partial=partial,prestart=prestart,continuation=continuation)
     stage,stem=prior(request,hold,active,value['prior_intent_sha256'],value['prior_progress_sha256'])
     contracts,protected,stem=_authorization_baseline(request,raw,hold,prepared,active,value,stage,stem)
     need(value['container_contracts']==contracts and value['protected_inventory_sha256']==protected)
@@ -252,10 +287,14 @@ def preserved(request,body,value,hold,active,raw):
     from . import native_guest_worker as w
     partial='prior_resume' in value
     prestart='prior_partial' in value
-    need(w.runtime._read(path(request,partial=partial,prestart=prestart),0,{0o400},limit=131072)==body)
+    continuation='prior_prestart' in value
+    target=path(request,partial=partial,prestart=prestart,continuation=continuation)
+    need(w.runtime._read(target,0,{0o400},limit=131072)==body)
     stage,stem=prior(request,hold,active,value['prior_intent_sha256'],value['prior_progress_sha256'])
     if partial:
         _resume_lineage(request,raw,hold,active,stage,stem,value['prior_intent_sha256'],
                         value['service_instance_sha256'],value['prior_resume'])
     if prestart:
-        _prestart_lineage(request,raw,hold,active,stage,stem,value)
+        predecessor=_prestart_lineage(request,raw,hold,active,stage,stem,value)
+        if continuation:
+            _continuation_lineage(request,raw,hold,active,stage,stem,value,predecessor)
