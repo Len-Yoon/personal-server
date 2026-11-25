@@ -35,6 +35,7 @@ from app.services.news_collection_status import NewsCollectionStatusStore
 from app.services.ha_backend import runtime, worker_operation
 from app.services.news_archive_storage import empty_archive, validate_archive_payload
 from app.services.telegram_notifier import (
+    is_investing_world_article,
     notify_market_news_digest,
     notify_new_investing_articles,
 )
@@ -391,13 +392,14 @@ def _commit_collected_articles(
         should_notify = _should_notify_new_investing_articles(archive, category, korean=True, now=now)
         archive["articles"] = _merge_articles(archive["articles"], stored_articles)
         if should_notify:
+            eligible = [article for article in new_articles if is_investing_world_article(article)]
             archive["telegram_pending_articles"] = _merge_notification_articles(
                 _notification_articles(archive.get("telegram_pending_articles", [])),
-                [article for article in new_articles if not _alert_articles([article])],
+                [article for article in eligible if not _alert_articles([article])],
             )
             archive["telegram_outbox"] = _upsert_notification_events(
                 _notification_outbox(archive.get("telegram_outbox", [])),
-                [notification_event("alert", [article], _iso(now)) for article in _alert_articles(new_articles)],
+                [notification_event("alert", [article], _iso(now)) for article in _alert_articles(eligible)],
             )
         archive["updated_at"] = _iso(now)
         _save_archive(archive)
@@ -504,7 +506,19 @@ def _drain_notification_outbox(now: datetime) -> None:
         with _archive_transaction():
             archive = _load_archive()
             outbox = _prune_sent_events(_notification_outbox(archive.get("telegram_outbox", [])), now)
+            # Keep sent and uncertain receipts. Eligible members of an old mixed
+            # pending digest are still in the article queue until acknowledgement.
+            outbox = [
+                event for event in outbox
+                if event["status"] != "pending" or all(
+                    is_investing_world_article(article) for article in event["articles"]
+                )
+            ]
             archive["telegram_outbox"] = outbox
+            archive["telegram_pending_articles"] = [
+                article for article in _notification_articles(archive.get("telegram_pending_articles", []))
+                if is_investing_world_article(article)
+            ]
             _prune_recent_articles(archive, now)
             initial_event_ids = [event["event_id"] for event in outbox if event["status"] == "pending"]
             _save_archive(archive)
@@ -580,7 +594,7 @@ def _create_pending_digest_event(
     }
     pending = [
         article for article in _notification_articles(archive.get("telegram_pending_articles", []))
-        if str(article.get("url", "")).strip() not in reserved_urls
+        if is_investing_world_article(article) and str(article.get("url", "")).strip() not in reserved_urls
     ]
     selected, _, removed_urls = _select_general_digest_articles_with_removed(
         pending, now, _notification_times(archive.get("telegram_topic_last_sent_at", {})),

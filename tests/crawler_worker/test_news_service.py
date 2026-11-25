@@ -11,6 +11,9 @@ from unittest.mock import patch
 from tests._test_support import prepare_service_import
 
 
+INVESTING_WORLD = {"category": "KR_WORLD", "source": "Investing.com 한국어"}
+
+
 class CrawlerWorkerNewsServiceTests(unittest.TestCase):
     @staticmethod
     def timestamp(**delta):
@@ -233,7 +236,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     "collect_korean_news_from_sources",
                     return_value=[
                         {
-                            "url": "https://example.com/alert",
+                            **INVESTING_WORLD,
+                            "url": "https://kr.investing.com/news/alert",
                             "title": "미 연준, 기준금리 동결 결정",
                             "title_ko": "미 연준, 기준금리 동결 결정",
                             "source": "Investing.com 한국어",
@@ -243,7 +247,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     news_archive._refresh_category("KR_WORLD", limit=1)
 
         notify.assert_called_once()
-        self.assertEqual(notify.call_args.args[0][0]["url"], "https://example.com/alert")
+        self.assertEqual(notify.call_args.args[0][0]["url"], "https://kr.investing.com/news/alert")
 
     def test_load_archive_sanitizes_existing_html_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -418,7 +422,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     "collect_korean_news_from_sources",
                     return_value=[
                         {
-                            "url": "https://example.com/oil",
+                            **INVESTING_WORLD,
+                            "url": "https://kr.investing.com/news/oil",
                             "title": "국제유가 WTI 상승",
                             "title_ko": "국제유가 WTI 상승",
                             "source": "Investing.com 한국어",
@@ -473,7 +478,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 })
                 article = news_archive._attach_archive_metadata(
                     {
-                        "url": "https://example.com/alert",
+                        **INVESTING_WORLD,
+                        "url": "https://kr.investing.com/news/alert",
                         "title": "미 연준 기준금리 동결",
                         "source": "Investing.com 한국어",
                     },
@@ -495,7 +501,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
                 news_archive = self.reload_news_archive()
                 now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-                article = {"url": "https://example.com/alert", "title": "중요 기사", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
+                article = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/alert", "title": "중요 기사", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
                 event = news_archive.notification_event("alert", [article], now.isoformat())
                 news_archive._save_archive({
                     "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
@@ -518,7 +524,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
                 news_archive = self.reload_news_archive()
                 now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-                article = {"url": "https://example.com/digest", "title": "시장 뉴스", "market_topic": "미국"}
+                article = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/digest", "title": "시장 뉴스", "market_topic": "미국"}
                 news_archive._save_archive({
                     "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
                     "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
@@ -545,10 +551,10 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
                 now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
                 alerts = [
-                    {"url": f"https://example.com/alert-{number}", "title": f"중요 {number}", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
+                    {**INVESTING_WORLD, "url": f"https://kr.investing.com/news/alert-{number}", "title": f"중요 {number}", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
                     for number in (1, 2)
                 ]
-                digest_article = {"url": "https://example.com/digest", "title": "시장 뉴스", "market_topic": "미국"}
+                digest_article = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/digest", "title": "시장 뉴스", "market_topic": "미국"}
                 news_archive._save_archive({
                     "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
                     "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
@@ -571,7 +577,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
                 news_archive = self.reload_news_archive()
                 now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-                alert = {"url": "https://example.com/alert-save", "title": "중요", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
+                alert = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/alert-save", "title": "중요", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
                 event = news_archive.notification_event("alert", [alert], now.isoformat())
                 news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True, "telegram_outbox": [event]})
 
@@ -604,7 +610,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
                 news_archive = self.reload_news_archive()
                 now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-                article = {"url": "https://example.com/digest-retry", "title": "시장", "market_topic": "미국"}
+                article = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/digest-retry", "title": "시장", "market_topic": "미국"}
                 event = news_archive.notification_event("digest", [article], now.isoformat())
                 news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True, "telegram_last_digest_at": now.isoformat(), "telegram_pending_articles": [article], "telegram_outbox": [event]})
                 with patch.object(news_archive, "notify_market_news_digest", return_value=False) as notify:
@@ -616,12 +622,40 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 notify.assert_called_once_with([article])
                 self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "sent")
 
+    def test_mixed_pending_news_cannot_block_world_digest(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            "os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}
+        ):
+            news_archive = self.reload_news_archive()
+            now = datetime(2026, 8, 20, 10, tzinfo=timezone.utc)
+            world = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/world", "title": "미국 증시"}
+            tech = {"category": "KR_IT", "url": "https://example.com/tech", "title": "신제품"}
+            old = dict(tech, url="https://example.com/old")
+            mixed = news_archive.notification_event("digest", [world, tech], now.isoformat())
+            uncertain = news_archive.notification_event("alert", [old], now.isoformat())
+            uncertain["status"] = "uncertain"
+            news_archive._save_archive({
+                "articles": [world, tech],
+                "telegram_pending_articles": [world, tech],
+                "telegram_outbox": [mixed, uncertain],
+            })
+            with patch.object(news_archive, "notify_market_news_digest", return_value=True) as notify:
+                news_archive._drain_notification_outbox(now)
+            notify.assert_called_once_with([dict(world, market_topic="미국")])
+            archive = news_archive._load_archive()
+            self.assertEqual({a["url"] for a in archive["articles"]}, {world["url"], tech["url"]})
+            self.assertEqual(archive["telegram_pending_articles"], [])
+            self.assertEqual(
+                [(event["status"], event["article_urls"]) for event in archive["telegram_outbox"]],
+                [("uncertain", [old["url"]]), ("sent", [world["url"]])],
+            )
+
     def test_outbox_normalization_pruning_and_digest_reservation_contract(self):
         """Fails if malformed state survives, IDs vary by order, old sent events persist, or reserved URLs reseat."""
         news_archive = self.reload_news_archive()
         now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-        first = {"url": "https://example.com/one", "title": "one"}
-        second = {"url": "https://example.com/two", "title": "two"}
+        first = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/one", "title": "one"}
+        second = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/two", "title": "two"}
         self.assertEqual(
             news_archive.notification_event("digest", [first, second], now.isoformat())["event_id"],
             news_archive.notification_event("digest", [second, first], now.isoformat())["event_id"],
@@ -641,7 +675,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
                 now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
                 news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True})
-                article = news_archive._attach_archive_metadata({"url": "https://example.com/enqueue-fail", "title": "미 연준 기준금리 동결", "source": "Investing.com 한국어"}, "KR_WORLD", now)
+                article = news_archive._attach_archive_metadata({**INVESTING_WORLD, "url": "https://kr.investing.com/news/enqueue-fail", "title": "미 연준 기준금리 동결", "source": "Investing.com 한국어"}, "KR_WORLD", now)
                 with patch.object(news_archive, "_save_archive", side_effect=OSError("enqueue disk full")), patch.object(news_archive, "notify_new_investing_articles") as notify:
                     with self.assertRaises(OSError):
                         news_archive._commit_collected_articles("KR_WORLD", [article], now)
@@ -669,7 +703,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "archive.json")}, clear=False):
                     news_archive = self.reload_news_archive()
                     now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-                    article = {"url": "https://example.com/durable-digest", "title": "국제유가 상승", "market_topic": "원유"}
+                    article = {**INVESTING_WORLD, "url": "https://kr.investing.com/news/durable-digest", "title": "국제유가 상승", "market_topic": "원유"}
                     news_archive._save_archive({"articles": [], "telegram_notifications_initialized": True,
                                                 "telegram_pending_articles": [article]})
                     save = news_archive._save_archive
@@ -728,7 +762,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive._save_archive({
                     "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
                     "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
-                    "telegram_pending_articles": [{"url": "https://example.com/selected", "title": "국제유가 상승"}],
+                    "telegram_pending_articles": [{**INVESTING_WORLD, "url": "https://kr.investing.com/news/selected", "title": "국제유가 상승"}],
                 })
                 sending = Event()
                 release = Event()
@@ -753,7 +787,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                         news_archive._commit_collected_articles(
                             "KR_WORLD",
                             [news_archive._attach_archive_metadata(
-                                {"url": "https://example.com/new", "title": "미 연준 기준금리 동결", "source": "Investing.com 한국어"},
+                                {**INVESTING_WORLD, "url": "https://kr.investing.com/news/new", "title": "미 연준 기준금리 동결", "source": "Investing.com 한국어"},
                                 category="KR_WORLD",
                                 now=now,
                             )],
@@ -762,7 +796,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                         with news_archive._ARCHIVE_WRITE_LOCK:
                             latest = news_archive._load_archive()
                             latest["telegram_pending_articles"].append(
-                                {"url": "https://example.com/concurrent-general", "title": "기업 실적"})
+                                {**INVESTING_WORLD, "url": "https://kr.investing.com/news/concurrent-general", "title": "기업 실적"})
                             news_archive._save_archive(latest)
                     finally:
                         release.set()
@@ -772,10 +806,10 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 self.assertEqual(sender_errors, [])
                 latest = news_archive._load_archive()
                 self.assertEqual([article["url"] for article in latest["telegram_pending_articles"]],
-                                 ["https://example.com/concurrent-general"])
-                self.assertIn("https://example.com/new", {article["url"] for article in latest["articles"]})
+                                 ["https://kr.investing.com/news/concurrent-general"])
+                self.assertIn("https://kr.investing.com/news/new", {article["url"] for article in latest["articles"]})
                 outbox = latest["telegram_outbox"]
-                self.assertTrue(any(event["kind"] == "alert" and event["status"] == "pending" and event["article_urls"] == ["https://example.com/new"] for event in outbox))
+                self.assertTrue(any(event["kind"] == "alert" and event["status"] == "pending" and event["article_urls"] == ["https://kr.investing.com/news/new"] for event in outbox))
 
     def test_direct_and_background_collections_preserve_both_articles(self):
         """Fails if a background refresh saves an archive snapshot from before a direct refresh."""
@@ -817,7 +851,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive._save_archive({
                     "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
                     "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
-                    "telegram_pending_articles": [{"url": "https://example.com/oil", "title": "국제유가 상승"}],
+                    "telegram_pending_articles": [{**INVESTING_WORLD, "url": "https://kr.investing.com/news/oil", "title": "국제유가 상승"}],
                 })
 
                 def lock_is_available():
@@ -857,7 +891,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     news_archive._save_archive({
                         "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
                         "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
-                        "telegram_pending_articles": [{"url": "https://example.com/oil", "title": "국제유가 상승"}],
+                        "telegram_pending_articles": [{**INVESTING_WORLD, "url": "https://kr.investing.com/news/oil", "title": "국제유가 상승"}],
                     })
                     patch_args = {"side_effect": notifier} if isinstance(notifier, Exception) else {"return_value": notifier}
                     with patch.object(news_archive, "notify_market_news_digest", **patch_args):
@@ -869,7 +903,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
                     self.assertEqual(
                         [article["url"] for article in news_archive._load_archive()["telegram_pending_articles"]],
-                        ["https://example.com/oil"],
+                        ["https://kr.investing.com/news/oil"],
                     )
 
     def test_concurrent_general_articles_enqueue_once_each(self):
@@ -881,7 +915,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive._save_archive({
                     "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
                     "telegram_last_digest_at": now.isoformat(),
-                    "telegram_pending_articles": [{"url": "https://example.com/existing", "title": "기존 시장 기사"}],
+                    "telegram_pending_articles": [{**INVESTING_WORLD, "url": "https://kr.investing.com/news/existing", "title": "기존 시장 기사"}],
                 })
                 barrier = Barrier(2)
                 errors = []
@@ -889,7 +923,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 def collect(category, limit):
                     barrier.wait(timeout=2)
                     article_id = current_thread().name
-                    return [{"url": f"https://example.com/{article_id}", "title": f"{article_id} 시장 기사", "source": "Investing.com 한국어"}]
+                    return [{**INVESTING_WORLD, "url": f"https://kr.investing.com/news/{article_id}", "title": f"{article_id} 시장 기사", "source": "Investing.com 한국어"}]
 
                 def run(category):
                     try:
@@ -915,7 +949,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 ]
                 self.assertEqual(
                     set(pending_urls),
-                    {"https://example.com/existing", "https://example.com/pending-1", "https://example.com/pending-2"},
+                    {"https://kr.investing.com/news/existing", "https://kr.investing.com/news/pending-1", "https://kr.investing.com/news/pending-2"},
                 )
                 self.assertEqual(len(pending_urls), len(set(pending_urls)))
                 digest_notify.assert_not_called()
