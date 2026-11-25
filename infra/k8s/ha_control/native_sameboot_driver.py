@@ -9,6 +9,7 @@ from .initial_postboot import saved_reboot, scope as postboot_scope
 from .initial_unpublished import derive_predecessor
 from .native_saved_reboot import WindowsSavedReboot
 from .native_saved_observers import WindowsSavedObservers
+from .native_saved_site_material import WindowsSavedSiteMaterial
 from .native_sameboot_successor import WindowsSamebootHost
 from .native_guest_ssh import GuestSshDispatcher
 from .native_stdio_bridge import GUEST_QUIESCE_SAMEBOOT_SUCCESSOR, RECOVERY_START_ORDER, VERSION, Request, _bytes as _wire_bytes
@@ -59,9 +60,12 @@ class NativeSamebootDriver:
         if phase == 'preflight' and operation['scope'].get('saved_reboot') is True:
             _need(type(self.saved_boot) is WindowsSavedReboot
                   and callable(getattr(self.platform, 'quiesce_operation', None))
-                  and callable(getattr(self.platform, 'saved_observers', None)))
+                  and callable(getattr(self.platform, 'saved_observers', None))
+                  and callable(getattr(self.platform, 'saved_material', None))
+                  and callable(getattr(self.platform, 'prepare_material', None))
+                  and callable(getattr(self.platform, 'successor_options', None)))
             self.saved_boot.verify_boot_task(deadline)
-            self.release.pair.check_release(deadline)
+            self.release.check_predecessor_ready(deadline)
         if phase in (*SAVED_STAGES, 'restore_saved_guests'):
             _need(type(self.saved_boot) is WindowsSavedReboot and operation['scope'].get('saved_reboot') is True)
             # A suspended VM cannot answer app or DB queries. The native
@@ -87,8 +91,13 @@ class NativeSamebootDriver:
                 else:
                     closed = self.release.pair.closed_pair_after_reboot(
                         original['terminal_sha256'], host.config['boot_pin'], deadline)
+                if phase == 'arm_host' and not observe_only and operation['scope'].get('saved_reboot') is True:
+                    _need(host.observe_seal(deadline) == chain['seal_material']['acceptance_sha256'])
             else:
                 closed = self.release.observe_closed(operation, chain, deadline)
+                if phase == 'arm_host' and operation['scope'].get('saved_reboot') is True:
+                    host = self._host(operation, chain, deadline)
+                    _need(host.observe_seal(deadline) == chain['seal_material']['acceptance_sha256'])
             _need(closed['terminal_sha256'] == original['terminal_sha256']
                   and closed['revision'] == original['revision']
                   and closed['closed_nodes'] == ['A', 'B']
@@ -110,7 +119,10 @@ class NativeSamebootDriver:
             _need(material['candidate']['windows_initial_observer']['windows_boot_sha256']
                   == chain['restore_saved_guests']['windows_boot_sha256'])
         bridge = {'reboot_pair': self.release.pair} if reboot else {}
-        return WindowsSamebootHost(self.windows, material=material, **self.successor_options, **bridge)
+        options = self.successor_options
+        if operation['scope'].get('saved_reboot') is True:
+            options = self.platform.successor_options(operation, chain, material, deadline)
+        return WindowsSamebootHost(self.windows, material=material, **options, **bridge)
 
     def _publication(self, host, published, operation, chain, deadline):
         armed = chain['arm_host']
@@ -207,6 +219,44 @@ class NativeSamebootDriver:
         endpoints = (observer.observe if observe_only else observer.apply)(deadline)
         return {'windows_boot_sha256': resumed['windows_boot_sha256'], 'observers': endpoints}
 
+    def _publish_material(self, operation, chain, deadline, *, mode):
+        _need(operation['scope'].get('saved_reboot') is True and operation['stage'] == 'publish_material')
+        publisher = self.platform.saved_material(operation, chain, deadline)
+        _need(type(publisher) is WindowsSavedSiteMaterial and publisher.pair is self.release.pair)
+        result = publisher.verify(deadline, mode=mode)
+        return {field: result[field] for field in ('plan_sha256', 'approval_sha256', 'authority_issued')}
+
+    def prepare_material(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(operation['scope'].get('saved_reboot') is True and operation['stage'] == 'publish_material')
+        return self.platform.prepare_material(operation, chain, deadline) is True
+
+    def reconcile_metadata(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(operation['scope'].get('saved_reboot') is True
+              and operation['stage'] in {'publish_material', 'seal_material'})
+        if operation['stage'] == 'publish_material':
+            evidence = self._publish_material(operation, chain, deadline, mode='reconcile')
+        else:
+            evidence = self._seal_material(operation, chain, deadline, observe_only=False, allow_existing=True)
+        return _reply(request, evidence)
+
+    def _seal_material(self, operation, chain, deadline, *, observe_only, allow_existing=False):
+        host = self._host(operation, chain, deadline)
+        published = chain['publish_material']
+        _need(host.checked['plan_sha256'] == published['plan_sha256']
+              and host.config['parameters']['ApprovalSha256'] == published['approval_sha256'])
+        if not _expects_reboot(operation['scope'], chain):
+            previous = chain['close_pair']
+            closed = self.release.pair.closed_pair(previous['terminal_sha256'], deadline)
+            _need(_closed(closed, previous['revision'], previous['terminal_sha256']))
+        if observe_only:
+            seal = host.observe_seal(deadline)
+        else:
+            seal = host.seal(deadline, allow_existing=allow_existing)
+            _need(host.observe_seal(deadline) == seal)
+        return {'plan_sha256': published['plan_sha256'], 'acceptance_sha256': seal}
+
     def _dispatch(self, request, receipts, deadline, *, observe_only):
         operation, chain = _decoded(request, receipts)
         phase = operation['stage']
@@ -221,6 +271,10 @@ class NativeSamebootDriver:
             evidence = self._quiesce_apps(operation, chain, deadline, observe_only=observe_only)
         elif phase == 'rebind_observers':
             evidence = self._rebind_observers(operation, chain, deadline, observe_only=observe_only)
+        elif phase == 'publish_material':
+            evidence = self._publish_material(operation, chain, deadline, mode='observe' if observe_only else 'apply')
+        elif phase == 'seal_material':
+            evidence = self._seal_material(operation, chain, deadline, observe_only=observe_only)
         elif phase in (*SAVED_STAGES, 'restore_saved_guests'):
             _need(type(self.saved_boot) is WindowsSavedReboot)
             evidence = self.saved_boot.run(operation, chain, deadline, observe_only=observe_only)

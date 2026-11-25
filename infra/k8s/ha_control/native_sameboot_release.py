@@ -14,7 +14,7 @@ import time
 
 from . import native_guest_runtime as runtime, native_stdio_bridge as wire
 from .controller import TransitionBlocked
-from .sameboot_transition import _digest, _encoded, _scope, _validate
+from .sameboot_transition import _closed, _digest, _encoded, _scope, _validate
 
 ERROR = "sameboot_release_unconfirmed"
 
@@ -128,10 +128,12 @@ class WindowsPairClosure:
                   and resumed_windows_boot != previous_boot)
         live_boot = resumed_windows_boot if resumed_windows_boot is not None else previous_boot
         challenge = wire._digest(bytes.fromhex(secrets.token_hex(32) + live_boot))
+        paired = mode in {"closed", "closed_after_arm", "closed_before_disable"}
+        inventory = verify_runtime or paired
         config = self.config | {"mode": mode, "terminal_sha256": terminal_sha256,
-            "challenge": challenge, "live_boot_sha256": live_boot, "files": self.files,
-            "sql": base64.b64encode(PAIRED_SQL.encode()).decode("ascii"), "successor": successor,
-            "verify_runtime": verify_runtime or mode in {"closed", "closed_after_arm", "closed_before_disable"}}
+            "challenge": challenge, "live_boot_sha256": live_boot, "files": self.files if inventory else {},
+            "sql": base64.b64encode(PAIRED_SQL.encode()).decode("ascii") if paired else None,
+            "successor": successor, "verify_runtime": inventory}
         # The real old manifest contains hundreds of files. Compress only the
         # in-memory config so the fixed SSH source-size limit is preserved.
         blob = base64.b64encode(gzip.compress(_encoded(config), mtime=0)).decode("ascii")
@@ -314,6 +316,12 @@ class NativeSamebootRelease:
         _validate("preflight", receipts.get("preflight"), self.scope, receipts)
         raw, chain = _encoded(request), _encoded(receipts)
         _need(self.custody_guard(raw, chain, deadline, observe_only=observe_only) is True)
+        if self.expected_stopped_terminal_sha256 is not None:
+            terminal = self.expected_stopped_terminal_sha256
+            self.check_predecessor_ready(deadline)
+            _need(self.custody_guard(raw, chain, deadline, observe_only=True) is True)
+            return {"terminal_sha256": terminal, "previous_instance_sha256": self.scope["previous_instance_sha256"],
+                    "previous_closure_verified": True}
         if not observe_only:
             self.pair.request_release(deadline)
         stopped = self.pair.snapshot(deadline)
@@ -323,6 +331,16 @@ class NativeSamebootRelease:
         _need(self.custody_guard(raw, chain, deadline, observe_only=True) is True)
         return {"terminal_sha256": terminal, "previous_instance_sha256": self.scope["previous_instance_sha256"],
                 "cooperative_release_verified": True}
+
+    def check_predecessor_ready(self, deadline):
+        terminal = self.expected_stopped_terminal_sha256
+        if terminal is None:
+            self.pair.check_release(deadline)
+            return
+        stopped = self.pair.snapshot(deadline, verify_runtime=True)
+        _need(stopped['status'] == 'STOPPED' and stopped['terminal_sha256'] == terminal)
+        closed = self.pair.closed_pair_before_disable(terminal, deadline)
+        _need(_closed(closed, self.scope['previous_revision'] + 1, terminal))
 
     def observe(self, request_raw, receipts_raw, deadline):
         request, receipts = self._request(request_raw, receipts_raw)
@@ -391,11 +409,12 @@ function Pin([byte[]]$bytes){
  $sha=[Security.Cryptography.SHA256]::Create()
  try{[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
-function Assert-Path([string]$p,[bool]$directory,[string]$reader=''){
+function Assert-Path([string]$p,[bool]$directory,[string]$reader='', [hashtable]$checkedParents=$null){
  $item=Get-Item -LiteralPath $p -Force
  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.PSIsContainer -ne $directory){throw 'stage_path'}
  for($entry=$item;$null -ne $entry;$entry=if($entry -is [IO.FileInfo]){$entry.Directory}else{$entry.Parent}){
   if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'stage_ancestor'}
+  if($null -ne $checkedParents -and $entry.FullName -cne $item.FullName -and $checkedParents.ContainsKey($entry.FullName)){break}
   $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $entry.FullName).Sddl)
   $osRoot=$entry.FullName -ceq 'C:\' -and $sd.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
   if(($sd.Owner.Value -cnotin $allowed -and -not $osRoot) -or $null -eq $sd.DiscretionaryAcl){throw 'stage_acl'}
@@ -503,16 +522,19 @@ if($cfg.verify_runtime){
   if($expected.ContainsKey($property.Name)){throw 'release_runtime'}
   $expected.Add($property.Name,$property.Value)
  }
- $count=0;$pending=[Collections.Generic.Stack[string]]::new();$pending.Push($cfg.runtime)
+ # Check each directory before descending into it. Its write ACL excludes
+ # principals outside the Windows TCB, so sibling files reuse that check.
+ $count=0;$checkedParents=@{};$pending=[Collections.Generic.Stack[string]]::new();$pending.Push($cfg.runtime)
  while($pending.Count -gt 0){
-  $directory=$pending.Pop();$null=Assert-Path $directory $true $sid
+  $directory=$pending.Pop();$parent=Assert-Path $directory $true $sid $checkedParents
+  $checkedParents[$parent.FullName]=$true
   foreach($path in [IO.Directory]::GetFileSystemEntries($directory)){
    $entry=Get-Item -LiteralPath $path -Force
    if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'release_runtime'}
    if($entry.PSIsContainer){$pending.Push($path);continue}
    $name=$path.Substring($cfg.runtime.TrimEnd('\').Length+1).Replace('\','/')
    if(-not $expected.ContainsKey($name)){throw 'release_runtime'}
-   $spec=$expected[$name];$entry=Assert-Path $path $false $sid
+   $spec=$expected[$name];$entry=Assert-Path $path $false $sid $checkedParents
    if($entry.Length -ne $spec.bytes -or -not ($entry.Attributes -band [IO.FileAttributes]::ReadOnly) -or
       (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $spec.sha256){throw 'release_runtime'}
    $count++

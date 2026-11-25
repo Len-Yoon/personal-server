@@ -31,6 +31,10 @@ SAVED_SCOPE_FIELDS = {'saved_reboot', 'saved_vm_pair_sha256', 'previous_windows_
 ERROR = 'sameboot_transition_unconfirmed'
 
 
+class SavedRuntimeVerificationBlocked(TransitionBlocked):
+    """Windows returned a verified-format rejection of the recovery runtime."""
+
+
 def _need(condition, reason=ERROR):
     if not condition:
         raise TransitionBlocked(reason)
@@ -195,10 +199,13 @@ def _validate(stage, value, scope, receipts):
         if scope.get('saved_reboot'):
             _need(value['terminal_sha256'] == receipts['release_writer']['terminal_sha256'])
     elif stage == 'release_writer':
+        common = {'terminal_sha256', 'previous_instance_sha256'}
+        proof = set(value) - common
         _need(scope.get('saved_reboot') is True
-              and set(value) == {'terminal_sha256', 'previous_instance_sha256', 'cooperative_release_verified'}
+              and common <= value.keys()
+              and proof in ({'cooperative_release_verified'}, {'previous_closure_verified'})
               and value['previous_instance_sha256'] == scope['previous_instance_sha256']
-              and _pin(value['terminal_sha256']) and value['cooperative_release_verified'] is True)
+              and _pin(value['terminal_sha256']) and value[next(iter(proof))] is True)
     elif stage == 'close_pair':
         _need(set(value) == {'closed_nodes', 'synchronous', 'same_expiry', 'replay_verified',
                              'effects_isolated', 'revision', 'terminal_sha256', 'closed_proof_sha256'})
@@ -258,6 +265,16 @@ def _validate(stage, value, scope, receipts):
                   and type(row['pipe_name']) is str and re.fullmatch(r'n100ha-(?:lease|recovery)-proof-[0-9a-f]{32}', row['pipe_name'])
                   and _pin(row['key_sha256']) for row in endpoints)
               and all(len({row[field] for row in endpoints}) == len(OBSERVER_ROLES) for field in OBSERVER_ENDPOINT))
+    elif stage == 'publish_material':
+        _need(scope.get('saved_reboot') is True
+              and set(value) == {'plan_sha256', 'approval_sha256', 'authority_issued'}
+              and _pin(value['plan_sha256']) and _pin(value['approval_sha256'])
+              and value['authority_issued'] is False)
+    elif stage == 'seal_material':
+        _need(scope.get('saved_reboot') is True
+              and set(value) == {'plan_sha256', 'acceptance_sha256'}
+              and value['plan_sha256'] == receipts['publish_material']['plan_sha256']
+              and _pin(value['acceptance_sha256']))
     elif stage == 'arm_host':
         _need(set(value) == {'successor_image_sha256', 'plan_sha256', 'carryover_sha256', 'service_stopped'})
         carryover = receipts.get('fallback_carryover', receipts['carryover'])
@@ -344,7 +361,7 @@ class SamebootTransition:
         boundary = STAGES.index('arm_host')
         stages = list(STAGES)
         if self.scope.get('saved_reboot'):
-            stages[boundary:boundary] = SAVED_STAGES
+            stages[boundary:boundary] = (*SAVED_STAGES, 'publish_material', 'seal_material')
             stages[1:3] = ('release_writer', 'close_pair', 'quiesce_apps', 'retire_provider')
         for index, stage in enumerate(stages):
             allowed.update({stage + '.issued.json', stage + '.observed.json'})
@@ -423,7 +440,7 @@ class SamebootTransition:
         _validate(stage, record['evidence'], self.scope, receipts)
         return {'status': 'PROVIDER_RESTORED', 'receipt_sha256': _digest(record)}
 
-    def step(self, deadline, *, observe_only=False, expected_stage=None):
+    def step(self, deadline, *, observe_only=False, expected_stage=None, recover_issued_metadata=False):
         """Run the next phase once, or reconcile its prior request without reissuing it."""
         self._private()
         with exclusive(self.directory / 'lock'):
@@ -486,6 +503,8 @@ class SamebootTransition:
                               'terminal_sha256': receipts['retire_provider']['terminal_sha256'],
                               'closed_proof_sha256': fresh,
                               'previous_plan_sha256': self.scope['previous_plan_sha256']})
+                if self.scope.get('saved_reboot') is True:
+                    _need(arm['plan_sha256'] == receipts['seal_material']['plan_sha256'])
                 if observe_only:
                     _need(issued['plan_material_sha256'] == arm['plan_sha256'])
                 else:
@@ -496,11 +515,17 @@ class SamebootTransition:
                                     observe_only=observe_only) is True)
             _need(time.monotonic() < deadline)
             if not observe_only:
+                if stage == 'publish_material':
+                    _need(self.driver.prepare_material(_encoded(issued), _encoded(receipts), deadline) is True
+                          and time.monotonic() < deadline)
                 self._write(stage + '.issued.json', issued)
             if stage == 'portal':
                 reply = {'issued_sha256': _digest(issued), 'status': 'PASS', 'evidence': observe_portal(deadline)}
             else:
                 perform = self.driver.observe if observe_only or stage in READ_ONLY else self.driver.apply
+                if recover_issued_metadata and observe_only and stage in {'publish_material', 'seal_material'}:
+                    _need(self.scope.get('saved_reboot') is True)
+                    perform = self.driver.reconcile_metadata
                 reply = perform(_encoded(issued), _encoded(receipts), deadline)
             _need(time.monotonic() < deadline)
             _need(type(reply) is dict and set(reply) == {'issued_sha256', 'status', 'evidence'}
@@ -523,19 +548,22 @@ class SamebootTransition:
     def run_saved(self, deadline):
         """Continue one protected saved-VM journal across a host disconnect."""
         _need(self.scope.get('saved_reboot') is True)
-        reconcile = {*SAVED_STAGES, 'release_writer', 'close_pair', 'quiesce_apps',
-                     'retire_provider', 'restore_saved_guests',
-                     'fallback_carryover', 'arm_host', 'publish', 'start_apps'}
+        reconcile = {*STAGES, *SAVED_STAGES, 'release_writer', 'quiesce_apps', 'restore_provider',
+                     'restore_saved_guests', 'publish_material', 'seal_material', 'fallback_carryover'}
         while time.monotonic() < deadline:
             before = self.status()
             if before['status'] != 'PENDING':
                 return before
             try:
-                self.step(deadline, observe_only=before['observe_only'], expected_stage=before['stage'])
+                self.step(deadline, observe_only=before['observe_only'], expected_stage=before['stage'],
+                          recover_issued_metadata=True)
+            except SavedRuntimeVerificationBlocked:
+                raise
             except (BridgeRejected, OSError, TransitionBlocked):
                 # The write-ahead record is the authority for whether an
-                # operation can be retried. After disconnect, poll readback
-                # only, including when shutdown gave a successful exit code.
+                # operation can be retried. After disconnect, poll readback.
+                # Plan publication and sealing can also finish the exact,
+                # previously recorded intent when the target file is absent.
                 pending = self.status()
                 if (pending['status'] != 'PENDING' or pending['stage'] != before['stage']
                         or not pending['observe_only'] or pending['stage'] not in reconcile):
@@ -597,7 +625,7 @@ def main(argv=None):
             result = transition.step(time.monotonic() + args.seconds, observe_only=args.mode == 'observe')
     except TransitionBlocked as error:
         reason = str(error)
-        if reason not in {ERROR, 'sameboot_transition_journal_untrusted',
+        if not isinstance(error, SavedRuntimeVerificationBlocked) and reason not in {ERROR, 'sameboot_transition_journal_untrusted',
                           'sameboot_transition_reconciliation_required', 'sameboot_transition_no_action_to_observe',
                           'saved_reboot_reconciliation_pending'}:
             reason = ERROR

@@ -241,6 +241,7 @@ class WindowsSamebootHost:
         allow_saved_reboot = isinstance(reboot_pair, WindowsPairClosure)
         checked = bind_successor_plan(**material, allow_saved_reboot=allow_saved_reboot)
         plan = material['candidate']
+        self.acceptance = _decode(material['files'][FILES[5]])
         postboot = scope(plan)
         _need(saved_reboot(postboot) == allow_saved_reboot)
         _need(allow_saved_reboot or reboot_pair is None)
@@ -306,10 +307,11 @@ class WindowsSamebootHost:
               and all(closed[field] is True for field in ('synchronous', 'same_expiry',
                                                          'replay_verified', 'effects_isolated')))
 
-    def seal(self, deadline):
+    def seal(self, deadline, *, allow_existing=False):
         """Create acceptance through the native stopped-instance verifier."""
+        _need(type(allow_existing) is bool)
         self._verify_reboot_pair(deadline)
-        result = self._run(r"""
+        body = r"""
 $source=$utf.GetString((Read-Pin $cfg.starter_path $cfg.starter_pin $cfg.starter_max_bytes))
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
@@ -317,13 +319,28 @@ if($errors.Count -ne 0){throw 'sameboot_successor_source'}
 foreach($definition in $ast.EndBlock.Statements){
  if($definition -is [Management.Automation.Language.FunctionDefinitionAst]){. ([scriptblock]::Create($definition.Extent.Text))}
 }
-Seal-HaInitialPostbootAcceptance $cfg.parameters.PlanPath $cfg.parameters.PlanSha256
+Seal-HaInitialPostbootAcceptance $cfg.parameters.PlanPath $cfg.parameters.PlanSha256 __ALLOW_EXISTING__
 $seal=Join-Path ([IO.Path]::GetDirectoryName($cfg.parameters.PlanPath)) 'postboot-acceptance-seal.json'
 $raw=Read-Safe $seal 65536
 @{acceptance_sha256=(Digest $raw)}|ConvertTo-Json -Compress
-""", deadline)
+"""
+        result = self._run(body.replace('__ALLOW_EXISTING__', '-AllowExistingSeal' if allow_existing else ''),
+                           deadline)
         _need(set(result) == {'acceptance_sha256'} and _pin(result['acceptance_sha256']))
         return result['acceptance_sha256']
+
+    def observe_seal(self, deadline):
+        """Reconcile acceptance without asking the native sealer to write."""
+        self._verify_reboot_pair(deadline)
+        result = self._run(r"""
+$path=Join-Path ([IO.Path]::GetDirectoryName($cfg.parameters.PlanPath)) 'postboot-acceptance-seal.json'
+$raw=Read-Safe $path 2500
+@{data=[Convert]::ToBase64String($raw)}|ConvertTo-Json -Compress
+""", deadline)
+        _need(set(result) == {'data'} and type(result['data']) is str)
+        raw = base64.b64decode(result['data'], validate=True)
+        _need(_decode(raw) == self.acceptance)
+        return _sha(raw)
 
     def _invoke(self, deadline, *, arm):
         body = r"""

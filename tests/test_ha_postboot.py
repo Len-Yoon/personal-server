@@ -1305,6 +1305,39 @@ class SamebootPostbootPgTests(PostbootPgTests):
 class SamebootTransitionDriverTests(unittest.TestCase):
     """Production boundaries as typed fake driver responses, without native I/O."""
 
+    def test_saved_runtime_reports_only_typed_native_verification_failure(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ha_control.native_saved_site_runtime import WindowsSavedSiteRuntime
+
+        runtime = object.__new__(WindowsSavedSiteRuntime)
+        runtime._config = {}
+        runtime._manifest_sha256 = '2' * 64
+        powershell = Mock(return_value={'status': 'BLOCKED', 'step': 'incoming',
+                                       'reason': 'runtime_stage_private_acl_rejected'})
+        runtime.pair = SimpleNamespace(windows=SimpleNamespace(powershell=powershell))
+        deadline = self.clock() + 2
+        with self.assertRaisesRegex(TransitionBlocked, '^incoming:runtime_stage_private_acl_rejected$'):
+            runtime._call('preflight', None, deadline)
+        powershell.return_value['reason'] = 'unstructured diagnostic'
+        with self.assertRaisesRegex(TransitionBlocked, '^native_saved_site_runtime_unconfirmed$'):
+            runtime._call('preflight', None, deadline)
+
+    def test_saved_runtime_adopts_only_the_pinned_staged_journal(self):
+        from unittest.mock import Mock
+        from ha_control.native_saved_site_runtime import WindowsSavedSiteRuntime
+
+        runtime = object.__new__(WindowsSavedSiteRuntime)
+        runtime._staged_journal_sha256 = '2' * 64
+        runtime._call = Mock(return_value={'native_journal_sha256': '2' * 64})
+        deadline = self.clock() + 2
+        terminal = '3' * 64
+        self.assertEqual(runtime._observe_staged(terminal, deadline), runtime._call.return_value)
+        runtime._call.assert_called_once_with('observe', terminal, deadline)
+        runtime._call.return_value = {'native_journal_sha256': '1' * 64}
+        with self.assertRaisesRegex(TransitionBlocked, '^native_saved_site_runtime_unconfirmed$'):
+            runtime._observe_staged(terminal, deadline)
+
     def test_private_journal_read_accepts_atime_only_and_rejects_metadata_drift(self):
         import os
         from tempfile import TemporaryDirectory
@@ -1384,6 +1417,11 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         if stage == 'rebind_observers':
             return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS',
                     'evidence': {'windows_boot_sha256': self.new_boot, 'observers': self.observers}}
+        if stage in {'publish_material', 'seal_material'}:
+            pin = {'approval_sha256': 'a7' * 32, 'authority_issued': False} if stage == 'publish_material' else {
+                'acceptance_sha256': 'a8' * 32}
+            return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS',
+                    'evidence': {'plan_sha256': self.plan, **pin}}
         if stage in (*self.module.SAVED_STAGES, 'restore_saved_guests'):
             old = stage in {'save_guests','restore_saved_guests'}
             running = stage in {'resume_guests','restore_saved_guests'}
@@ -1453,6 +1491,10 @@ class SamebootTransitionDriverTests(unittest.TestCase):
 
     def arm_material(self, _request, _chain, _deadline):
         return {'candidate': {}, 'previous_raw': b'', 'plan_pin': self.plan, 'files': {}}
+
+    def prepare_material(self, request, _chain, _deadline):
+        self.calls.append(('prepare', json.loads(request)['stage']))
+        return True
 
     def arm_binding(self):
         return {'plan_sha256': self.plan, 'carryover_sha256': self.carryover,
@@ -1608,10 +1650,12 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         platform = Mock()
         platform.guard.return_value = True
         host = SimpleNamespace(checked={'plan_sha256':self.plan,'successor_image_sha256':'4'*64},
-                               config={'image_path_pin':'8'*64,'boot_pin':boot})
+                               config={'image_path_pin':'8'*64,'boot_pin':boot},
+                               observe_seal=Mock(return_value='e'*64))
         driver = NativeSamebootDriver(release=release, platform=platform, windows=None, successor_options={},
                                       paired_publication=None, apps_factory=None)
-        chain = encode({'close_pair': closed, 'arm_host': {'plan_sha256': self.plan}})
+        chain = encode({'close_pair': closed, 'arm_host': {'plan_sha256': self.plan},
+                        'seal_material': {'acceptance_sha256': 'e'*64}})
         saved = {'scope': {'saved_reboot': True}}
         arm = encode(saved | {'stage':'arm_host','plan_material_sha256':self.plan})
         publish = encode(saved | {'stage':'publish'})
@@ -1629,7 +1673,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
 
     def test_saved_reboot_journal_binds_archival_and_fresh_closed_proofs(self):
         self.saved_scope()
-        for _ in range(12):
+        for _ in range(14):
             self.step()
         plan, files = SamebootPostbootSealTests().saved_reboot_fixture()
         plan['windows_initial_observer'].update(self.observers['legacy'])
@@ -1665,6 +1709,10 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.driver.status()['stage'], 'rebind_observers')
         self.step()
+        self.assertEqual(self.driver.status()['stage'], 'publish_material')
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'seal_material')
+        self.step()
         self.assertEqual(self.driver.status()['stage'], 'arm_host')
         self.assertEqual(self.calls.count(('apply','reboot_windows')), 1)
         self.assertEqual(self.calls.count(('apply','resume_guests')), 1)
@@ -1694,8 +1742,9 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertFalse(bind.call_args.kwargs['allow_saved_reboot'])
         self.assertIn(('observe','save_guests'), self.calls)
         self.assertNotIn(('apply','reboot_windows'), self.calls)
-        self.assertEqual([stage for kind, stage in self.calls if kind == 'apply'][-5:],
-                         ['restore_saved_guests', 'fallback_carryover', 'arm_host', 'publish', 'start_apps'])
+        self.assertEqual([stage for kind, stage in self.calls if kind == 'apply'][-7:],
+                         ['restore_saved_guests', 'fallback_carryover', 'publish_material', 'seal_material',
+                          'arm_host', 'publish', 'start_apps'])
 
     def test_only_an_authenticated_unissued_reboot_cancellation_opens_fallback(self):
         self.saved_scope()
@@ -1760,6 +1809,29 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertEqual(calls, ['close_pair', 'close_pair'])
         self.assertEqual(self.driver.status()['stage'], 'quiesce_apps')
         self.assertNotIn(('apply', 'quiesce_apps'), self.calls)
+
+    def test_saved_runner_reconciles_material_using_original_issued_request(self):
+        self.saved_scope()
+        while self.driver.status()['stage'] != 'publish_material':
+            self.step()
+        self.fail_apply = 'publish_material'
+        with self.assertRaises(OSError):
+            self.step()
+        issued = self.driver.directory / 'publish_material.issued.json'
+        original = issued.read_bytes()
+        self.denied_guard = 'seal_material'
+
+        def reconcile(request, chain, deadline):
+            self.assertEqual(request, original)
+            return self.result(request, 'reconcile')
+
+        with patch.object(self, 'reconcile_metadata', side_effect=reconcile, create=True) as recover:
+            with self.assertRaises(TransitionBlocked):
+                self.driver.run_saved(self.clock() + 10)
+        recover.assert_called_once()
+        self.assertEqual(issued.read_bytes(), original)
+        self.assertEqual(self.calls.count(('apply', 'publish_material')), 1)
+        self.assertEqual(self.driver.status()['stage'], 'seal_material')
 
     def test_lost_app_reply_uses_native_completion_without_starting(self):
         from types import SimpleNamespace
@@ -1869,15 +1941,22 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         _, files = SamebootPostbootSealTests().transition_fixture()
         encode = self.module._encoded
         old = json.loads(files['postboot-predecessor-plan.json'])
-        old['windows_recovery_observers'].update(held_admission={'server_pid': 200}, provider_isolation={})
+        old['windows_initial_observer']['key_sha256'] = '5' * 64
+        old['windows_recovery_observers'].update(held_admission={'server_pid': 200, 'key_sha256': '6' * 64},
+                                                 provider_isolation={'key_sha256': '7' * 64})
         old['pg_enforcement'] = {'definition_sha256': '1' * 64, 'effects': {'code_sha256': '2' * 64}}
+        prior_root = PureWindowsPath('C:/ProgramData/N100HA-InitialCutover') / ('b1' * 20)
+        prior_binding = prior_root / PureWindowsPath(old['initial_service_start']['binding_path']).name
+        old['initial_service_start']['binding_path'] = str(prior_binding)
         old_raw = encode(old)
         old_pin = hashlib.sha256(old_raw).hexdigest()
         terminal = encode(json.loads(files[FILES[0]]) | {'controller_plan_sha256': old_pin})
-        binding = encode(json.loads(files[FILES[1]]) | {'controller_plan_sha256': old_pin})
+        binding = encode(json.loads(files[FILES[1]]) | {'controller_plan_sha256': old_pin,
+                         'state_path': str(prior_root / 'journal/controller-state.json')})
         lines = files[FILES[2]].decode().splitlines()
-        args = ('\n'.join('plan_sha256=' + old_pin if line.startswith('plan_sha256=') else line
-                          for line in lines) + '\n').encode()
+        changes = {'plan_sha256': old_pin, 'plan_path': str(prior_root / 'plan.json')}
+        args = ('\n'.join(key + '=' + changes.get(key, value) for key, value, in
+                          (line.split('=', 1) for line in lines)) + '\n').encode()
         recovery = old['initial_cutover_recovery']['attempt_id']
         provenance = dict.fromkeys((*native.PROVENANCE, 'enforced_adapter_sha256', 'enforced_driver_sha256'), '3' * 64)
         provenance.update(source_commit='a' * 40, enforced_definition_sha256='1' * 64,
@@ -2013,6 +2092,44 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         isolated_windows.powershell.return_value = {'acceptance_sha256': 'cc'*32}
         self.assertEqual(reboot_host.seal(deadline), 'cc'*32)
         pair.closed_pair_after_reboot.assert_called_with(draft['predecessor_terminal_sha256'], 'b0'*32, deadline)
+        import base64
+        raw_seal = reboot_material['files'][FILES[5]]
+        isolated_windows.powershell.return_value = {'data': base64.b64encode(raw_seal).decode()}
+        self.assertEqual(reboot_host.observe_seal(deadline), hashlib.sha256(raw_seal).hexdigest())
+        isolated_windows.powershell.return_value = {'data': base64.b64encode(b'{}').decode()}
+        with self.assertRaises(TransitionBlocked):
+            reboot_host.observe_seal(deadline)
+
+        from ha_control.native_saved_site_material import COPY_FILES, WindowsSavedSiteMaterial
+        material_pair = object.__new__(WindowsPairClosure)
+        material_pair.config = pair.config | {'plan': str(prior_root / 'plan.json'),
+                                             'binding': str(prior_binding)}
+        material_pair.closed_pair_after_reboot = Mock(return_value=closed)
+        material_pair.windows = Mock()
+        approval = encode({'schema_version': 1, 'action': 'ha-resume-initial-writer',
+                           'authority_kind': 'installed-runtime', 'installed_at': '2026-11-25T00:00:00Z',
+                           'installation_id': reboot_material['candidate']['installation_id'],
+                           'plan_sha256': reboot_material['plan_pin'], 'source_commit': provenance['source_commit']})
+        code = ROOT / 'infra/k8s/ha_control'
+        publisher = WindowsSavedSiteMaterial(
+            material_pair, material=reboot_material, approval=approval,
+            copy_pins=dict.fromkeys(COPY_FILES, 'd' * 64) | {'initial-cutover-proof.key': '5' * 64,
+                       'initial-recovery-held_admission.key': '6' * 64,
+                       'initial-recovery-provider_isolation.key': '7' * 64},
+            vm_ids={node: row.vm_id_sha256 for node, row in hardware.items()},
+            private_io_sha256=hashlib.sha256((code / 'stopped_service_installer/PrivateIo.cs').read_bytes()).hexdigest(),
+            saved_reboot_script_sha256=hashlib.sha256((code / 'windows-saved-reboot.ps1').read_bytes()).hexdigest(),
+            material_manifest_path=str(PureWindowsPath(runtime['path']).parent /
+                ('incoming-runtime-' + runtime['manifest_sha256'][:24]) / 'runtime-manifest.json'))
+        material_pair.windows.powershell.return_value = {
+            'status': 'MATERIAL_VERIFIED', 'mode': 'observe', 'plan_sha256': publisher.plan_pin,
+            'approval_sha256': publisher.approval_pin, 'authority_issued': False}
+        self.assertEqual(publisher.verify(deadline)['mode'], 'observe')
+        source = material_pair.windows.powershell.call_args.args[0]
+        self.assertLessEqual(len(source.encode()), 131072)
+        self.assertIn("if($cfg.mode -ceq 'apply')", source)
+        self.assertNotIn('postboot-acceptance-seal.json', publisher.config['entries'])
+        self.assertNotIn('postboot-runtime-manifest.json', publisher.config['entries'])
         isolated_windows.powershell.reset_mock()
         isolated_windows.powershell.return_value = {
             'host_handoff_armed': True, 'plan_sha256': reboot_material['plan_pin'],
