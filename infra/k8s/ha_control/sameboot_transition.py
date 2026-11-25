@@ -131,6 +131,14 @@ def _complete(receipts):
     return RECOVERED_WITHOUT_REBOOT if 'restore_saved_guests' in receipts else 'COMPLETE'
 
 
+def _observer_endpoint(row):
+    return (type(row) is dict and set(row) == OBSERVER_ENDPOINT
+            and type(row['server_pid']) is int and row['server_pid'] > 0
+            and type(row['pipe_name']) is str
+            and re.fullmatch(r'n100ha-(?:lease|recovery)-proof-[0-9a-f]{32}', row['pipe_name']) is not None
+            and _pin(row['key_sha256']))
+
+
 def _fallback_attempt(scope):
     return _digest({'purpose': 'recover_partial_vm_save', 'attempt_sha256': scope['attempt_sha256'],
                     'previous_plan_sha256': scope['previous_plan_sha256'],
@@ -253,7 +261,9 @@ def _validate(stage, value, scope, receipts):
         if stage == 'fallback_carryover':
             _need(value['carryover_sha256'] != receipts['carryover']['carryover_sha256'])
     elif stage == 'connect_rollback_held':
-        _need('verify_restored_pair' in receipts and set(value) == {'held_observation_sha256'}
+        _need('verify_restored_pair' in receipts and set(value) == {'held_observation_sha256', 'held_endpoint'}
+              and _observer_endpoint(value['held_endpoint'])
+              and value['held_endpoint']['pipe_name'].startswith('n100ha-recovery-proof-')
               and _pin(value['held_observation_sha256'])
               and value['held_observation_sha256'] == receipts['carryover']['carryover_sha256'])
     elif stage == 'stage_runtime':
@@ -286,10 +296,7 @@ def _validate(stage, value, scope, receipts):
               and value['windows_boot_sha256'] == receipts['resume_guests']['windows_boot_sha256']
               and type(value['observers']) is dict and set(value['observers']) == set(OBSERVER_ROLES))
         endpoints = tuple(value['observers'].values())
-        _need(all(type(row) is dict and set(row) == OBSERVER_ENDPOINT
-                  and type(row['server_pid']) is int and row['server_pid'] > 0
-                  and type(row['pipe_name']) is str and re.fullmatch(r'n100ha-(?:lease|recovery)-proof-[0-9a-f]{32}', row['pipe_name'])
-                  and _pin(row['key_sha256']) for row in endpoints)
+        _need(all(_observer_endpoint(row) for row in endpoints)
               and all(len({row[field] for row in endpoints}) == len(OBSERVER_ROLES) for field in OBSERVER_ENDPOINT))
     elif stage == 'publish_material':
         _need(scope.get('saved_reboot') is True
@@ -528,8 +535,11 @@ class SamebootTransition:
                           and postboot_scope(material['candidate'])['attempt_id'] == _fallback_attempt(self.scope))
                     if 'verify_restored_pair' in receipts:
                         pre = json.loads(material['files'][FILES[3]])
+                        held = material['candidate']['windows_recovery_observers']['held_admission']
                         _need({node: data['vm_id_sha256'] for node, data in pre['guests'].items()}
-                              == restored['vm_id_sha256'])
+                              == restored['vm_id_sha256']
+                              and {key: held.get(key) for key in OBSERVER_ENDPOINT}
+                              == receipts['connect_rollback_held']['held_endpoint'])
                     fresh = restored['closed_pair']['closed_proof_sha256']
                 else:
                     fresh = receipts['close_pair']['closed_proof_sha256']

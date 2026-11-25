@@ -107,6 +107,8 @@ class SavedSitePlanAssembly:
                   and type(data['fallback_observers']) is dict
                   and set(data['fallback_observers']) == {'legacy', 'held_admission', 'provider_isolation'})
             observers = data['fallback_observers']
+            if 'verify_restored_pair' in chain:
+                _need(observers['held_admission'] == chain['connect_rollback_held']['held_endpoint'])
         prior = self.previous
         material = assemble_material(prior['plan'], terminal, prior['binding'], prior['args'], prior['stopped'],
                                      previous_sha256=self.scope['previous_plan_sha256'], attempt=attempt,

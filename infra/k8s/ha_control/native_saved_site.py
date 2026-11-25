@@ -78,9 +78,10 @@ class SavedSitePlatform:
             return {'status': 'PASS', 'evidence': evidence}
         if phase == 'connect_rollback_held':
             pin = chain['carryover']['carryover_sha256']
-            held_pin = self.guest_site.observe_held_carryover(operation, chain, pin, deadline, observe_only=observe_only)
-            _need(_pin(pin) and held_pin == pin and time.monotonic() < deadline)
-            return {'status': 'PASS', 'evidence': {'held_observation_sha256': held_pin}}
+            evidence = self.guest_site.observe_held_carryover(operation, chain, pin, deadline, observe_only=observe_only)
+            _validate(phase, evidence, self.scope, chain)
+            _need(time.monotonic() < deadline)
+            return {'status': 'PASS', 'evidence': evidence}
         if phase in {'carryover', 'fallback_carryover'}:
             evidence = self.guest_site.carryover(operation, chain, deadline, observe_only=observe_only)
             return {'status': 'PASS', 'evidence': evidence}

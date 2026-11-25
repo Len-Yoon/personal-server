@@ -1443,7 +1443,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                     'status': 'REJECTED', 'evidence': {'replacement_failed': True}}
         if stage == 'connect_rollback_held':
             return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS',
-                    'evidence': {'held_observation_sha256': carryover}}
+                    'evidence': {'held_observation_sha256': carryover, 'held_endpoint': self.observers['held_admission']}}
         app_check = 'app_inventory_verified' if self.driver.scope.get('saved_reboot') else 'all_apps_stopped'
         evidence = {
             'preflight': {
@@ -1579,6 +1579,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         portal = dict(landing_http=200, health_http=[200, 200, 200],
                       health_started_monotonic=[now-21, now-11, now-1])
         wrong_vm_id = True
+        wrong_observer = True
 
         def material(_operation, receipts, _deadline):
             chain = json.loads(receipts)
@@ -1587,6 +1588,9 @@ class SamebootTransitionDriverTests(unittest.TestCase):
             plan, files = SamebootPostbootSealTests().transition_fixture()
             plan['initial_recovery_postboot']['attempt_id'] = self.module._fallback_attempt(self.driver.scope)
             plan['windows_initial_observer']['windows_boot_sha256'] = self.old_boot
+            plan['windows_recovery_observers']['held_admission'] = self.observers['held_admission'].copy()
+            if wrong_observer:
+                plan['windows_recovery_observers']['held_admission']['server_pid'] += 1
             pre = json.loads(files[FILES[3]])
             for node, pin in self.saved_vm_ids.items():
                 pre['guests'][node]['vm_id_sha256'] = 'f' * 64 if wrong_vm_id and node == 'B' else pin
@@ -1601,6 +1605,10 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                 self.driver.run_saved(self.clock() + 100)
             self.assertNotIn(('apply', 'arm_host'), self.calls)
             wrong_vm_id = False
+            with self.assertRaises(TransitionBlocked):
+                self.driver.run_saved(self.clock() + 100)
+            self.assertNotIn(('apply', 'arm_host'), self.calls)
+            wrong_observer = False
             result = self.driver.run_saved(self.clock() + 100)
 
         self.assertEqual(result['status'], self.module.RECOVERED_AFTER_PROVIDER_ROLLBACK)
