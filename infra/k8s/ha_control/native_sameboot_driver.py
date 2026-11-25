@@ -13,7 +13,7 @@ from .native_saved_site_material import WindowsSavedSiteMaterial
 from .native_sameboot_successor import WindowsSamebootHost
 from .native_guest_ssh import GuestSshDispatcher
 from .native_stdio_bridge import GUEST_QUIESCE_SAMEBOOT_SUCCESSOR, RECOVERY_START_ORDER, VERSION, Request, _bytes as _wire_bytes
-from .sameboot_transition import ROLLBACK_RESUME_FIELD, SAVED_STAGES, _closed, _expects_reboot, _sameboot_recovery
+from .sameboot_transition import ROLLBACK_RESUME_FIELD, SAVED_STAGES, _closed, _expects_reboot, _pin, _sameboot_recovery
 
 ERROR = 'sameboot_native_driver_unconfirmed'
 PRE_PUBLISH_CLOSED = {'quiesce_apps', 'replace_provider', 'restore_provider', 'carryover', 'fallback_carryover', 'stage_runtime',
@@ -65,7 +65,8 @@ class NativeSamebootDriver:
                   and callable(getattr(self.platform, 'prepare_material', None))
                   and callable(getattr(self.platform, 'successor_options', None)))
             if operation['scope'].get(ROLLBACK_RESUME_FIELD) is True:
-                _need(callable(getattr(self.platform, 'verify_restored_provider', None)))
+                _need(all(callable(getattr(self.platform, name, None)) for name in
+                          ('verify_restored_provider', 'capture_before_save', 'seal_before_reboot')))
             self.saved_boot.verify_boot_task(deadline)
             self.release.check_predecessor_ready(deadline)
         if phase in (*SAVED_STAGES, 'restore_saved_guests'):
@@ -283,6 +284,12 @@ class NativeSamebootDriver:
             if phase == 'verify_restored_pair':
                 _need(observe_only)
                 _need(self.platform.verify_restored_provider(operation, chain, deadline) is True)
+            verified_inputs = operation['scope'].get(ROLLBACK_RESUME_FIELD) is True
+            if verified_inputs and not observe_only:
+                if phase == 'save_guests':
+                    _need(_pin(self.platform.capture_before_save(operation, chain, deadline)))
+                elif phase == 'reboot_windows':
+                    _need(_pin(self.platform.seal_before_reboot(operation, chain, deadline)))
             evidence = self.saved_boot.run(operation, chain, deadline, observe_only=observe_only)
             if phase == 'save_guests' and observe_only and evidence['states'] != {'A':'Saved','B':'Saved'}:
                 return _reply(request, evidence, status='REJECTED')

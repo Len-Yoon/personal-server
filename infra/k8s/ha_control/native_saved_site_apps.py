@@ -297,14 +297,21 @@ class SavedSiteApps:
         self.guard();wire._remaining(deadline)
         return result
 
-    def attest_rollback_carryover(self, operation, chain, deadline, *, draft, predecessor_plan, observe_only):
+    def attest_carryover(self, operation, chain, deadline, *, draft, predecessor_plan, observe_only):
         self._operation(operation, 'carryover', deadline)
         scope = operation['scope']
-        recovery = chain['verify_restored_pair']
+        recovery = chain.get('verify_restored_pair')
+        if recovery is None:
+            _need(chain.get('replace_provider', {}).get('owned_port') is True)
+            closed = chain['close_pair']
+            expected_attempt = scope['attempt_sha256']
+        else:
+            closed = recovery['closed_pair']
+            expected_attempt = _fallback_attempt(scope)
         _need(type(observe_only) is bool and type(predecessor_plan) is bytes and 0 < len(predecessor_plan) <= 65536
               and wire._digest(predecessor_plan) == scope['previous_plan_sha256']
-              and _closed(recovery['closed_pair'], self.closed_revision, self.terminal_pin)
-              and type(draft) is dict and draft['attempt_id'] == _fallback_attempt(scope)
+              and _closed(closed, self.closed_revision, self.terminal_pin)
+              and type(draft) is dict and draft['attempt_id'] == expected_attempt
               and draft['predecessor_terminal_sha256'] == self.terminal_pin)
         stop = self.read_quiesce_request()
         stopped = chain['quiesce_apps']

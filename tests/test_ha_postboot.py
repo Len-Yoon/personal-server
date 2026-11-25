@@ -1484,7 +1484,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
             'start_apps': {'instance_sha256': self.instance, 'startup_sha256': 'f' * 64,
                            'ready': list(self.module.RECOVERY_START_ORDER)},
         }[stage]
-        if stage == 'carryover' and self.reject_provider and self.driver.scope.get(self.module.ROLLBACK_RESUME_FIELD):
+        if stage == 'carryover' and self.driver.scope.get(self.module.ROLLBACK_RESUME_FIELD):
             del evidence['held_observation_sha256']
         return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS', 'evidence': evidence}
 
@@ -1714,8 +1714,8 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         deadline = self.clock() + 10
 
         def run(observe_only):
-            return adapter.attest_rollback_carryover(op, chain, deadline, draft=draft, predecessor_plan=plan_raw,
-                                                    observe_only=observe_only)
+            return adapter.attest_carryover(op, chain, deadline, draft=draft, predecessor_plan=plan_raw,
+                                           observe_only=observe_only)
 
         self.assertEqual(run(False), pin)
         data, source, streamed_plan, _ = adapter._exchange_guest.call_args.args
@@ -1744,6 +1744,42 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertEqual(self.calls.count(('apply', 'carryover')), 1)
         self.assertEqual(self.calls.count(('apply', 'connect_rollback_held')), 1)
         self.assertEqual(self.driver.status()['stage'], 'stage_runtime')
+
+    def test_native_saved_carryover_precedes_fresh_observers_without_claiming_held_observation(self):
+        self.saved_scope()
+        self.driver.scope = self.module._scope(self.driver.scope | {self.module.ROLLBACK_RESUME_FIELD: True})
+        while self.driver.status()['stage'] != 'carryover':
+            self.step()
+        self.assertEqual(self.step()['stage'], 'carryover')
+        receipt = json.loads((self.driver.directory / 'carryover.observed.json').read_bytes())['evidence']
+        self.assertEqual(receipt, {'history_sha256': self.scope['history_sha256'], 'carryover_sha256': self.carryover})
+        while self.driver.status()['stage'] != 'rebind_observers':
+            self.step()
+        self.assertEqual(self.step()['stage'], 'rebind_observers')
+        self.assertNotIn(('apply', 'connect_rollback_held'), self.calls)
+
+    def test_native_saved_capture_and_seal_required_before_vm_mutations(self):
+        from ha_control.native_saved_reboot import WindowsSavedReboot
+        from ha_control.native_sameboot_driver import NativeSamebootDriver
+
+        self.saved_scope()
+        scope = self.driver.scope | {self.module.ROLLBACK_RESUME_FIELD: True}
+        saved = object.__new__(WindowsSavedReboot)
+        saved.pair = Mock()
+        saved.run = Mock(return_value={'states': {'A': 'Saved', 'B': 'Saved'}})
+        platform = Mock(capture_before_save=Mock(return_value=False), seal_before_reboot=Mock(return_value=None))
+        driver = NativeSamebootDriver(release=Mock(pair=saved.pair), platform=platform, windows=None,
+                                      successor_options={}, paired_publication=None, apps_factory=None, saved_boot=saved)
+        deadline = self.clock() + 10
+        for phase, hook in (('save_guests', platform.capture_before_save), ('reboot_windows', platform.seal_before_reboot)):
+            request = self.module._encoded({'stage': phase, 'scope': scope})
+            with self.assertRaises(TransitionBlocked):
+                driver.apply(request, b'{}', deadline)
+            saved.run.assert_not_called()
+            hook.return_value = '7' * 64
+            self.assertEqual(driver.apply(request, b'{}', deadline)['status'], 'PASS')
+            saved.run.assert_called_once()
+            saved.run.reset_mock()
 
     def test_native_publication_reads_exact_carryover_without_issuing_guest_operation(self):
         import base64

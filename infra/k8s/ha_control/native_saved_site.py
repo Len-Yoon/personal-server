@@ -13,7 +13,7 @@ from .native_saved_site_provider_replace import SavedSiteProviderReplace
 from .native_saved_site_publication import SavedSitePublication
 from .native_saved_site_runtime import WindowsSavedSiteRuntime
 from .native_sameboot_successor import draft_postboot
-from .sameboot_transition import ROLLBACK_RESUME_FIELD, _fallback_attempt, _pin, _scope, _validate
+from .sameboot_transition import ROLLBACK_RESUME_FIELD, _expects_reboot, _fallback_attempt, _pin, _scope, _validate
 from .native_stdio_bridge import _need as require
 
 
@@ -31,7 +31,7 @@ class SavedSitePlatform:
     """
 
     def __init__(self, scope, *, host_paths, runtime, observers, plan, guest_site,
-                 applications, provider_replacement, stopped_terminal=None):
+                 applications, provider_replacement, stopped_terminal=None, save_evidence=None):
         self.scope = _scope(scope)
         _need(self.scope.get('saved_reboot') is True
               and type(host_paths) is SavedSiteHostPaths and type(runtime) is WindowsSavedSiteRuntime
@@ -43,11 +43,15 @@ class SavedSitePlatform:
                       ('guard', 'preflight', 'carryover'))
               and callable(applications) and callable(provider_replacement)
               and (stopped_terminal is None or _pin(stopped_terminal)))
+        if self.scope.get(ROLLBACK_RESUME_FIELD) is True:
+            _need(all(callable(getattr(save_evidence, name, None)) for name in
+                      ('capture_before_save', 'seal_before_reboot')))
         self.host_paths, self.runtime, self.observers, self.plan = host_paths, runtime, observers, plan
         self.pair = runtime.pair
         self.guest_site, self.make_apps = guest_site, applications
         self.make_provider = provider_replacement
         self.stopped_terminal = stopped_terminal
+        self.save_evidence = save_evidence
         self.app_adapter = None
         self.provider_adapter = self.release = None
 
@@ -74,8 +78,8 @@ class SavedSitePlatform:
         if phase == 'stage_runtime':
             evidence = self.runtime.stage(operation, chain, deadline, observe_only=observe_only)
             return {'status': 'PASS', 'evidence': evidence}
-        if phase == 'carryover' and 'verify_restored_pair' in chain:
-            evidence = self._rollback_carryover(operation, chain, deadline, observe_only=observe_only)
+        if phase == 'carryover' and self.scope.get(ROLLBACK_RESUME_FIELD) is True:
+            evidence = self._native_carryover(operation, chain, deadline, observe_only=observe_only)
             return {'status': 'PASS', 'evidence': evidence}
         if phase == 'connect_rollback_held':
             pin = chain['carryover']['carryover_sha256']
@@ -89,14 +93,15 @@ class SavedSitePlatform:
         _need(phase in {'replace_provider', 'restore_provider'})
         return getattr(self._provider(chain), phase)(operation, chain, deadline, observe_only=observe_only)
 
-    def _rollback_carryover(self, operation, chain, deadline, *, observe_only):
+    def _native_carryover(self, operation, chain, deadline, *, observe_only):
         prior = self.plan.previous
         terminal = self.plan.read_terminal(operation, chain, deadline)
+        reboot = _expects_reboot(self.scope, chain)
+        attempt = self.scope['attempt_sha256'] if reboot else _fallback_attempt(self.scope)
         draft = draft_postboot(prior['plan'], terminal, prior['binding'], prior['args'], prior['stopped'],
-                              previous_sha256=self.scope['previous_plan_sha256'],
-                              attempt=_fallback_attempt(self.scope),
-                              successor_image_sha256=self.scope['successor_image_sha256'])
-        pin = self.applications(operation, chain, deadline).attest_rollback_carryover(
+                              previous_sha256=self.scope['previous_plan_sha256'], attempt=attempt,
+                              successor_image_sha256=self.scope['successor_image_sha256'], saved_reboot=reboot)
+        pin = self.applications(operation, chain, deadline).attest_carryover(
             operation, chain, deadline, draft=draft, predecessor_plan=prior['plan'], observe_only=observe_only)
         return {'history_sha256': self.scope['history_sha256'], 'carryover_sha256': pin}
 
@@ -136,6 +141,14 @@ class SavedSitePlatform:
     def saved_observers(self, operation, chain, deadline):
         self._check(operation, deadline)
         return self.observers(operation, chain, deadline)
+
+    def capture_before_save(self, operation, chain, deadline):
+        self._check(operation, deadline)
+        return self.save_evidence.capture_before_save(operation, chain, deadline)
+
+    def seal_before_reboot(self, operation, chain, deadline):
+        self._check(operation, deadline)
+        return self.save_evidence.seal_before_reboot(operation, chain, deadline)
 
     def prepare_material(self, operation, chain, deadline):
         return self.plan.prepare_material(operation, chain, deadline)

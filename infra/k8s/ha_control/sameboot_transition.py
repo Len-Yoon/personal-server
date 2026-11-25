@@ -253,7 +253,7 @@ def _validate(stage, value, scope, receipts):
               and value['rollback_sha256'] == receipts['preflight']['rollback_sha256'])
     elif stage in {'carryover', 'fallback_carryover'}:
         fields = {'history_sha256', 'carryover_sha256'}
-        if stage != 'carryover' or 'verify_restored_pair' not in receipts:
+        if stage != 'carryover' or scope.get(ROLLBACK_RESUME_FIELD) is not True:
             fields.add('held_observation_sha256')
             _need(value.get('held_observation_sha256') == value.get('carryover_sha256'))
         _need(set(value) == fields)
