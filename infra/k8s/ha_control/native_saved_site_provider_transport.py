@@ -20,6 +20,7 @@ from .controller import TransitionBlocked
 from .native_saved_site_apps import MARKER, _scope_request, _request
 
 ERROR = 'saved_provider_transport_unconfirmed'
+ARCHIVE_BOUNDARY_SECONDS = 60
 BOUNDARIES = {'measure': ('before', 'after'), 'create': ('before', 'dispatch', 'after'),
               'observe': ('before', 'after')}
 
@@ -136,7 +137,9 @@ class ProviderArchiveTransport:
                       and len(seen) < len(BOUNDARIES[mode]) and boundary == BOUNDARIES[mode][len(seen)]
                       and ssh._same_files(stamps))
                 seen.add(challenge)
-                limit = min(deadline, time.monotonic() + wire.ACTIVATION_BOUNDARY_SECONDS)
+                # Archive guards verify the full Windows runtime and both
+                # closed DBs. No live writer lease is renewed here.
+                limit = min(deadline, time.monotonic() + ARCHIVE_BOUNDARY_SECONDS)
                 facts = self._closed(challenge, boundary, limit)
                 if boundary in {'before','after'}:
                     proofs[boundary] = facts['closed_proof_sha256']
