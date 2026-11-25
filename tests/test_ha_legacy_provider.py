@@ -470,6 +470,30 @@ class SamebootReleaseTest(unittest.TestCase):
         pair.disable_stopped.assert_not_called()
         driver.guest.retire.assert_not_called()
 
+    def test_resume_saved_retirement_finishes_receipt_before_stopped_service_disable(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        driver.scope |= {'saved_reboot': True, 'saved_vm_pair_sha256': '6' * 64,
+                         'previous_windows_boot_sha256': '8' * 64}
+        request['scope'] = driver.scope
+        terminal = '3' * 64
+        receipts['release_writer'] = {'terminal_sha256': terminal}
+        receipts['close_pair'] = {'terminal_sha256': terminal}
+        pair = driver.pair
+        pair.snapshot = Mock(side_effect=[{'status': 'STOPPED', 'terminal_sha256': terminal, 'disabled': False},
+                                          {'status': 'STOPPED', 'terminal_sha256': terminal, 'disabled': True}])
+        pair.closed_pair_before_disable = Mock(return_value=pair.closed_pair.return_value)
+        retired = driver.guest.observe_retired.return_value
+        driver.guest.observe_retired.side_effect = [TransitionBlocked('durable_done_absent'), retired]
+        driver.guest.finish_retirement.return_value = retired
+        deadline = time.monotonic() + 30
+        evidence = driver.resume_retirement(request, receipts, deadline)
+        self.assertEqual(evidence['provider_retirement_sha256'], retired['retirement_sha256'])
+        driver.guest.retire.assert_not_called()
+        driver.guest.finish_retirement.assert_called_once()
+        pair.closed_pair_before_disable.assert_called_once_with(terminal, deadline)
+        pair.disable_stopped.assert_called_once_with(terminal, deadline)
+
     def test_changed_package_or_guard_denial_fails_before_guest_mutation(self):
         import time
         driver, request, receipts = self.coordinator()

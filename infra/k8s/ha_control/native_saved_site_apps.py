@@ -239,6 +239,12 @@ class SavedSiteApps:
         _need(_closed(result, self.closed_revision, self.terminal_pin))
         return result
 
+    def read_quiesce_request(self):
+        """Read the protected request for the issued app stop."""
+        record = self._read('quiesce-issued.json')
+        _need(record['automatic_retry'] is False)
+        return _request(record['request'])
+
     def quiesce_operation(self, operation, chain, deadline, *, observe_only):
         operation_pin = self._operation(operation, 'quiesce_apps', deadline)
         _need(type(observe_only) is bool and _closed(chain.get('close_pair'), self.closed_revision, self.terminal_pin))

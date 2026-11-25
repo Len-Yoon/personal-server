@@ -357,10 +357,34 @@ class NativeSamebootRelease:
         evidence = closed if request["stage"] == "close_pair" else {
             "previous_instance_sha256": self.scope["previous_instance_sha256"], "terminal_sha256": terminal,
             "other_observers_preserved": True, "old_service_stopped_disabled": True, "native_terminal_preserved": True}
+        if self.scope.get("saved_reboot") and request["stage"] == "retire_provider":
+            evidence["provider_retirement_sha256"] = retired["retirement_sha256"]
         return {"issued_sha256": _digest(request), "status": "PASS", "evidence": evidence}
 
     def retire_provider(self, request, receipts, deadline):
         return self.apply(_encoded(request), _encoded(receipts), deadline)["evidence"]
+
+    def resume_retirement(self, request, receipts, deadline):
+        """Finish a verified guest stop without issuing its stop command again."""
+        raw, chain = _encoded(request), _encoded(receipts)
+        self._request(raw, chain)
+        _need(self.scope.get('saved_reboot') is True and request['stage'] == 'retire_provider')
+        terminal = receipts['release_writer']['terminal_sha256']
+        _need(receipts['close_pair']['terminal_sha256'] == terminal)
+        self._guard(raw, chain, deadline, True)
+        try:
+            retired = self.guest.observe_retired(raw, chain, deadline)
+        except TransitionBlocked:
+            retired = self.guest.finish_retirement(raw, chain, deadline)
+        self._retired_guest(retired, receipts)
+        stopped = self.pair.snapshot(deadline)
+        _need(stopped['status'] == 'STOPPED' and stopped['terminal_sha256'] == terminal)
+        if not stopped['disabled']:
+            closed = self.pair.closed_pair_before_disable(terminal, deadline)
+            _need(_closed(closed, self.scope['previous_revision'] + 1, terminal))
+            self._guard(raw, chain, deadline, True)
+            self.pair.disable_stopped(terminal, deadline)
+        return self.observe(raw, chain, deadline)['evidence']
 
     def observe_retired(self, request, receipts, deadline):
         _need(request.get("stage") == "retire_provider")

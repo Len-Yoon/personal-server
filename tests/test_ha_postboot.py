@@ -1540,6 +1540,31 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.status()['status'], 'PROVIDER_RESTORED')
         self.assertNotIn(('apply', 'publish'), self.calls)
 
+    def test_saved_provider_restore_resumes_with_original_replacement_nonce(self):
+        self.saved_scope()
+        self.reject_provider = True
+        while self.driver.status()['stage'] != 'restore_provider':
+            self.step()
+        self.fail_apply = 'restore_provider'
+        with self.assertRaises(OSError):
+            self.step()
+        replacement = json.loads((self.driver.directory / 'replace_provider.issued.json').read_bytes())
+        rejected = json.loads((self.driver.directory / 'replace_provider.observed.json').read_bytes())
+        restoration = (self.driver.directory / 'restore_provider.issued.json').read_bytes()
+
+        def resume(request, receipts, deadline):
+            self.assertEqual(request, restoration)
+            self.assertEqual(json.loads(receipts)['replace_provider_failed'], {
+                'nonce': replacement['nonce'], 'receipt_sha256': self.module._digest(rejected)})
+            self.assertNotEqual(json.loads(request)['nonce'], replacement['nonce'])
+            return self.result(request, 'resume')
+
+        with patch.object(self, 'reconcile_provider_restore', side_effect=resume, create=True) as reconcile:
+            self.assertEqual(self.driver.run_saved(self.clock() + 10)['status'], 'PROVIDER_RESTORED')
+        reconcile.assert_called_once()
+        self.assertEqual(self.calls.count(('apply', 'restore_provider')), 1)
+        self.assertNotIn(('apply', 'publish'), self.calls)
+
     def test_fresh_guard_failure_neither_issues_nor_dispatches(self):
         for _ in range(3):
             self.step()

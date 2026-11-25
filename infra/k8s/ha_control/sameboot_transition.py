@@ -190,8 +190,10 @@ def _validate(stage, value, scope, receipts):
               and all(value[key] is True for key in (app_check, 'successor_runtime_verified',
                     'successor_provider_verified', 'handoff_driver_verified', 'old_provider_only_retirement')))
     elif stage == 'retire_provider':
-        _need(set(value) == {'previous_instance_sha256', 'terminal_sha256', 'other_observers_preserved',
-                             'old_service_stopped_disabled', 'native_terminal_preserved'})
+        fields = {'previous_instance_sha256', 'terminal_sha256', 'other_observers_preserved',
+                  'old_service_stopped_disabled', 'native_terminal_preserved'}
+        _need(set(value) == fields or (scope.get('saved_reboot') is True
+              and set(value) == fields | {'provider_retirement_sha256'} and _pin(value['provider_retirement_sha256'])))
         _need(value['previous_instance_sha256'] == scope['previous_instance_sha256']
               and _pin(value['terminal_sha256'])
               and all(value[key] is True for key in ('other_observers_preserved', 'old_service_stopped_disabled',
@@ -395,6 +397,7 @@ class SamebootTransition:
                     continue
                 else:
                     _need(stage == 'replace_provider' and result['evidence'] == {'replacement_failed': True})
+                    receipts['replace_provider_failed'] = {'nonce': issued['nonce'], 'receipt_sha256': _digest(result)}
                     restore = 'restore_provider'
                 self._check_entries(allowed | {restore + '.issued.json', restore + '.observed.json'})
                 return restore, _digest(result), receipts, self._read(restore + '.issued.json')
@@ -526,6 +529,10 @@ class SamebootTransition:
                 if recover_issued_metadata and observe_only and stage in {'publish_material', 'seal_material'}:
                     _need(self.scope.get('saved_reboot') is True)
                     perform = self.driver.reconcile_metadata
+                elif recover_issued_metadata and observe_only and stage == 'restore_provider':
+                    perform = self.driver.reconcile_provider_restore
+                elif recover_issued_metadata and observe_only and stage == 'retire_provider':
+                    perform = self.driver.reconcile_provider_retirement
                 reply = perform(_encoded(issued), _encoded(receipts), deadline)
             _need(time.monotonic() < deadline)
             _need(type(reply) is dict and set(reply) == {'issued_sha256', 'status', 'evidence'}

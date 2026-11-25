@@ -781,6 +781,7 @@ class RecoveryGuestProofReader:
 
 def _activation_exchange(command, payload, deadline, request_nonce, assert_windows_current, *, bind_boundary=False,
                          boundaries=ACTIVATION_BOUNDARIES, boundary_seconds=bridge.ACTIVATION_BOUNDARY_SECONDS):
+    orders = boundaries if boundaries and isinstance(boundaries[0], tuple) else (boundaries,)
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, start_new_session=True)
     complete = False
@@ -791,7 +792,7 @@ def _activation_exchange(command, payload, deadline, request_nonce, assert_windo
         while True:
             frame = channel.read(deadline)
             if frame.get('kind') != 'activation_boundary':
-                bridge._need(len(challenges) == len(boundaries) or frame.get('status') == 'UNKNOWN',
+                bridge._need(any(len(challenges) == len(order) for order in orders) or frame.get('status') == 'UNKNOWN',
                              'guest_ssh_live_windows_required')
                 bridge._need(not channel.buffer and process.wait(timeout=bridge._remaining(deadline)) == 0,
                              'guest_ssh_exit_unconfirmed')
@@ -801,10 +802,10 @@ def _activation_exchange(command, payload, deadline, request_nonce, assert_windo
             current_deadline = min(deadline, time.monotonic() + boundary_seconds)
             challenge, boundary = frame.get('challenge'), frame.get('boundary')
             fields = {'request_nonce': request_nonce, 'challenge': challenge, 'boundary': boundary}
+            index = len(challenges)
+            orders = tuple(order for order in orders if index < len(order) and boundary == order[index])
             bridge._need(bridge._matches(frame, {'kind': 'activation_boundary', **fields})
-                         and bridge._hash(challenge) and challenge not in challenges
-                         and len(challenges) < len(boundaries)
-                         and boundary == boundaries[len(challenges)],
+                         and bridge._hash(challenge) and challenge not in challenges and orders,
                          'guest_ssh_activation_boundary_unbound')
             challenges.add(challenge)
             proof = (assert_windows_current(challenge, boundary, current_deadline) if bind_boundary

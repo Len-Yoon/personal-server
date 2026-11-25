@@ -310,3 +310,13 @@ class NativeSamebootDriver:
 
     def observe(self, request, receipts, deadline):
         return self._dispatch(request, receipts, deadline, observe_only=True)
+
+    def reconcile_provider_restore(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(operation['stage'] == 'restore_provider' and operation['scope'].get('saved_reboot') is True)
+        evidence = self.platform.resume_provider_restore(operation, chain, deadline)
+        return _reply(request, evidence)
+
+    def reconcile_provider_retirement(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        return _reply(request, self.release.resume_retirement(operation, chain, deadline))
