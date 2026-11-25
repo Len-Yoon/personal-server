@@ -10,7 +10,7 @@ import time
 from dataclasses import replace
 from . import native_stdio_bridge as wire
 from .controller import TransitionBlocked
-from .initial_postboot import sameboot, scope, stopped_attempt
+from .initial_postboot import published_postboot, scope, stopped_attempt
 
 ERROR='initial_app_resume_unverified'
 FIELDS={'schema_version','request','args','hold_sha256','service_instance_sha256',
@@ -26,7 +26,7 @@ def need(value):
 
 def supports(request):
     return request.verb==wire.GUEST_START_INITIAL_UNPUBLISHED or (
-        request.verb==wire.GUEST_START_INITIAL_POSTBOOT and sameboot(request.args.get('postboot')))
+        request.verb==wire.GUEST_START_INITIAL_POSTBOOT and published_postboot(request.args.get('postboot')))
 
 def prefix(request):
     need(supports(request) and request.node=='A')

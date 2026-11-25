@@ -70,11 +70,11 @@ def derive_predecessor(raw, expected_sha256, *, published):
         scope(context|{'initial_unpublished_recovery':prior[field]})
         need(prior['revision']>=8)
     else:
-        from .initial_postboot import scope as postboot_scope, sameboot, after_unpublished, RESUME_KIND
+        from .initial_postboot import scope as postboot_scope, published_postboot, after_unpublished, RESUME_KIND
         previous=postboot_scope(context|{'initial_recovery_postboot':prior[field]})
         need(published and prior['revision']>=8
-             and (sameboot(previous)==(prior['kind']==RESUME_KIND))
-             and (sameboot(previous) or after_unpublished(previous)==(prior['kind']=='initial-wsl-cutover-postboot-unpublished')))
+             and (published_postboot(previous)==(prior['kind']==RESUME_KIND))
+             and (published_postboot(previous) or after_unpublished(previous)==(prior['kind']=='initial-wsl-cutover-postboot-unpublished')))
     if published:
         need(prior['sequence']>0)
     elif field=='rearm':

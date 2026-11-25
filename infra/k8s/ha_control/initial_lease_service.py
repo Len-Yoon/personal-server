@@ -13,7 +13,7 @@ import time
 from .controller import Journal, TransitionBlocked, exclusive
 from .initial_unpublished import ACTION as UNPUBLISHED_ACTION, KIND as UNPUBLISHED_KIND, scope as unpublished_scope
 from .initial_pg_lease import InitialPgLeasePostbootResume
-from .initial_postboot import ACTION as POSTBOOT_ACTION, scope as postboot_scope, after_unpublished, sameboot, RESUME_KIND
+from .initial_postboot import ACTION as POSTBOOT_ACTION, scope as postboot_scope, after_unpublished, published_postboot, RESUME_KIND
 from .initial_pg_lease import (
     INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, RECOVERY_ACTION, RECOVERY_FIELDS, RECOVERY_OPEN_REVISION,
     REARM_ACTION, InitialPgLeaseRearm, InitialPgLeasePostboot, InitialPgLeasePostbootAfterUnpublished, InitialPgLeaseUnpublishedRecovery, rearm_scope,
@@ -535,7 +535,7 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False, stop_r
             if postboot is not None:
                 from .initial_unpublished import derive_predecessor
                 revision=derive_predecessor(backend.fence_adapter._predecessor_terminal,postboot['predecessor_terminal_sha256'],published=True)[1]
-                stable.update(kind=RESUME_KIND if sameboot(postboot) else ('initial-wsl-cutover-postboot-unpublished' if after_unpublished(postboot) else 'initial-wsl-cutover-postboot'), postboot=postboot, revision=revision)
+                stable.update(kind=RESUME_KIND if published_postboot(postboot) else ('initial-wsl-cutover-postboot-unpublished' if after_unpublished(postboot) else 'initial-wsl-cutover-postboot'), postboot=postboot, revision=revision)
             if unpublished is not None:
                 from .initial_unpublished import derive_predecessor
                 revision=derive_predecessor(backend.fence_adapter._predecessor_terminal,unpublished['predecessor_terminal_sha256'],published=False)[1]
@@ -558,7 +558,7 @@ def _serve(backend, journal_path, observer, handoff, *, recovering=False, stop_r
         if stop_requested is not None and stop_requested(0):
             raise TransitionBlocked('initial_service_stop_before_open')
         journal.save(stable | {'phase': 'opening', 'sequence': 0})
-        lease_type = InitialPgLeaseUnpublishedRecovery if unpublished is not None else ((InitialPgLeasePostbootResume if sameboot(postboot) else (InitialPgLeasePostbootAfterUnpublished if after_unpublished(postboot) else InitialPgLeasePostboot)) if postboot is not None else (InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease)))
+        lease_type = InitialPgLeaseUnpublishedRecovery if unpublished is not None else ((InitialPgLeasePostbootResume if published_postboot(postboot) else (InitialPgLeasePostbootAfterUnpublished if after_unpublished(postboot) else InitialPgLeasePostboot)) if postboot is not None else (InitialPgLeaseRearm if rearm is not None else (InitialPgLeaseRecovery if recovering else InitialPgLease)))
         lease = lease_type(backend, closure, assert_exclusion_held=exclusion, **lease_options)
         sequence = 0
         failure_code = None

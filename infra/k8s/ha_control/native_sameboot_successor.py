@@ -7,7 +7,7 @@ import re
 import time
 
 from .controller import TransitionBlocked
-from .initial_postboot import FILES, SAMEBOOT_KIND, scope, stopped_attempt
+from .initial_postboot import FILES, SAMEBOOT_KIND, SAVED_REBOOT_KIND, saved_reboot, scope, stopped_attempt
 from .initial_unpublished import derive_predecessor
 from .initial_windows_gate import _args, _decode, _path
 from .sameboot_transition import _encoded, bind_successor_plan
@@ -21,6 +21,7 @@ START_FIELDS = {'ServiceName', 'ServiceHostSha256', 'PlanPath', 'PlanSha256', 'A
                 'ApprovalSha256', 'BindingPath', 'PreflightPath', 'PreflightSha256',
                 'ScmVerifierPath', 'ExpectedActivationIntentSha256', 'RecoveryAttemptId',
                 'RecoveryReservationSha256'}
+STARTER_FILE_MAX_BYTES = 160 * 1024
 
 
 def _need(condition):
@@ -43,11 +44,12 @@ def host_path(recovery, attempt):
 
 
 def draft_postboot(previous_raw, terminal_raw, binding_raw, args_raw, stop_raw, *,
-                   previous_sha256, attempt, successor_image_sha256):
+                   previous_sha256, attempt, successor_image_sha256, saved_reboot=False):
     """Construct fixed identity fields for the guest's one-shot carryover request."""
     _need(all(type(raw) is bytes and 0 < len(raw) <= 262144
               for raw in (previous_raw, terminal_raw, binding_raw, args_raw, stop_raw)))
-    _need(_sha(previous_raw) == previous_sha256 and _pin(attempt) and _pin(successor_image_sha256))
+    _need(_sha(previous_raw) == previous_sha256 and _pin(attempt) and _pin(successor_image_sha256)
+          and type(saved_reboot) is bool)
     old = _decode(previous_raw)
     previous = scope(old)
     terminal = _decode(terminal_raw)
@@ -67,7 +69,8 @@ def draft_postboot(previous_raw, terminal_raw, binding_raw, args_raw, stop_raw, 
     return {'schema_version': 1, 'attempt_id': attempt, 'predecessor_terminal_sha256': _sha(terminal_raw),
             'predecessor_binding_sha256': _sha(binding_raw), 'predecessor_args_sha256': _sha(args_raw),
             'predecessor_seal_sha256': '0' * 64, 'previous_windows_boot_sha256': boot,
-            'closure_mode': 'windows-offline-v1', 'predecessor_kind': SAMEBOOT_KIND,
+            'closure_mode': 'windows-offline-v1',
+            'predecessor_kind': SAVED_REBOOT_KIND if saved_reboot else SAMEBOOT_KIND,
             'predecessor_plan_sha256': previous_sha256, 'stopped_attempt_id': stopped_attempt(previous),
             'stopped_receipt_sha256': stop_pin, 'carryover_receipt_sha256': '0' * 64,
             'previous_service_image_sha256': identity['service_image_sha256'],
@@ -84,15 +87,18 @@ def _endpoint(old, current):
 
 
 def assemble_material(previous_raw, terminal_raw, binding_raw, args_raw, stop_raw, *,
-                      previous_sha256, attempt, successor_image_sha256, runtime, observers, evidence):
+                      previous_sha256, attempt, successor_image_sha256, runtime, observers, evidence,
+                      pre_save_seal=None):
     """Prepare native input bytes from verified runtime, closure and observer receipts.
 
     The acceptance file in this result is the expected native result. The Windows
     sealer creates the actual file after checking the real predecessor and SCM.
     """
+    reboot = pre_save_seal is not None
+    _need(not reboot or (type(pre_save_seal) is bytes and 0 < len(pre_save_seal) <= 8192))
     postboot = draft_postboot(previous_raw, terminal_raw, binding_raw, args_raw, stop_raw,
                              previous_sha256=previous_sha256, attempt=attempt,
-                             successor_image_sha256=successor_image_sha256)
+                             successor_image_sha256=successor_image_sha256, saved_reboot=reboot)
     old = _decode(previous_raw)
     identity = old['windows_enforced']
     recovery = old['initial_cutover_recovery']['attempt_id']
@@ -130,29 +136,39 @@ def assemble_material(previous_raw, terminal_raw, binding_raw, args_raw, stop_ra
         name: _endpoint(old_recovery[name], observers[name]) for name in ('held_admission', 'provider_isolation')}
     _need(all(len({record[key] for record in observers.values()}) == 3 for key in ENDPOINT_FIELDS))
     _need(observers['held_admission']['server_pid'] != old_recovery['held_admission']['server_pid'])
+    state_fields = ('saved', 'resumed') if reboot else ('observed',)
+    boot_fields = {'new_windows_boot_sha256'} if reboot else set()
     _need(type(evidence) is dict and set(evidence) == {'closed_pair_sha256', 'closed_revision', 'carryover_sha256',
-          'guests', 'observed', 'guest_observation_sha256', 'clock_ca_validated', 'fresh_vsock'})
+          'guests', 'guest_observation_sha256', 'clock_ca_validated', 'fresh_vsock'} | set(state_fields) | boot_fields)
     closed, _, _ = derive_predecessor(terminal_raw, postboot['predecessor_terminal_sha256'], published=True)
     _need(type(evidence['closed_revision']) is int and evidence['closed_revision'] == closed)
     _need(_pin(evidence['closed_pair_sha256']) and _pin(evidence['carryover_sha256']))
     postboot['carryover_receipt_sha256'] = evidence['carryover_sha256']
-    boot = postboot['previous_windows_boot_sha256']
+    previous_boot = postboot['previous_windows_boot_sha256']
+    boot = evidence.get('new_windows_boot_sha256', previous_boot)
+    _need(_pin(boot) and ((boot != previous_boot) == reboot))
+    plan['windows_initial_observer']['windows_boot_sha256'] = boot
     service = {'service_name': identity['service_name'], 'service_sid': identity['service_sid'],
                'state': 'Stopped', 'start_mode': 'Disabled', 'process_id': 0,
                'service_image_path_sha256': old['initial_service_start']['service_image_path_sha256']}
-    seal = {'schema_version': 1, 'windows_boot_sha256': boot, 'service': service, 'guests': evidence['guests'],
+    seal = {'schema_version': 1, 'windows_boot_sha256': previous_boot, 'service': service, 'guests': evidence['guests'],
             'hold_sha256': old_recovery['hold_sha256'], 'closed_revision': closed,
             'closed_pair_sha256': evidence['closed_pair_sha256'],
             'postboot_stopped_receipt_sha256': postboot['stopped_receipt_sha256']}
     seal.update({key: postboot[key] for key in (
         'predecessor_terminal_sha256', 'predecessor_binding_sha256', 'predecessor_args_sha256')})
-    seal_raw = _encoded(seal)
+    seal_raw = pre_save_seal if reboot else _encoded(seal)
+    if reboot:
+        archived = _decode(seal_raw)
+        _need(type(archived) is dict and _pin(archived.get('closed_pair_sha256'))
+              and archived == seal | {'closed_pair_sha256': archived['closed_pair_sha256'],
+                                      'saved': evidence['saved']})
     postboot['predecessor_seal_sha256'] = _sha(seal_raw)
     plan['initial_recovery_postboot'] = postboot
     plan_pin = _sha(_encoded(plan))
-    resumed = {key: evidence[key] for key in ('guests', 'observed', 'guest_observation_sha256', 'clock_ca_validated',
+    resumed = {key: evidence[key] for key in ('guests', *state_fields, 'guest_observation_sha256', 'clock_ca_validated',
                                              'fresh_vsock', 'closed_revision', 'closed_pair_sha256')}
-    resumed.update(schema_version=1, plan_sha256=plan_pin, windows_boot_sha256=boot, previous_windows_boot_sha256=boot,
+    resumed.update(schema_version=1, plan_sha256=plan_pin, windows_boot_sha256=boot, previous_windows_boot_sha256=previous_boot,
                    predecessor_seal_sha256=_sha(seal_raw), hold_sha256=seal['hold_sha256'],
                    postboot_stopped_receipt_sha256=postboot['stopped_receipt_sha256'])
     resumed_raw = _encoded(resumed)
@@ -161,7 +177,7 @@ def assemble_material(previous_raw, terminal_raw, binding_raw, args_raw, stop_ra
     files = dict(zip(FILES, (terminal_raw, binding_raw, args_raw, seal_raw, resumed_raw, _encoded(accepted), stop_raw),
                      strict=True))
     files['postboot-predecessor-plan.json'] = previous_raw
-    bind_successor_plan(plan, previous_raw, plan_pin, files)
+    bind_successor_plan(plan, previous_raw, plan_pin, files, allow_saved_reboot=reboot)
     return {'candidate': plan, 'previous_raw': previous_raw, 'plan_pin': plan_pin, 'files': files}
 
 
@@ -211,10 +227,23 @@ class WindowsSamebootHost:
     """Use the installed native armer/starter, with read-only reconciliation."""
 
     def __init__(self, windows, *, material, approval_path, approval_sha256, preflight_path,
-                 scm_path, starter_path, starter_sha256, reservation_sha256):
-        checked = bind_successor_plan(**material)
+                 scm_path, starter_path, starter_sha256, reservation_sha256, reboot_pair=None):
+        from .native_sameboot_release import WindowsPairClosure
+
+        allow_saved_reboot = isinstance(reboot_pair, WindowsPairClosure)
+        checked = bind_successor_plan(**material, allow_saved_reboot=allow_saved_reboot)
         plan = material['candidate']
         postboot = scope(plan)
+        _need(saved_reboot(postboot) == allow_saved_reboot)
+        _need(allow_saved_reboot or reboot_pair is None)
+        self.reboot_pair = reboot_pair
+        if allow_saved_reboot:
+            self.closed_revision, _, _ = derive_predecessor(
+                material['files'][FILES[0]], checked['terminal_sha256'], published=True)
+            _need(reboot_pair.config['plan_sha256'] == postboot['predecessor_plan_sha256']
+                  and reboot_pair.config['binding_sha256'] == postboot['predecessor_binding_sha256']
+                  and reboot_pair.config['boot_sha256'] == postboot['previous_windows_boot_sha256']
+                  and reboot_pair.config['revision'] == self.closed_revision - 1)
         start = plan['initial_service_start']
         custody = plan['initial_cutover_handoff']
         recovery = plan['initial_cutover_recovery']['attempt_id']
@@ -246,9 +275,9 @@ class WindowsSamebootHost:
         self.checked = checked
         self.config = {'parameters': parameters, 'attempt': postboot['attempt_id'],
                        'image_path_pin': postboot['successor_service_image_path_sha256'],
-                       'boot_pin': postboot['previous_windows_boot_sha256'],
+                       'boot_pin': plan['windows_initial_observer']['windows_boot_sha256'],
                        'closed_proof': checked['closed_proof_sha256'], 'starter_path': str(starter_path),
-                       'starter_pin': starter_sha256,
+                       'starter_pin': starter_sha256, 'starter_max_bytes': STARTER_FILE_MAX_BYTES,
                        'expected_state_path': str(root / 'journal' / 'controller-state.json')}
 
     def _run(self, body, deadline):
@@ -258,10 +287,22 @@ class WindowsSamebootHost:
         _need(time.monotonic() < deadline and type(result) is dict)
         return result
 
+    def _verify_reboot_pair(self, deadline):
+        if self.reboot_pair is None:
+            return
+        terminal = self.checked['terminal_sha256']
+        boot = self.config['boot_pin']
+        closed = self.reboot_pair.closed_pair_after_reboot(terminal, boot, deadline)
+        _need(closed['revision'] == self.closed_revision and closed['terminal_sha256'] == terminal
+              and closed['closed_nodes'] == ['A', 'B'] and _pin(closed['closed_proof_sha256'])
+              and all(closed[field] is True for field in ('synchronous', 'same_expiry',
+                                                         'replay_verified', 'effects_isolated')))
+
     def seal(self, deadline):
         """Create acceptance through the native stopped-instance verifier."""
+        self._verify_reboot_pair(deadline)
         result = self._run(r"""
-$source=$utf.GetString((Read-Pin $cfg.starter_path $cfg.starter_pin 131072))
+$source=$utf.GetString((Read-Pin $cfg.starter_path $cfg.starter_pin $cfg.starter_max_bytes))
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 if($errors.Count -ne 0){throw 'sameboot_successor_source'}
@@ -278,7 +319,7 @@ $raw=Read-Safe $seal 65536
 
     def _invoke(self, deadline, *, arm):
         body = r"""
-$raw=Read-Pin $cfg.starter_path $cfg.starter_pin 131072
+$raw=Read-Pin $cfg.starter_path $cfg.starter_pin $cfg.starter_max_bytes
 $p=@{}
 foreach($entry in $cfg.parameters.PSObject.Properties){$p[$entry.Name]=$entry.Value}
 $p.Go=$true
@@ -289,6 +330,8 @@ __ARM__
         return self._run(body.replace('__ARM__', options), deadline)
 
     def arm(self, deadline):
+        if self.reboot_pair is not None:
+            raise TransitionBlocked('initial_service_saved_reboot_authenticated_bridge_required')
         expected = {'host_handoff_armed': True, 'plan_sha256': self.checked['plan_sha256'],
                     'service_image_path_sha256': self.config['image_path_pin'], 'service_started': False}
         _need(self._invoke(deadline, arm=True) == expected)
@@ -316,6 +359,8 @@ $null=Read-Pin ($service.PathName.Trim('"')) $cfg.parameters.ServiceHostSha256 6
         return self.arm_evidence()
 
     def start(self, deadline):
+        if self.reboot_pair is not None:
+            raise TransitionBlocked('initial_service_saved_reboot_authenticated_bridge_required')
         return self._publication(self._invoke(deadline, arm=False))
 
     def observe_publication(self, deadline):

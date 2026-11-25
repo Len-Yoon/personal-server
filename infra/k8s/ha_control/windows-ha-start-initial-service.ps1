@@ -61,8 +61,9 @@ function Assert-RecoveryImageLineage($Plan,[string]$CandidatePath,[string]$Paren
            $service.service_image_sha256 -cnotmatch $hashPattern){throw 'initial_service_recovery_lineage'}
         if($index -gt 0 -and $service.service_image_sha256 -ceq $ReservedImage){return}
         if($index -eq 32 -or 'predecessor_kind' -cnotin $scope.PSObject.Properties.Name -or
-           $scope.predecessor_kind -cne 'published-postboot-sameboot-v1' -or
-           $scope.previous_windows_boot_sha256 -cne $boot){throw 'initial_service_recovery_lineage'}
+           $scope.predecessor_kind -cnotin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1') -or
+           ($scope.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and $scope.previous_windows_boot_sha256 -cne $boot) -or
+           ($scope.predecessor_kind -ceq 'published-postboot-saved-reboot-v1' -and $scope.previous_windows_boot_sha256 -ceq $boot)){throw 'initial_service_recovery_lineage'}
         $expectedPreviousImage=$service.service_image_sha256
         if('previous_service_image_sha256' -cin $scope.PSObject.Properties.Name){
             if($scope.successor_service_image_sha256 -cne $service.service_image_sha256 -or
@@ -74,7 +75,9 @@ function Assert-RecoveryImageLineage($Plan,[string]$CandidatePath,[string]$Paren
         $archive=Join-Path $root 'postboot-predecessor-plan.json'
         Assert-UnpublishedTcbPath $archive
         $previous=Read-PinnedJson $archive $scope.predecessor_plan_sha256
-        if($previous.windows_enforced.service_image_sha256 -cne $expectedPreviousImage){throw 'initial_service_recovery_lineage'}
+        if($previous.windows_enforced.service_image_sha256 -cne $expectedPreviousImage -or
+           $previous.windows_initial_observer.windows_boot_sha256 -cne $scope.previous_windows_boot_sha256){throw 'initial_service_recovery_lineage'}
+        $boot=$scope.previous_windows_boot_sha256
         $previousScope=$previous.initial_recovery_postboot
         Assert-PostbootEnvelope $previousScope
         $planPath=Join-Path (Join-Path $custodyRoot $previousScope.attempt_id.Substring(0,40)) 'plan.json'
@@ -349,13 +352,14 @@ namespace N100InitialPredecessorJsonV1 {
         if(-not $Published){throw $bad}
         $scopeKeys+=@('predecessor_binding_sha256','predecessor_seal_sha256','previous_windows_boot_sha256')
         $tag='predecessor_kind' -cin $scope.PSObject.Properties.Name
-        $same=$tag -and $scope.predecessor_kind -ceq 'published-postboot-sameboot-v1'
+        $savedReboot=$tag -and $scope.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'
+        $same=$tag -and $scope.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')
         if($tag){
-            if($scope.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1')){throw $bad}
+            if($scope.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')){throw $bad}
             $scopeKeys+=@('predecessor_kind')
         }
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
-        if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
+        if($savedReboot -or ($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name)){$scopeKeys+=@('carryover_receipt_sha256')}
         $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
         if(@($transitionKeys|Where-Object {$_ -cin $scope.PSObject.Properties.Name}).Count){
             if(-not $same -or 'carryover_receipt_sha256' -cnotin $scope.PSObject.Properties.Name -or
@@ -580,14 +584,14 @@ function Assert-PostbootEnvelope($Postboot){
         'predecessor_seal_sha256','predecessor_terminal_sha256','previous_windows_boot_sha256','schema_version')
     $tagged='predecessor_kind' -cin $Postboot.PSObject.Properties.Name
     if($tagged){
-        if($Postboot.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1')){throw 'initial_service_postboot_scope'}
+        if($Postboot.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')){throw 'initial_service_postboot_scope'}
         $keys+=@('predecessor_kind')
-        if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1'){$keys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
-        if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and 'carryover_receipt_sha256' -cin $Postboot.PSObject.Properties.Name){
+        if($Postboot.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')){$keys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
+        if($Postboot.predecessor_kind -ceq 'published-postboot-saved-reboot-v1' -or ($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and 'carryover_receipt_sha256' -cin $Postboot.PSObject.Properties.Name)){
             $keys+=@('carryover_receipt_sha256')
         }
         $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
-        if($Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and
+        if($Postboot.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1') -and
            @($transitionKeys|Where-Object {$_ -cin $Postboot.PSObject.Properties.Name}).Count -gt 0){
             if('carryover_receipt_sha256' -cnotin $Postboot.PSObject.Properties.Name -or
                $Postboot.previous_service_image_sha256 -ceq $Postboot.successor_service_image_sha256){throw 'initial_service_postboot_scope'}
@@ -602,7 +606,7 @@ function Assert-PostbootEnvelope($Postboot){
         if($Postboot.$key -isnot [string]){throw 'initial_service_postboot_scope'}
         if($key -notin @('closure_mode','predecessor_kind') -and $Postboot.$key -cnotmatch $hashPattern){throw 'initial_service_postboot_scope'}
     }
-    if($Postboot.closure_mode -cne 'windows-offline-v1' -or ($tagged -and $Postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1' -and $Postboot.attempt_id -ceq $Postboot.stopped_attempt_id)){throw 'initial_service_postboot_scope'}
+    if($Postboot.closure_mode -cne 'windows-offline-v1' -or ($tagged -and $Postboot.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1') -and $Postboot.attempt_id -ceq $Postboot.stopped_attempt_id)){throw 'initial_service_postboot_scope'}
 }
 function Assert-PostbootSealedPredecessor($Plan,[string]$Root){
     if('initial_recovery_rearm' -cin $Plan.PSObject.Properties.Name -or 'initial_unpublished_recovery' -cin $Plan.PSObject.Properties.Name){throw 'initial_service_postboot_scope'}
@@ -620,14 +624,15 @@ function Assert-PostbootSealedPredecessor($Plan,[string]$Root){
     $resume=Read-PinnedJson $resumePath $resumePin
     $tagged='predecessor_kind' -cin $r.PSObject.Properties.Name
     $sameboot=$tagged -and $r.predecessor_kind -ceq 'published-postboot-sameboot-v1'
+    $publishedResume=$tagged -and $r.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')
     $priorKind=if($tagged){'initial-wsl-cutover-unpublished'}else{'initial-wsl-cutover-rearm'}
     $numbers=Get-InitialPredecessorNumbers ([IO.File]::ReadAllBytes((Join-Path $Root 'postboot-predecessor-state.json'))) $r.predecessor_terminal_sha256 $true
     $priorRevision=$numbers.closed-1;$closedRevision=$numbers.closed
     $newboot=$Plan.windows_initial_observer.windows_boot_sha256
     $planPin=(Get-FileHash -LiteralPath (Join-Path $Root 'plan.json') -Algorithm SHA256).Hash.ToLowerInvariant()
     $bootWrong=if($sameboot){$newboot -cne $r.previous_windows_boot_sha256}else{$newboot -ceq $r.previous_windows_boot_sha256}
-    $kindWrong=if($sameboot){$terminal.kind -cnotin @('initial-wsl-cutover-postboot','initial-wsl-cutover-postboot-unpublished','initial-wsl-cutover-postboot-resume')}else{$terminal.kind -cne $priorKind}
-    if($sameboot){Assert-SamebootPostbootInputs $Plan $Root $terminal $old $pre $resume}
+    $kindWrong=if($publishedResume){$terminal.kind -cnotin @('initial-wsl-cutover-postboot','initial-wsl-cutover-postboot-unpublished','initial-wsl-cutover-postboot-resume')}else{$terminal.kind -cne $priorKind}
+    if($publishedResume){Assert-SamebootPostbootInputs $Plan $Root $terminal $old $pre $resume}
     if($bootWrong -or $pre.windows_boot_sha256 -cne $r.previous_windows_boot_sha256 -or
        $kindWrong -or $terminal.revision -ne $priorRevision -or $terminal.phase -cnotin @('lease_lost','local_revoke_observed') -or
        $old.controller_plan_sha256 -cne $terminal.controller_plan_sha256 -or $old.controller_plan_sha256 -ceq $planPin -or
@@ -641,6 +646,43 @@ function Assert-PostbootSealedPredecessor($Plan,[string]$Root){
        $resume.predecessor_seal_sha256 -cne $r.predecessor_seal_sha256 -or $resume.closed_revision -ne $closedRevision){throw 'initial_service_postboot_scope'}
 }
 
+function Assert-SavedRebootPostbootEvidence($Plan,$Pre,$Resume){
+    $r=$Plan.initial_recovery_postboot
+    $keys=@('schema_version','plan_sha256','windows_boot_sha256','previous_windows_boot_sha256',
+        'predecessor_seal_sha256','guests','saved','resumed','hold_sha256','guest_observation_sha256',
+        'closed_revision','closed_pair_sha256','postboot_stopped_receipt_sha256','clock_ca_validated','fresh_vsock')
+    if((@($Resume.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne (@($keys|Sort-Object -CaseSensitive) -join ',') -or
+       ($Resume.schema_version -isnot [int] -and $Resume.schema_version -isnot [long]) -or $Resume.schema_version -ne 1 -or
+       ($Resume.closed_revision -isnot [int] -and $Resume.closed_revision -isnot [long]) -or
+       $Resume.closed_revision -ne $Pre.closed_revision -or $Pre.closed_pair_sha256 -cnotmatch $hashPattern -or
+       $Pre.windows_boot_sha256 -cne $r.previous_windows_boot_sha256 -or
+       $Resume.windows_boot_sha256 -cne $Plan.windows_initial_observer.windows_boot_sha256 -or
+       $Resume.previous_windows_boot_sha256 -cne $r.previous_windows_boot_sha256 -or
+       $Resume.windows_boot_sha256 -ceq $Resume.previous_windows_boot_sha256 -or
+       $Pre.hold_sha256 -cne $Plan.windows_recovery_observers.hold_sha256 -or $Resume.hold_sha256 -cne $Pre.hold_sha256){
+        throw 'initial_service_postboot_scope'
+    }
+    foreach($field in @('guests','saved','resumed','guest_observation_sha256','clock_ca_validated','fresh_vsock')){
+        if((@($Resume.$field.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'A,B'){throw 'initial_service_postboot_scope'}
+    }
+    if((@($Pre.guests.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'A,B' -or
+       (@($Pre.saved.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'A,B'){throw 'initial_service_postboot_scope'}
+    $guestKeys=@('vm_id_sha256','disks_sha256','switches_sha256','guest_boot_sha256','container_inventory_sha256')
+    foreach($node in @('A','B')){
+        foreach($guest in @($Pre.guests.$node,$Resume.guests.$node)){
+            if((@($guest.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne (@($guestKeys|Sort-Object -CaseSensitive) -join ',')){throw 'initial_service_postboot_scope'}
+            foreach($key in $guestKeys){if($guest.$key -isnot [string] -or $guest.$key -cnotmatch $hashPattern){throw 'initial_service_postboot_scope'}}
+        }
+        foreach($key in $guestKeys){if($Resume.guests.$node.$key -cne $Pre.guests.$node.$key){throw 'initial_service_postboot_scope'}}
+        if($Pre.saved.$node -cne 'Saved' -or $Resume.saved.$node -cne $Pre.saved.$node -or $Resume.resumed.$node -cne 'Running' -or
+           $Resume.clock_ca_validated.$node -isnot [bool] -or -not $Resume.clock_ca_validated.$node -or
+           $Resume.fresh_vsock.$node -isnot [bool] -or -not $Resume.fresh_vsock.$node -or
+           $Resume.guest_observation_sha256.$node -isnot [string] -or $Resume.guest_observation_sha256.$node -cnotmatch $hashPattern){throw 'initial_service_postboot_scope'}
+    }
+    foreach($key in @('vm_id_sha256','disks_sha256','guest_boot_sha256')){if($Pre.guests.A.$key -ceq $Pre.guests.B.$key){throw 'initial_service_postboot_scope'}}
+    if($Pre.guests.A.guest_boot_sha256 -cne $Plan.windows_recovery_observers.guest_boot_sha256){throw 'initial_service_postboot_scope'}
+}
+
 function Assert-SamebootPostbootInputs($Plan,[string]$Root,$Terminal,$Binding,$Pre,$Resume){
     $r=$Plan.initial_recovery_postboot
     $oldPath=Join-Path $Root 'postboot-predecessor-plan.json'
@@ -649,7 +691,30 @@ function Assert-SamebootPostbootInputs($Plan,[string]$Root,$Terminal,$Binding,$P
     $old=Read-PinnedJson $oldPath $r.predecessor_plan_sha256
     $stopped=Read-PinnedJson $stopPath $r.stopped_receipt_sha256
     $previous=$old.initial_recovery_postboot;Assert-PostbootEnvelope $previous
-    $previousSame=('predecessor_kind' -cin $previous.PSObject.Properties.Name) -and $previous.predecessor_kind -ceq 'published-postboot-sameboot-v1'
+    $previousSame=('predecessor_kind' -cin $previous.PSObject.Properties.Name) -and $previous.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')
+    $savedReboot=$r.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'
+    $oldboot=$old.windows_initial_observer.windows_boot_sha256
+    $newboot=$Plan.windows_initial_observer.windows_boot_sha256
+    $bootWrong=if($savedReboot){$oldboot -cne $r.previous_windows_boot_sha256 -or $newboot -ceq $oldboot}else{$oldboot -cne $newboot}
+    $proofWrong=if($savedReboot){$Resume.closed_pair_sha256 -cnotmatch $hashPattern -or $Resume.closed_pair_sha256 -ceq $Pre.closed_pair_sha256}else{$Resume.closed_pair_sha256 -cne $Pre.closed_pair_sha256}
+    if($savedReboot){
+        Assert-SavedRebootPostbootEvidence $Plan $Pre $Resume
+        $preKeys=@('schema_version','windows_boot_sha256','predecessor_terminal_sha256','predecessor_binding_sha256',
+            'predecessor_args_sha256','service','guests','saved','hold_sha256','closed_revision','closed_pair_sha256','postboot_stopped_receipt_sha256')
+        if((@($Pre.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne (@($preKeys|Sort-Object -CaseSensitive) -join ',') -or
+           ($Pre.schema_version -isnot [int] -and $Pre.schema_version -isnot [long]) -or $Pre.schema_version -ne 1 -or
+           ($Pre.closed_revision -isnot [int] -and $Pre.closed_revision -isnot [long]) -or $Pre.closed_revision -ne ($Terminal.revision+1) -or
+           $Pre.predecessor_terminal_sha256 -cne $r.predecessor_terminal_sha256 -or
+           $Pre.predecessor_binding_sha256 -cne $r.predecessor_binding_sha256 -or
+           $Pre.predecessor_args_sha256 -cne $r.predecessor_args_sha256 -or
+           (@($Pre.service.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'process_id,service_image_path_sha256,service_name,service_sid,start_mode,state' -or
+           $Pre.service.service_name -cne $Plan.windows_enforced.service_name -or $Pre.service.service_sid -cne $Plan.windows_enforced.service_sid -or
+           $Pre.service.service_image_path_sha256 -cne $Binding.service_image_path_sha256 -or
+           $Pre.service.state -cne 'Stopped' -or $Pre.service.start_mode -cne 'Disabled' -or
+           ($Pre.service.process_id -isnot [int] -and $Pre.service.process_id -isnot [long]) -or $Pre.service.process_id -ne 0 -or
+           $stopped.binding.boot_a_sha256 -cne $Pre.guests.A.guest_boot_sha256 -or
+           $stopped.binding.boot_b_sha256 -cne $Pre.guests.B.guest_boot_sha256){throw 'initial_service_postboot_scope'}
+    }
     $stopAttempt=if($previousSame){$previous.stopped_attempt_id}else{$previous.attempt_id}
     if('carryover_receipt_sha256' -cin $r.PSObject.Properties.Name -and
        ($Pre.guests.A.container_inventory_sha256 -cne $r.carryover_receipt_sha256 -or
@@ -661,16 +726,15 @@ function Assert-SamebootPostbootInputs($Plan,[string]$Root,$Terminal,$Binding,$P
        $old.installation_id -cne $Plan.installation_id -or $old.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
        (ConvertTo-Json $old.initial_cutover_handoff -Compress) -cne (ConvertTo-Json $Plan.initial_cutover_handoff -Compress) -or
        (ConvertTo-Json $old.initial_cutover_recovery -Compress) -cne (ConvertTo-Json $Plan.initial_cutover_recovery -Compress) -or
-       $old.windows_initial_observer.windows_boot_sha256 -cne $Plan.windows_initial_observer.windows_boot_sha256 -or
+       $bootWrong -or
        $old.windows_recovery_observers.hold_sha256 -cne $Plan.windows_recovery_observers.hold_sha256 -or
        $old.windows_recovery_observers.guest_boot_sha256 -cne $Plan.windows_recovery_observers.guest_boot_sha256 -or
        $r.stopped_attempt_id -cne $stopAttempt -or ($previousSame -and $r.stopped_receipt_sha256 -cne $previous.stopped_receipt_sha256) -or
        $Pre.postboot_stopped_receipt_sha256 -cne $r.stopped_receipt_sha256 -or $Resume.postboot_stopped_receipt_sha256 -cne $r.stopped_receipt_sha256 -or
        $stopped.args.postboot_attempt_id -cne $stopAttempt -or $stopped.hold_sha256 -cne $Plan.windows_recovery_observers.hold_sha256 -or
        $stopped.closed_revision -ge $Pre.closed_revision -or (-not $previousSame -and $stopped.closed_revision -ne ($Terminal.revision-1)) -or
-       $Resume.previous_windows_boot_sha256 -cne $Plan.windows_initial_observer.windows_boot_sha256 -or
-       $Resume.closed_pair_sha256 -cne $Pre.closed_pair_sha256 -or
-       (@($Resume.observed.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'A,B' -or $Resume.observed.A -cne 'Running' -or $Resume.observed.B -cne 'Running'){
+       $Resume.previous_windows_boot_sha256 -cne $oldboot -or $proofWrong -or
+       (-not $savedReboot -and ((@($Resume.observed.PSObject.Properties.Name|Sort-Object -CaseSensitive) -join ',') -cne 'A,B' -or $Resume.observed.A -cne 'Running' -or $Resume.observed.B -cne 'Running'))){
         throw 'initial_service_postboot_scope'
     }
     foreach($key in @('service_name','service_sid')){if($old.windows_enforced.$key -cne $Plan.windows_enforced.$key){throw 'initial_service_postboot_scope'}}
@@ -746,7 +810,7 @@ function Seal-HaInitialPostbootAcceptance([string]$PlanPath,[string]$PlanSha256,
                   @{path=$previousArgs.plan_path;pin=$binding.controller_plan_sha256},
                   @{path=$binding.state_path;pin=$r.predecessor_terminal_sha256},
                   @{path=$actualBinding;pin=$r.predecessor_binding_sha256})
-        if(('predecessor_kind' -cin $r.PSObject.Properties.Name) -and $r.predecessor_kind -ceq 'published-postboot-sameboot-v1'){
+        if(('predecessor_kind' -cin $r.PSObject.Properties.Name) -and $r.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')){
             if($binding.controller_plan_sha256 -cne $r.predecessor_plan_sha256){throw 'initial_service_postboot_scope'}
             foreach($path in @($actualArgs,$previousArgs.plan_path,$binding.state_path,$actualBinding,(Join-Path $oldRoot 'postboot-stopped-inventory.json'))){Assert-UnpublishedTcbPath $path}
             $actual+=@(@{path=(Join-Path $oldRoot 'postboot-stopped-inventory.json');pin=$r.stopped_receipt_sha256})
@@ -1247,6 +1311,11 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
 function Arm-SamebootSuccessorHost($Plan,$Approval,$Current){
     $r=$Plan.initial_recovery_postboot
     Assert-PostbootEnvelope $r
+    if($r.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'){
+        # A caller-supplied proof pin cannot replace an on-host authenticated
+        # fresh closure bridge across a Windows reboot. Keep raw SCM arming closed.
+        throw 'initial_service_saved_reboot_authenticated_bridge_required'
+    }
     if($r.predecessor_kind -cne 'published-postboot-sameboot-v1' -or
        'successor_service_image_sha256' -cnotin $r.PSObject.Properties.Name -or
        $ServiceHostSha256 -cne $r.successor_service_image_sha256 -or
@@ -1371,6 +1440,13 @@ try {
     }
     $hostPath = $current.PathName.Substring(1,$current.PathName.Length - 2)
     $plan = Read-PinnedJson $PlanPath $PlanSha256
+    if('initial_recovery_postboot' -cin $plan.PSObject.Properties.Name -and
+       'predecessor_kind' -cin $plan.initial_recovery_postboot.PSObject.Properties.Name -and
+       $plan.initial_recovery_postboot.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'){
+        # Cover arm, ordinary -Go Start-Service and transition dispatch before
+        # any service mutation until the on-host authenticated bridge exists.
+        throw 'initial_service_saved_reboot_authenticated_bridge_required'
+    }
     $approval = Read-PinnedJson $ApprovalPath $ApprovalSha256
     if($ArmPostbootHost){Arm-SamebootSuccessorHost $plan $approval $current;return}
     Assert-Executable $hostPath $ServiceHostSha256
@@ -1384,7 +1460,7 @@ try {
     $rearming='initial_recovery_rearm' -cin $plan.PSObject.Properties.Name
     $unpublished='initial_unpublished_recovery' -cin $plan.PSObject.Properties.Name
     $postbootUnpublished=$postboot -and ('predecessor_kind' -cin $plan.initial_recovery_postboot.PSObject.Properties.Name) -and $plan.initial_recovery_postboot.predecessor_kind -ceq 'published-unpublished-recovery-v1'
-    $postbootResume=$postboot -and ('predecessor_kind' -cin $plan.initial_recovery_postboot.PSObject.Properties.Name) -and $plan.initial_recovery_postboot.predecessor_kind -ceq 'published-postboot-sameboot-v1'
+    $postbootResume=$postboot -and ('predecessor_kind' -cin $plan.initial_recovery_postboot.PSObject.Properties.Name) -and $plan.initial_recovery_postboot.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')
     if($unpublished -and ($postboot -or $rearming)){throw 'initial_service_unpublished_scope'}
     $expectedRevision=if($rearming){6}else{4}
     if($unpublished -or $postboot){

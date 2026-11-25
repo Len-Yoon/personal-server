@@ -1008,6 +1008,86 @@ exit 0
         self.assertEqual(json.loads(files[FILES[6]])['closed_revision'],11)
         self.assertEqual(json.loads(files[FILES[3]])['closed_revision'],13)
 
+    def saved_reboot_fixture(self):
+        from ha_control.initial_postboot import SAVED_REBOOT_KIND
+
+        plan, files = self.fixture(chain=True)
+        encode = lambda value: json.dumps(value, sort_keys=True).encode()
+        value = plan['initial_recovery_postboot']
+        value.update(predecessor_kind=SAVED_REBOOT_KIND, carryover_receipt_sha256='c1'*32)
+        plan['windows_initial_observer']['windows_boot_sha256'] = 'c2'*32
+        seal = json.loads(files[FILES[3]])
+        seal['guests']['A']['container_inventory_sha256'] = value['carryover_receipt_sha256']
+        seal['guests']['B']['switches_sha256'] = 'c5'*32
+        seal['saved'] = {'A':'Saved','B':'Saved'}
+        files[FILES[3]] = encode(seal)
+        value['predecessor_seal_sha256'] = hashlib.sha256(files[FILES[3]]).hexdigest()
+        resumed = json.loads(files[FILES[4]])
+        running = resumed.pop('observed')
+        resumed.update(windows_boot_sha256='c2'*32, saved={'A':'Saved','B':'Saved'},
+                       resumed=running, guests=seal['guests'], closed_pair_sha256='c3'*32,
+                       predecessor_seal_sha256=value['predecessor_seal_sha256'])
+        resumed['guest_observation_sha256']['A'] = value['carryover_receipt_sha256']
+        self.reseal_resume(files, resumed, value)
+        return plan, files
+
+    @staticmethod
+    def reseal_resume(files, resumed, scope_value):
+        files[FILES[4]] = json.dumps(resumed, sort_keys=True).encode()
+        acceptance = json.loads(files[FILES[5]])
+        acceptance.update(postboot=scope_value, windows_boot_sha256=resumed['windows_boot_sha256'],
+                          resume_evidence_sha256=hashlib.sha256(files[FILES[4]]).hexdigest())
+        files[FILES[5]] = json.dumps(acceptance, sort_keys=True).encode()
+
+    def test_saved_reboot_keeps_original_stop_and_uses_new_closed_proof(self):
+        from ha_control.initial_unpublished import derive_predecessor
+
+        plan, files = self.saved_reboot_fixture()
+        value = plan['initial_recovery_postboot']
+        self.assertEqual(validate_seal(plan, 'a'*64, files), value)
+        self.assertEqual(derive_predecessor(files[FILES[0]], value['predecessor_terminal_sha256'],
+                                           published=True), (15, 16, 17))
+        stopped = json.loads(files[FILES[6]])
+        self.assertEqual(stopped['closed_revision'], 11)
+        self.assertEqual(set(stopped['containers']), {
+            'ha-broker', 'book-memo', 'car-care-worker', 'crawler-worker',
+            'homeops-executor', 'portal-web', 'system-agent', 'youtube-memo'})
+
+    def test_saved_reboot_rejects_reused_or_wrong_boot_pair_and_history(self):
+        plan, files = self.saved_reboot_fixture()
+        value = plan['initial_recovery_postboot']
+        seal = json.loads(files[FILES[3]])
+        for field, replacement in {
+            'windows_boot_sha256': value['previous_windows_boot_sha256'],
+            'previous_windows_boot_sha256': plan['windows_initial_observer']['windows_boot_sha256'],
+            'saved': {'A':'Saved','B':'Off'},
+            'resumed': {'A':'Running','B':'Saved'},
+            'closed_revision': seal['closed_revision'] + 2,
+            'closed_pair_sha256': seal['closed_pair_sha256'],
+            'fresh_vsock': {'A':True,'B':False},
+            'guests': seal['guests'] | {'B': seal['guests']['B'] | {'guest_boot_sha256':'c4'*32}},
+        }.items():
+            with self.subTest(field=field):
+                changed = files.copy()
+                resumed = json.loads(files[FILES[4]]) | {field: replacement}
+                self.reseal_resume(changed, resumed, value)
+                with self.assertRaises(TransitionBlocked):
+                    validate_seal(plan, 'a'*64, changed)
+        changed_plan = deepcopy(plan)
+        changed_plan['initial_recovery_postboot'].pop('carryover_receipt_sha256')
+        with self.assertRaises(TransitionBlocked):
+            scope(changed_plan)
+        changed = files.copy()
+        changed_plan = deepcopy(plan)
+        changed_scope = changed_plan['initial_recovery_postboot']
+        seal.pop('saved')
+        changed[FILES[3]] = json.dumps(seal, sort_keys=True).encode()
+        changed_scope['predecessor_seal_sha256'] = hashlib.sha256(changed[FILES[3]]).hexdigest()
+        resumed = json.loads(files[FILES[4]]) | {'predecessor_seal_sha256': changed_scope['predecessor_seal_sha256']}
+        self.reseal_resume(changed, resumed, changed_scope)
+        with self.assertRaises(TransitionBlocked):
+            validate_seal(changed_plan, 'a'*64, changed)
+
     def test_version_transition_requires_complete_distinct_pins_and_carryover(self):
         from ha_control.initial_postboot import TRANSITION_FIELDS
         plan,files=self.transition_fixture()
@@ -1494,16 +1574,68 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                                          scm_path=str(source / 'stopped_service_installer' / 'StoppedService.cs'),
                                          starter_path=str(source / 'windows-ha-start-initial-service.ps1'),
                                          starter_sha256='f' * 64, reservation_sha256='9' * 64)
+        starter = ROOT / 'infra/k8s/ha_control/windows-ha-start-initial-service.ps1'
+        self.assertLessEqual(starter.stat().st_size, host.config['starter_max_bytes'])
         deadline = self.clock() + 10
         windows.powershell.side_effect = ({'acceptance_sha256': 'c' * 64}, OSError('reply lost'), {'armed': True})
         self.assertEqual(host.seal(deadline), 'c' * 64)
         self.assertIn('Seal-HaInitialPostbootAcceptance', windows.powershell.call_args.args[0])
+        self.assertIn('Read-Pin $cfg.starter_path $cfg.starter_pin $cfg.starter_max_bytes',
+                      windows.powershell.call_args.args[0])
         with self.assertRaises(OSError):
             host.arm(deadline)
         self.assertEqual(host.observe_armed(deadline), host.arm_evidence())
         commands = [call.args[0] for call in windows.powershell.call_args_list]
         self.assertEqual(sum('$p.ArmPostbootHost' in command for command in commands), 1)
+        self.assertIn('Read-Pin $cfg.starter_path $cfg.starter_pin $cfg.starter_max_bytes', commands[1])
         self.assertNotIn('$p.Go', commands[-1])
+
+        from ha_control.native_sameboot_release import WindowsPairClosure
+        reboot_evidence = {key: value for key, value in evidence.items() if key != 'observed'}
+        reboot_evidence.update(new_windows_boot_sha256='b0'*32, closed_pair_sha256='c9'*32,
+                               saved={'A':'Saved','B':'Saved'}, resumed={'A':'Running','B':'Running'})
+        archived_seal = encode(json.loads(material['files'][FILES[3]]) | {'saved': reboot_evidence['saved']})
+        reboot_material = native.assemble_material(
+            old_raw, terminal, binding, args, files[FILES[6]], previous_sha256=old_pin, attempt='a1'*32,
+            successor_image_sha256='a2'*32, runtime=runtime, observers=observers, evidence=reboot_evidence,
+            pre_save_seal=archived_seal)
+        self.assertEqual(reboot_material['files'][FILES[3]], archived_seal)
+        self.assertEqual(reboot_material['files'][FILES[6]], files[FILES[6]])
+        with self.assertRaises(TransitionBlocked):
+            self.module.bind_successor_plan(**reboot_material)
+        pair = Mock(spec=WindowsPairClosure)
+        draft = reboot_material['candidate']['initial_recovery_postboot']
+        pair.config = {
+            'plan_sha256': old_pin, 'binding_sha256': draft['predecessor_binding_sha256'],
+            'boot_sha256': draft['previous_windows_boot_sha256'], 'revision': 12,
+        }
+        isolated_windows = Mock()
+        reboot_host = native.WindowsSamebootHost(
+            isolated_windows, material=reboot_material, approval_path=str(root / 'approval.json'),
+            approval_sha256='e'*64, preflight_path=str(source / 'windows-service-preflight.ps1'),
+            scm_path=str(source / 'stopped_service_installer' / 'StoppedService.cs'),
+            starter_path=str(source / 'windows-ha-start-initial-service.ps1'),
+            starter_sha256='f'*64, reservation_sha256='9'*64, reboot_pair=pair)
+        self.assertEqual(reboot_host.config['boot_pin'], 'b0'*32)
+        self.assertEqual(reboot_host.config['closed_proof'], 'c9'*32)
+        closed = {
+            'revision': 13, 'terminal_sha256': draft['predecessor_terminal_sha256'],
+            'closed_nodes': ['A','B'], 'closed_proof_sha256': '2c'*32,
+            'synchronous': True, 'same_expiry': True, 'replay_verified': True, 'effects_isolated': True,
+        }
+        pair.closed_pair_after_reboot.return_value = closed | {'closed_nodes': ['A']}
+        with self.assertRaises(TransitionBlocked):
+            reboot_host.seal(deadline)
+        isolated_windows.powershell.assert_not_called()
+        pair.closed_pair_after_reboot.return_value = closed
+        isolated_windows.powershell.return_value = {'acceptance_sha256': 'cc'*32}
+        self.assertEqual(reboot_host.seal(deadline), 'cc'*32)
+        pair.closed_pair_after_reboot.assert_called_with(draft['predecessor_terminal_sha256'], 'b0'*32, deadline)
+        isolated_windows.powershell.reset_mock()
+        for operation in (reboot_host.arm, reboot_host.start):
+            with self.assertRaisesRegex(TransitionBlocked, 'saved_reboot_authenticated_bridge_required'):
+                operation(deadline)
+        isolated_windows.powershell.assert_not_called()
         material['files'][FILES[0]] += b' '
         with self.assertRaises(TransitionBlocked):
             self.module.bind_successor_plan(**material)

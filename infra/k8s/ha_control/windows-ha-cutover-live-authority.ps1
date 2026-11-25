@@ -126,13 +126,14 @@ namespace N100InitialPredecessorJsonV1 {
         if(-not $Published){throw $bad}
         $scopeKeys+=@('predecessor_binding_sha256','predecessor_seal_sha256','previous_windows_boot_sha256')
         $tag='predecessor_kind' -cin $scope.PSObject.Properties.Name
-        $same=$tag -and $scope.predecessor_kind -ceq 'published-postboot-sameboot-v1'
+        $savedReboot=$tag -and $scope.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'
+        $same=$tag -and $scope.predecessor_kind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')
         if($tag){
-            if($scope.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1')){throw $bad}
+            if($scope.predecessor_kind -cnotin @('published-unpublished-recovery-v1','published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')){throw $bad}
             $scopeKeys+=@('predecessor_kind')
         }
         if($same){$scopeKeys+=@('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256')}
-        if($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name){$scopeKeys+=@('carryover_receipt_sha256')}
+        if($savedReboot -or ($same -and 'carryover_receipt_sha256' -cin $scope.PSObject.Properties.Name)){$scopeKeys+=@('carryover_receipt_sha256')}
         $transitionKeys=@('previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
         if(@($transitionKeys|Where-Object {$_ -cin $scope.PSObject.Properties.Name}).Count){
             if(-not $same -or 'carryover_receipt_sha256' -cnotin $scope.PSObject.Properties.Name -or
@@ -467,7 +468,8 @@ try {
     if($postboot -and (-not $recovering -or $rearming -or $PostbootAttemptId -cnotmatch $pattern -or $PostbootPredecessorTerminalSha256 -cnotmatch $pattern -or $PostbootPredecessorBindingSha256 -cnotmatch $pattern -or $PostbootPredecessorArgsSha256 -cnotmatch $pattern -or $PostbootPredecessorSealSha256 -cnotmatch $pattern -or $PostbootPreviousWindowsBootSha256 -cnotmatch $pattern -or $PostbootAttemptId -ceq $RecoveryAttemptId -or $PostbootAttemptId -ceq $AttemptId)){throw 'live_authority_postboot_scope'}
     $postbootTagged=$PSBoundParameters.ContainsKey('PostbootPredecessorKind')
     $postbootUnpublished=$postbootTagged -and $PostbootPredecessorKind -ceq 'published-unpublished-recovery-v1'
-    $postbootResume=$postbootTagged -and $PostbootPredecessorKind -ceq 'published-postboot-sameboot-v1'
+    $postbootSavedReboot=$postbootTagged -and $PostbootPredecessorKind -ceq 'published-postboot-saved-reboot-v1'
+    $postbootResume=$postbootTagged -and $PostbootPredecessorKind -cin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')
     if($postbootTagged -and (-not $postboot -or -not ($postbootUnpublished -or $postbootResume))){throw 'live_authority_postboot_scope'}
     $resumePins=@($PostbootPredecessorPlanSha256,$PostbootStoppedAttemptId,$PostbootStoppedReceiptSha256)
     $hasCarryover=$PSBoundParameters.ContainsKey('PostbootCarryoverReceiptSha256')
@@ -479,7 +481,7 @@ try {
        $PostbootPreviousServiceImageSha256 -ceq $PostbootSuccessorServiceImageSha256)){
         throw 'live_authority_postboot_scope'
     }
-    if($hasCarryover -and (-not $postbootResume -or $PostbootCarryoverReceiptSha256 -cnotmatch $pattern)){
+    if(($postbootSavedReboot -and -not $hasCarryover) -or ($hasCarryover -and (-not $postbootResume -or $PostbootCarryoverReceiptSha256 -cnotmatch $pattern))){
         throw 'live_authority_postboot_scope'
     }
     if(($postbootResume -and @($resumePins|Where-Object {$_ -cnotmatch $pattern}).Count) -or

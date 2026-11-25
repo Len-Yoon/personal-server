@@ -251,9 +251,9 @@ def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, p
           and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
           and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
-    from .initial_postboot import after_unpublished, sameboot
+    from .initial_postboot import after_unpublished, published_postboot
     retry_predecessor=after_unpublished(checked)
-    resuming=sameboot(checked)
+    resuming=published_postboot(checked)
     observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline,
         postboot=not (retry_predecessor or resuming),postboot_after_unpublished=retry_predecessor,postboot_resume=resuming,
         predecessor_terminal=_predecessor_terminal(checked,pins,recovery_attempt_id),predecessor_sha256=checked['predecessor_terminal_sha256'])

@@ -299,7 +299,7 @@ function Read-RearmRuntimeLineagePlan([string]$Path,[string]$Hash,[string]$Priva
     $Lineage.Add([pscustomobject]@{Path=$heldPlan.Path;Identity=$heldPlan.Identity;Stream=$heldPlan.Stream;Hash=$Hash;Root=$PrivateRoot})
     return ,$plan
 }
-function Assert-RearmRuntimeLineageScope($Plan,$Spec,$Baseline=$null){
+function Assert-RearmRuntimeLineageScope($Plan,$Spec,$Baseline=$null,[string]$ExpectedBoot=''){
     foreach($field in @('windows_enforced','initial_service_start','initial_cutover_handoff','initial_cutover_recovery','windows_initial_observer')){
         if($Plan[$field] -isnot [Collections.Generic.Dictionary[string,object]]){throw 'runtime_stage_rearm_lineage'}
     }
@@ -330,7 +330,8 @@ function Assert-RearmRuntimeLineageScope($Plan,$Spec,$Baseline=$null){
         foreach($field in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
             if($handoff[$field] -cne $Baseline['initial_cutover_handoff'][$field]){throw 'runtime_stage_rearm_lineage'}
         }
-        if($Plan['windows_initial_observer']['windows_boot_sha256'] -cne $Baseline['windows_initial_observer']['windows_boot_sha256']){
+        if(-not $ExpectedBoot){$ExpectedBoot=$Baseline['windows_initial_observer']['windows_boot_sha256']}
+        if($Plan['windows_initial_observer']['windows_boot_sha256'] -cne $ExpectedBoot){
             throw 'runtime_stage_rearm_lineage'
         }
     }
@@ -366,7 +367,7 @@ function Open-RearmRuntimeImageLineage([string]$Root,$Spec,$Settings,$Service,[s
             'previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
         [HaRuntimeStageV1.Rules]::Keys($post,$fields)
         if([HaRuntimeStageV1.Rules]::Number($post,'schema_version') -ne 1 -or
-           $post['predecessor_kind'] -cne 'published-postboot-sameboot-v1' -or
+           $post['predecessor_kind'] -cnotin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1') -or
            $post['closure_mode'] -cne 'windows-offline-v1'){throw 'runtime_stage_rearm_lineage'}
         foreach($field in $fields|Where-Object{$_ -notin @('schema_version','predecessor_kind','closure_mode')}){
             if([HaRuntimeStageV1.Rules]::Text($post,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
@@ -382,13 +383,14 @@ function Open-RearmRuntimeImageLineage([string]$Root,$Spec,$Settings,$Service,[s
            $post['successor_service_image_sha256'] -ceq $post['previous_service_image_sha256'] -or
            $post['successor_service_image_path_sha256'] -cne $expectedPathHash -or
            $plan['initial_service_start']['service_image_path_sha256'] -cne $expectedPathHash -or
-           $post['previous_windows_boot_sha256'] -cne $baseline['windows_initial_observer']['windows_boot_sha256']){
+           ($post['predecessor_kind'] -ceq 'published-postboot-sameboot-v1' -and $post['previous_windows_boot_sha256'] -cne $plan['windows_initial_observer']['windows_boot_sha256']) -or
+           ($post['predecessor_kind'] -ceq 'published-postboot-saved-reboot-v1' -and $post['previous_windows_boot_sha256'] -ceq $plan['windows_initial_observer']['windows_boot_sha256'])){
             throw 'runtime_stage_rearm_lineage'
         }
         $nextHash=$post['predecessor_plan_sha256']
         if(-not $seen.Add($nextHash)){throw 'runtime_stage_rearm_lineage'}
         $plan=Read-RearmRuntimeLineagePlan (Join-Path $expectedRoot 'postboot-predecessor-plan.json') $nextHash $expectedRoot $Spec $Opened $lineage
-        Assert-RearmRuntimeLineageScope $plan $Spec $baseline
+        Assert-RearmRuntimeLineageScope $plan $Spec $baseline $post['previous_windows_boot_sha256']
         if($plan['windows_enforced']['service_image_sha256'] -cne $post['previous_service_image_sha256']){
             throw 'runtime_stage_rearm_lineage'
         }

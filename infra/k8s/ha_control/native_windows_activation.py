@@ -370,8 +370,8 @@ class WindowsActivationLease:
                 'PostbootPreviousWindowsBootSha256': checked_postboot['previous_windows_boot_sha256']}
             if 'predecessor_kind' in checked_postboot:
                 postboot_parameters['PostbootPredecessorKind']=checked_postboot['predecessor_kind']
-            from .initial_postboot import sameboot
-            if sameboot(checked_postboot):
+            from .initial_postboot import published_postboot
+            if published_postboot(checked_postboot):
                 for field in ('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'):
                     name='Postboot'+''.join(part.title() for part in field.split('_'))
                     postboot_parameters[name]=checked_postboot[field]
@@ -474,8 +474,8 @@ class WindowsActivationLease:
                 'PostbootPreviousWindowsBootSha256': checked_postboot['previous_windows_boot_sha256']}
             if 'predecessor_kind' in checked_postboot:
                 postboot_parameters['PostbootPredecessorKind']=checked_postboot['predecessor_kind']
-            from .initial_postboot import sameboot
-            if sameboot(checked_postboot):
+            from .initial_postboot import published_postboot
+            if published_postboot(checked_postboot):
                 for field in ('predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256'):
                     name='Postboot'+''.join(part.title() for part in field.split('_'))
                     postboot_parameters[name]=checked_postboot[field]

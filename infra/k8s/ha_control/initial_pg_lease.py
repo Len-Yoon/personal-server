@@ -706,16 +706,16 @@ class InitialPgLeasePostboot(InitialPgLeaseRecovery):
     _revoked_revision = 9
     _allow_postboot = True
     _unpublished_predecessor = False
-    _sameboot_predecessor = False
+    _published_postboot_predecessor = False
 
     def _bind(self, state):
         from .initial_postboot import scope
         previous = self.postboot
         super()._bind(state)
         selected = scope(self.backend.plan)
-        from .initial_postboot import after_unpublished, sameboot, predecessor_matches
-        if (sameboot(selected)!=self._sameboot_predecessor
-                or (not sameboot(selected) and after_unpublished(selected)!=self._unpublished_predecessor)):
+        from .initial_postboot import after_unpublished, published_postboot, predecessor_matches
+        if (published_postboot(selected)!=self._published_postboot_predecessor
+                or (not published_postboot(selected) and after_unpublished(selected)!=self._unpublished_predecessor)):
             _deny('initial_postboot_scope_unverified')
         raw=getattr(self.backend.fence_adapter,'_predecessor_terminal',None)
         from .initial_unpublished import derive_predecessor
@@ -776,5 +776,5 @@ class InitialPgLeasePostbootAfterUnpublished(InitialPgLeasePostboot):
 
 
 class InitialPgLeasePostbootResume(InitialPgLeasePostboot):
-    """One explicit same-boot successor, retaining the original stopped tuple."""
-    _sameboot_predecessor = True
+    """One explicit published postboot successor, retaining the original stopped tuple."""
+    _published_postboot_predecessor = True

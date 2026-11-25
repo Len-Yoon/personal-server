@@ -420,8 +420,8 @@ def start_initial_recovery(request, assert_windows_current):
             _need(resume is not None, error)
         if postboot and resume is None:
             from .native_guest_postboot import observe
-            from .initial_postboot import stopped_attempt, sameboot
-            if sameboot(args['postboot']):
+            from .initial_postboot import stopped_attempt, published_postboot
+            if published_postboot(args['postboot']):
                 _need(args['postboot_stopped_receipt_sha256']==args['postboot']['stopped_receipt_sha256'],error)
             stopped = observe(request,stopped_attempt(args['postboot']),args['postboot_stopped_receipt_sha256'])
             baseline = (stopped['container_contracts'],args['protected_inventory_sha256'])

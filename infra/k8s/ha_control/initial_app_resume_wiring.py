@@ -19,7 +19,7 @@ import time
 
 from . import native_guest_ssh as ssh, native_stdio_bridge as wire
 from .controller import TransitionBlocked
-from .initial_postboot import scope, sameboot, TRANSITION_FIELDS
+from .initial_postboot import scope, published_postboot, TRANSITION_FIELDS
 from .initial_unpublished import derive_predecessor
 
 ERROR = 'successor_app_start_unverified'
@@ -56,7 +56,7 @@ def sample_pair(plan, plan_pin, terminal_raw, challenge, incarnation, *, connect
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import ExitStack
     from ha_control.initial_pg_lease import InitialPgLeaseRecovery
-    from ha_control.initial_postboot import scope, sameboot
+    from ha_control.initial_postboot import scope, published_postboot
     from ha_control.initial_unpublished import derive_predecessor
     from ha_runtime.effects import Binding, validate_catalog
 
@@ -68,7 +68,7 @@ def sample_pair(plan, plan_pin, terminal_raw, challenge, incarnation, *, connect
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     postboot = scope(plan)
-    require(sameboot(postboot) and set(plan['pg_nodes']) == {'A', 'B'})
+    require(published_postboot(postboot) and set(plan['pg_nodes']) == {'A', 'B'})
     terminal_pin = postboot['predecessor_terminal_sha256']
     _, revision, _ = derive_predecessor(terminal_raw, terminal_pin, published=True)
     prior = json.loads(terminal_raw)
@@ -399,7 +399,7 @@ class SuccessorAppStage:
              and json.loads(plan_raw, object_pairs_hook=wire._pairs) == plan
              and type(predecessor_terminal) is bytes and wire._digest(predecessor_terminal) == proof_inputs.terminal_sha256)
         postboot = scope(plan)
-        need(sameboot(postboot) and TRANSITION_FIELDS <= postboot.keys()
+        need(published_postboot(postboot) and TRANSITION_FIELDS <= postboot.keys()
              and wire._hash(postboot.get('carryover_receipt_sha256'))
              and postboot['predecessor_terminal_sha256'] == proof_inputs.terminal_sha256
              and plan['source_commit'] == proof_inputs.source_commit

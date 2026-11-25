@@ -73,14 +73,15 @@ def _closed(value, revision, terminal):
             and _pin(value.get('closed_proof_sha256')))
 
 
-def bind_successor_plan(candidate, previous_raw, plan_pin, files):
+def bind_successor_plan(candidate, previous_raw, plan_pin, files, *, allow_saved_reboot=False):
     """Validate final native files before handing a candidate to the Windows armer."""
-    from .initial_postboot import CARRYOVER_FIELD, FILES, TRANSITION_FIELDS, sameboot, scope, validate_seal
+    from .initial_postboot import CARRYOVER_FIELD, FILES, TRANSITION_FIELDS, sameboot, saved_reboot, scope, validate_seal
 
     _need(type(previous_raw) is bytes and 0 < len(previous_raw) <= 65536)
     _need(type(candidate) is dict and type(files) is dict)
     value = scope(candidate)
-    _need(sameboot(value) and TRANSITION_FIELDS <= value.keys() and CARRYOVER_FIELD in value)
+    _need((sameboot(value) or (allow_saved_reboot is True and saved_reboot(value)))
+          and TRANSITION_FIELDS <= value.keys() and CARRYOVER_FIELD in value)
     _need(_pin(plan_pin) and hashlib.sha256(_encoded(candidate)).hexdigest() == plan_pin)
     _need(files.get('postboot-predecessor-plan.json') == previous_raw
           and hashlib.sha256(previous_raw).hexdigest() == value['predecessor_plan_sha256'])
@@ -89,7 +90,7 @@ def bind_successor_plan(candidate, previous_raw, plan_pin, files):
     return {'plan_sha256': plan_pin, 'carryover_sha256': value[CARRYOVER_FIELD],
             'successor_image_sha256': value['successor_service_image_sha256'],
             'terminal_sha256': value['predecessor_terminal_sha256'],
-            'closed_proof_sha256': json.loads(files[FILES[3]])['closed_pair_sha256'],
+            'closed_proof_sha256': json.loads(files[FILES[4]])['closed_pair_sha256'],
             'previous_plan_sha256': value['predecessor_plan_sha256']}
 
 

@@ -111,7 +111,8 @@ class WindowsPairClosure:
         self.config = config.copy()
         self.files = files
 
-    def _call(self, mode, deadline, terminal_sha256=None, *, successor=None, verify_runtime=False):
+    def _call(self, mode, deadline, terminal_sha256=None, *, successor=None, verify_runtime=False,
+              resumed_windows_boot=None):
         _need(mode in {"snapshot", "disable", "closed", "closed_after_arm", "closed_before_disable"}
               and time.monotonic() < deadline)
         if mode != "snapshot":
@@ -121,8 +122,14 @@ class WindowsPairClosure:
                   and all(wire._hash(pin) for pin in successor.values()))
         else:
             _need(successor is None)
+        previous_boot = self.config["boot_sha256"]
+        if resumed_windows_boot is not None:
+            _need(mode == "closed" and wire._hash(resumed_windows_boot)
+                  and resumed_windows_boot != previous_boot)
+        live_boot = resumed_windows_boot if resumed_windows_boot is not None else previous_boot
+        challenge = wire._digest(bytes.fromhex(secrets.token_hex(32) + live_boot))
         config = self.config | {"mode": mode, "terminal_sha256": terminal_sha256,
-            "challenge": secrets.token_hex(32), "files": self.files,
+            "challenge": challenge, "live_boot_sha256": live_boot, "files": self.files,
             "sql": base64.b64encode(PAIRED_SQL.encode()).decode("ascii"), "successor": successor,
             "verify_runtime": verify_runtime or mode in {"closed", "closed_after_arm", "closed_before_disable"}}
         # The real old manifest contains hundreds of files. Compress only the
@@ -170,6 +177,11 @@ class WindowsPairClosure:
 
     def closed_pair(self, terminal_sha256, deadline):
         return self._call("closed", deadline, terminal_sha256)
+
+    def closed_pair_after_reboot(self, terminal_sha256, observed_windows_boot_sha256, deadline):
+        """Verify both still-closed DBs using the archived plan in the exact new Windows boot."""
+        _need(wire._hash(observed_windows_boot_sha256))
+        return self._call("closed", deadline, terminal_sha256, resumed_windows_boot=observed_windows_boot_sha256)
 
     def closed_pair_before_disable(self, terminal_sha256, deadline):
         """Read natural native closure before changing a stopped Manual SCM."""
@@ -474,7 +486,10 @@ function Stopped($service){
  if($service.State -cne 'Stopped' -or $service.ProcessId -ne 0 -or
     $service.StartMode -cnotin @('Manual','Disabled')){throw 'release_stopped'}
 }
-if((Pin ($enc.GetBytes((Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks.ToString()))) -cne $cfg.boot_sha256){throw 'release_boot'}
+function Confirm-WindowsBoot {
+ if((Pin ($enc.GetBytes((Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks.ToString()))) -cne $cfg.live_boot_sha256){throw 'release_boot'}
+}
+Confirm-WindowsBoot
 # The untrusted preliminary parse supplies only a read-only ACL exception.
 # Full bytes and ACL ownership are pinned before using any plan authority.
 $planRaw=[IO.File]::ReadAllBytes($cfg.plan)
@@ -492,7 +507,7 @@ if($binding.controller_plan_sha256 -cne $cfg.plan_sha256 -or
    $binding.attempt_id -cne $plan.initial_cutover_handoff.attempt_id -or
    $binding.legacy_plan_sha256 -cne $plan.initial_cutover_handoff.legacy_plan_sha256 -or
    $plan.windows_initial_observer.windows_boot_sha256 -cne $cfg.boot_sha256 -or
-   $plan.initial_recovery_postboot.predecessor_kind -cne 'published-postboot-sameboot-v1'){throw 'release_binding'}
+   $plan.initial_recovery_postboot.predecessor_kind -cnotin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1')){throw 'release_binding'}
 # Validate every archived code/data file and Python dependency before executing
 # the old package. Paths and hashes originate in the independently pinned manifest.
 if($cfg.verify_runtime){
@@ -572,6 +587,7 @@ if($cfg.mode -cnotin @('closed_after_arm','closed_before_disable') -and $service
 $body=$enc.GetString([Convert]::FromBase64String($cfg.sql))
 $rows=@($body|& $exe -I -B - $cfg.runtime $cfg.plan $cfg.plan_sha256 $binding.state_path $terminalPin $cfg.challenge $cfg.revision 2>$null)
 if($LASTEXITCODE -ne 0 -or $rows.Count -ne 1){throw 'release_pair'}
+if($cfg.live_boot_sha256 -cne $cfg.boot_sha256){Confirm-WindowsBoot}
 $after=BoundService;Stopped $after
 if(($cfg.mode -ceq 'closed_after_arm' -and $after.StartMode -cne 'Manual') -or
    ($cfg.mode -cnotin @('closed_after_arm','closed_before_disable') -and $after.StartMode -cne 'Disabled') -or

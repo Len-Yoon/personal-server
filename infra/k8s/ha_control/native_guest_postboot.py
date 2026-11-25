@@ -154,11 +154,11 @@ def carryover_path(request, attempt):
 
 
 def _carryover_scope(request):
-    from .initial_postboot import scope, sameboot
+    from .initial_postboot import scope, published_postboot
     value = scope({'initial_recovery_postboot': request.args['postboot'],
                    'initial_cutover_recovery': {'attempt_id': request.args['recovery_attempt_id']},
                    'initial_cutover_handoff': {'attempt_id': request.binding.attempt_id}})
-    worker._need(sameboot(value), ERROR)
+    worker._need(published_postboot(value), ERROR)
     value.pop('carryover_receipt_sha256', None)
     # The new predecessor seal contains this receipt's digest; exclude that
     # later seal pin to avoid a circular hash. The final plan pins both.

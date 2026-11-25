@@ -8,20 +8,32 @@ param(
     [ValidatePattern('^[a-f0-9]{64}$')]
     [string]$VmBIdSha256,
     [switch]$StartGuests,
-    [switch]$SavedGuestsOnly
+    [switch]$SavedGuestsOnly,
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$AttestSavedWindowsBootSha256
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Get-VmIdSha256([guid]$Id) {
+function Get-TextSha256([string]$Value) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $bytes = [Text.Encoding]::ASCII.GetBytes($Id.ToString('D').ToLowerInvariant())
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
         return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
     } finally {
         $sha.Dispose()
     }
+}
+
+function Get-VmIdSha256([guid]$Id) {
+    Get-TextSha256 $Id.ToString('D').ToLowerInvariant()
+}
+
+function Assert-WindowsBoot([string]$Expected) {
+    $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop
+    $boot = Get-TextSha256 $os.LastBootUpTime.ToUniversalTime().Ticks.ToString()
+    if ($boot -cne $Expected) { throw 'n100_boot_saved_windows_identity_unverified' }
 }
 
 function Assert-VmScope($VM) {
@@ -63,6 +75,9 @@ function Start-Guest($Guest, [Diagnostics.Stopwatch]$Clock) {
 }
 
 if ($VmAIdSha256 -ceq $VmBIdSha256) { throw 'n100_boot_duplicate_vm_identity' }
+if ($AttestSavedWindowsBootSha256 -and ($StartGuests -or $SavedGuestsOnly)) {
+    throw 'n100_boot_saved_attestation_must_observe'
+}
 
 $gate = [Threading.Mutex]::new($false, 'Global\N100HA-Start-VM-Guests')
 $held = $false
@@ -71,9 +86,22 @@ try {
     catch [Threading.AbandonedMutexException] { $held = $true }
     if (-not $held) { throw 'n100_boot_vm_start_already_running' }
 
+    if ($AttestSavedWindowsBootSha256) { Assert-WindowsBoot $AttestSavedWindowsBootSha256 }
     $inventory = @(Get-VM -ErrorAction Stop)
     $a = Find-Guest $inventory $VmAIdSha256
     $b = Find-Guest $inventory $VmBIdSha256
+    if ($AttestSavedWindowsBootSha256) {
+        if ([string]$a.State -cne 'Saved' -or [string]$b.State -cne 'Saved') {
+            throw 'n100_boot_saved_pair_unverified'
+        }
+        Assert-WindowsBoot $AttestSavedWindowsBootSha256
+        @{
+            windows_boot_sha256 = $AttestSavedWindowsBootSha256
+            saved = @{ A = 'Saved'; B = 'Saved' }
+            vm_id_sha256 = @{ A = $VmAIdSha256; B = $VmBIdSha256 }
+        } | ConvertTo-Json -Depth 3 -Compress
+        return
+    }
     if ($StartGuests) {
         if ($SavedGuestsOnly -and [string]$a.State -ceq 'Running' -and [string]$b.State -cne 'Running') {
             throw 'n100_boot_saved_guest_order_unverified'
