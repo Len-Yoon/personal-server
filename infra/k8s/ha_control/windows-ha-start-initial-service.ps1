@@ -1308,15 +1308,228 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     } finally { $commandLock.Dispose() }
 }
 
+function Get-SavedRebootPythonInventory($Plan,$Manifest){
+    $bad='initial_service_saved_reboot_runtime_custody'
+    $scope=$Plan.windows_enforced;$attempt=$Plan.initial_cutover_recovery.attempt_id
+    if(($manifest.schema_version -isnot [int] -and $manifest.schema_version -isnot [long]) -or $manifest.schema_version -ne 2 -or
+       $manifest.source_commit -cne $Plan.source_commit -or $manifest.installation_id -cne $Plan.installation_id -or
+       $manifest.service_name -cne $scope.service_name -or $manifest.service_sid -cne $scope.service_sid -or
+       $manifest.recovery_attempt_id -cne $attempt -or
+       $manifest.reservation_receipt_sha256 -cne $Plan.initial_service_start.reservation_receipt_sha256){throw $bad}
+    $expected=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach($property in $manifest.files.PSObject.Properties){
+        $name=$property.Name;$spec=$property.Value
+        if($spec.component -cne 'python-runtime'){if($name.StartsWith('python/')){throw $bad};continue}
+        if($name -cnotmatch '\Apython/[A-Za-z0-9_.+/-]+\z' -or $name -match '(^|/)\.\.?(/|$)' -or
+           $name.EndsWith('/') -or $name.Contains('//') -or $spec.filename -cne $name -or
+           $spec.sha256 -isnot [string] -or $spec.sha256 -cnotmatch $hashPattern -or
+           ($spec.bytes -isnot [int] -and $spec.bytes -isnot [long]) -or $spec.bytes -lt 0 -or $spec.bytes -gt 67108864){throw $bad}
+        $expected.Add($name.Substring(7),$spec)
+    }
+    if($expected.Count -ne 776 -or -not $expected.ContainsKey('python.exe') -or $expected['python.exe'].sha256 -cne $scope.python_sha256){throw $bad}
+    return ,$expected
+}
+
+function Get-SavedRebootControllerInventory($Plan,$Manifest){
+    $bad='initial_service_saved_reboot_runtime_custody'
+    $expected=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach($property in $Manifest.files.PSObject.Properties){
+        $name=$property.Name;$spec=$property.Value
+        if($spec.component -cne 'controller-code'){if($name.StartsWith('controller/')){throw $bad};continue}
+        if($name -cnotmatch '\Acontroller/[A-Za-z0-9_.+/-]+\z' -or $name -match '(^|/)\.\.?(/|$)' -or
+           $name.EndsWith('/') -or $name.Contains('//') -or $spec.filename -cne $name -or
+           $spec.sha256 -isnot [string] -or $spec.sha256 -cnotmatch $hashPattern -or
+           ($spec.bytes -isnot [int] -and $spec.bytes -isnot [long]) -or $spec.bytes -lt 0 -or $spec.bytes -gt 67108864){throw $bad}
+        $expected.Add($name.Substring(11),$spec)
+        if($expected.Count -gt 8192){throw $bad}
+    }
+    if(-not $expected.ContainsKey('source-manifest.json') -or -not $expected.ContainsKey('files/ha_control/launcher.py') -or
+       $expected['files/ha_control/launcher.py'].sha256 -cne $Plan.windows_enforced.launcher_sha256){throw $bad}
+    return ,$expected
+}
+
+function Open-SavedRebootInterpreterTree($Plan,$Held,[string]$CandidatePath){
+    $bad='initial_service_saved_reboot_runtime_custody'
+    $scope=$Plan.windows_enforced;$attempt=$Plan.initial_cutover_recovery.attempt_id
+    $manifestPin=$Plan.saved_reboot_runtime_manifest_sha256
+    if($attempt -cnotmatch $hashPattern -or $manifestPin -isnot [string] -or $manifestPin -cnotmatch $hashPattern){throw $bad}
+    $manifestPath=Join-Path ([IO.Path]::GetDirectoryName($CandidatePath)) 'postboot-runtime-manifest.json'
+    Assert-UnpublishedTcbPath $manifestPath
+    $manifest=Read-PinnedJson $manifestPath $manifestPin
+    $manifestHandle=[IO.File]::Open($manifestPath,'Open','Read','Read');$Held.Add($manifestHandle)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$actualPin=[BitConverter]::ToString($sha.ComputeHash($manifestHandle)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    if($actualPin -cne $manifestPin){throw $bad}
+    $expected=Get-SavedRebootPythonInventory $Plan $manifest
+    $serviceRoot='C:\ProgramData\N100HA_'+$attempt.Substring(0,24)
+    $pattern='\A'+[regex]::Escape($serviceRoot)+'\\runtime-'+$manifestPin.Substring(0,24)+'\\python\\python\.exe\z'
+    if($scope.python_path -cnotmatch $pattern){throw $bad}
+    $pythonRoot=[IO.Path]::GetDirectoryName($scope.python_path)
+    $runtimeRoot=[IO.Path]::GetDirectoryName($pythonRoot)
+    if($scope.launcher_path -cne (Join-Path $runtimeRoot 'controller\files\ha_control\launcher.py')){throw $bad}
+    Assert-UnpublishedTcbPath $runtimeRoot
+    $controllerExpected=Get-SavedRebootControllerInventory $Plan $manifest
+    $pythonFiles=$null
+    foreach($inventory in @(@{Root=$pythonRoot;Expected=$expected;Python=$true},
+                            @{Root=(Join-Path $runtimeRoot 'controller');Expected=$controllerExpected;Python=$false})){
+        $treeRoot=$inventory.Root;$leafExpected=$inventory.Expected
+        $pending=[Collections.Generic.Stack[string]]::new();$pending.Push($treeRoot)
+        $files=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$directories=0
+        while($pending.Count){
+            $path=$pending.Pop();$entry=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if(($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+               ($entry -isnot [IO.FileInfo] -and $entry -isnot [IO.DirectoryInfo])){throw $bad}
+            # Match the runtime stager's private ACL: administrators/SYSTEM own the
+            # immutable tree, and only the exact controller service may read/execute.
+            $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $entry.FullName -ErrorAction Stop).Sddl)
+            if($sd.Owner.Value -notin @('S-1-5-18','S-1-5-32-544') -or $null -eq $sd.DiscretionaryAcl -or
+               $sd.DiscretionaryAcl.Count -ne 3 -or
+               -not ($sd.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)){throw $bad}
+            $sids=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach($ace in $sd.DiscretionaryAcl){
+                if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
+                   $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+                   -not $sids.Add($ace.SecurityIdentifier.Value)){throw $bad}
+                $sid=$ace.SecurityIdentifier.Value
+                $mask=if($sid -ceq $scope.service_sid){1179817}elseif($sid -cin @('S-1-5-18','S-1-5-32-544')){2032127}else{throw $bad}
+                $flags=if($entry -is [IO.DirectoryInfo]){3}else{0}
+                if($ace.AccessMask -ne $mask -or [int]$ace.AceFlags -ne $flags){throw $bad}
+            }
+            if($entry -is [IO.DirectoryInfo]){
+                $directories++;if($directories -gt 8192){throw $bad}
+                foreach($child in [IO.Directory]::GetFileSystemEntries($entry.FullName)){
+                    if($child -cnotmatch '\A[A-Za-z]:\\[A-Za-z0-9_.+\\-]+\z' -or $child -match '\\\.\.?(\\|$)'){throw $bad}
+                    $pending.Push($child)
+                }
+            }else{
+                $name=$entry.FullName.Substring($treeRoot.Length+1).Replace('\','/')
+                if(-not $files.Add($name) -or $files.Count -gt $leafExpected.Count -or -not $leafExpected.ContainsKey($name) -or
+                   $entry.Length -ne $leafExpected[$name].bytes -or
+                   -not ($entry.Attributes -band [IO.FileAttributes]::ReadOnly) -or
+                   $name.EndsWith('.pth',[StringComparison]::OrdinalIgnoreCase)){throw $bad}
+                $handle=[IO.File]::Open($entry.FullName,'Open','Read','Read');$Held.Add($handle)
+                $sha=[Security.Cryptography.SHA256]::Create()
+                try{$pin=[BitConverter]::ToString($sha.ComputeHash($handle)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+                if($handle.Length -ne $leafExpected[$name].bytes -or $pin -cne $leafExpected[$name].sha256){throw $bad}
+            }
+        }
+        if($files.Count -ne $leafExpected.Count){throw $bad}
+        if($inventory.Python){$pythonFiles=$files}
+    }
+    foreach($required in @('python.exe','python313.dll','python313.zip','python313._pth',
+                          'Lib/site-packages/psycopg/__init__.py','Lib/site-packages/psycopg_binary/__init__.py','Lib/site-packages/tzdata/__init__.py')){
+        if(-not $pythonFiles.Contains($required)){throw $bad}
+    }
+    if([IO.File]::ReadAllText((Join-Path $pythonRoot 'python313._pth'),[Text.UTF8Encoding]::new($false,$true)) -cne "python313.zip`n.`nLib/site-packages`n"){throw $bad}
+    foreach($name in @('python.exe','python313.dll')){
+        $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $pythonRoot $name) -ErrorAction Stop
+        if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
+           $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)(?:O|CN)=Python Software Foundation(?:,|$)'){throw $bad}
+    }
+}
+
+function Assert-SavedRebootCredentialLeaf([string]$Path,[string]$ServiceSid){
+    $bad='initial_service_saved_reboot_credential_custody'
+    Assert-UnpublishedTcbPath $Path
+    $leaf=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if($leaf -isnot [IO.FileInfo] -or ($leaf.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw $bad}
+    $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl)
+    foreach($ace in $sd.DiscretionaryAcl){
+        if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw $bad}
+        if(([int]$ace.AceFlags -band 8) -ne 0){continue}
+        $mask=[long]$ace.AccessMask -band 4294967295
+        $readMask=2147483648 -bor 268435456 -bor 131209
+        if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+           ($mask -band $readMask) -ne 0 -and $ace.SecurityIdentifier.Value -cnotin @('S-1-5-18','S-1-5-32-544',$ServiceSid)){throw $bad}
+    }
+}
+
+function Assert-SavedRebootFreshClosedPair($Plan,[string]$CandidatePath,[string]$CandidateSha){
+    $bad='initial_service_saved_reboot_fresh_closure_required'
+    $scope=$Plan.windows_enforced;$post=$Plan.initial_recovery_postboot
+    Assert-PostbootEnvelope $post
+    if($post.predecessor_kind -cne 'published-postboot-saved-reboot-v1' -or $CandidateSha -cnotmatch $hashPattern){throw $bad}
+    $held=[Collections.Generic.List[IDisposable]]::new();$process=$null
+    try{
+        Open-SavedRebootInterpreterTree $Plan $held $CandidatePath
+        foreach($entry in @(@{path=$CandidatePath;pin=$CandidateSha},
+                           @{path=$scope.python_path;pin=$scope.python_sha256},
+                           @{path=$scope.launcher_path;pin=$scope.launcher_sha256})){
+            Assert-UnpublishedTcbPath $entry.path
+            Assert-Executable $entry.path $entry.pin
+            $handle=[IO.File]::Open($entry.path,'Open','Read','Read');$held.Add($handle)
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{$pin=[BitConverter]::ToString($sha.ComputeHash($handle)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+            if($pin -cne $entry.pin){throw $bad}
+        }
+        foreach($node in @('A','B')){
+            foreach($field in @('sslrootcert','passfile')){
+                $path=$Plan.pg_nodes.$node.$field
+                Assert-SavedRebootCredentialLeaf $path $scope.service_sid
+                $held.Add([IO.File]::Open($path,'Open','Read','Read'))
+            }
+        }
+        $root=[IO.Path]::GetDirectoryName($CandidatePath)
+        $resumePath=Join-Path $root 'postboot-resume-evidence.json'
+        Assert-UnpublishedTcbPath $resumePath
+        $resume=Read-PinnedJson $resumePath ((Get-FileHash -LiteralPath $resumePath -Algorithm SHA256).Hash.ToLowerInvariant())
+        if($resume.plan_sha256 -cne $CandidateSha -or
+           ($resume.closed_revision -isnot [int] -and $resume.closed_revision -isnot [long]) -or
+           $resume.closed_revision -lt 1){throw $bad}
+        $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks.ToString()
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$before=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($boot))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        if($before -cne $Plan.windows_initial_observer.windows_boot_sha256 -or $before -ceq $post.previous_windows_boot_sha256){throw $bad}
+        $random=[byte[]]::new(32);$rng=[Security.Cryptography.RandomNumberGenerator]::Create()
+        try{$rng.GetBytes($random)}finally{$rng.Dispose()}
+        $challenge=[BitConverter]::ToString($random).Replace('-','').ToLowerInvariant()
+        $start=[Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=$scope.python_path
+        $start.Arguments='-I -B "'+$scope.launcher_path+'" --verify-saved-reboot-closed-pair "'+$CandidatePath+'" '+$CandidateSha+' '+$challenge
+        $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+        $start.WorkingDirectory=[IO.Path]::GetDirectoryName($scope.python_path)
+        $system=[Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        $start.EnvironmentVariables.Clear();$start.EnvironmentVariables['SystemRoot']=$system
+        $start.EnvironmentVariables['PATH']=Join-Path $system 'System32'
+        $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        $start.StandardOutputEncoding=[Text.UTF8Encoding]::new($false,$true)
+        $start.StandardErrorEncoding=[Text.UTF8Encoding]::new($false,$true)
+        $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+        if(-not $process.Start()){throw $bad}
+        $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+        if(-not $process.WaitForExit(15000) -or -not $stdout.Wait(1000) -or -not $stderr.Wait(1000) -or
+           $process.ExitCode -ne 0 -or $stderr.Result.Length -ne 0){throw $bad}
+        $raw=$stdout.Result
+        # Restrict the entire wire representation before JSON decoding so duplicate,
+        # escaped duplicate, extra, floating-point and oversized values fail closed.
+        $member='"(?:challenge|plan_sha256|closed_revision|proof_sha256)"\s*:\s*(?:"[a-f0-9]{64}"|0|[1-9][0-9]*)'
+        if($raw.Length -lt 1 -or $raw.Length -gt 4096 -or $raw -cnotmatch ('\A\s*\{\s*'+$member+'\s*(?:,\s*'+$member+'\s*){3}\}\s*\z')){throw $bad}
+        $keys=@([regex]::Matches($raw,'"(challenge|plan_sha256|closed_revision|proof_sha256)"\s*:')|ForEach-Object {$_.Groups[1].Value}|Sort-Object -CaseSensitive)
+        if(($keys -join ',') -cne 'challenge,closed_revision,plan_sha256,proof_sha256'){throw $bad}
+        $result=ConvertFrom-Json $raw
+        if($result.challenge -isnot [string] -or $result.challenge -cne $challenge -or
+           $result.plan_sha256 -isnot [string] -or $result.plan_sha256 -cne $CandidateSha -or
+           ($result.closed_revision -isnot [int] -and $result.closed_revision -isnot [long]) -or
+           $result.closed_revision -ne $resume.closed_revision -or
+           $result.proof_sha256 -isnot [string] -or $result.proof_sha256 -cnotmatch $hashPattern){throw $bad}
+        $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks.ToString()
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$after=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($boot))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        if($after -cne $before -or $after -cne $Plan.windows_initial_observer.windows_boot_sha256){throw $bad}
+    }catch{throw $bad}finally{
+        if($null -ne $process){
+            try{if(-not $process.HasExited){$process.Kill();$null=$process.WaitForExit(1000)}}catch{}
+            $process.Dispose()
+        }
+        foreach($handle in $held){$handle.Dispose()}
+    }
+}
+
 function Arm-SamebootSuccessorHost($Plan,$Approval,$Current){
     $r=$Plan.initial_recovery_postboot
     Assert-PostbootEnvelope $r
-    if($r.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'){
-        # A caller-supplied proof pin cannot replace an on-host authenticated
-        # fresh closure bridge across a Windows reboot. Keep raw SCM arming closed.
-        throw 'initial_service_saved_reboot_authenticated_bridge_required'
-    }
-    if($r.predecessor_kind -cne 'published-postboot-sameboot-v1' -or
+    $savedReboot=$r.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'
+    if($r.predecessor_kind -cnotin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1') -or
        'successor_service_image_sha256' -cnotin $r.PSObject.Properties.Name -or
        $ServiceHostSha256 -cne $r.successor_service_image_sha256 -or
        $Plan.windows_enforced.service_image_sha256 -cne $ServiceHostSha256 -or
@@ -1337,7 +1550,8 @@ function Arm-SamebootSuccessorHost($Plan,$Approval,$Current){
     $resumePath=Join-Path $root 'postboot-resume-evidence.json'
     Assert-UnpublishedTcbPath $resumePath
     $resume=Read-PinnedJson $resumePath ((Get-FileHash -LiteralPath $resumePath -Algorithm SHA256).Hash.ToLowerInvariant())
-    if($pre.closed_pair_sha256 -cne $ClosedPairProofSha256 -or $resume.closed_pair_sha256 -cne $ClosedPairProofSha256 -or
+    $archivalWrong=if($savedReboot){$pre.closed_pair_sha256 -ceq $ClosedPairProofSha256}else{$pre.closed_pair_sha256 -cne $ClosedPairProofSha256}
+    if($ClosedPairProofSha256 -cnotmatch $hashPattern -or $archivalWrong -or $resume.closed_pair_sha256 -cne $ClosedPairProofSha256 -or
        $resume.plan_sha256 -cne $PlanSha256 -or $resume.closed_revision -ne $pre.closed_revision){
         throw 'initial_service_host_handoff'
     }
@@ -1390,6 +1604,13 @@ function Arm-SamebootSuccessorHost($Plan,$Approval,$Current){
         [TrustedStoppedV1.Contract]::Verify($prior,$ServiceName,$Current.PathName)
         Seal-HaInitialPostbootAcceptance $PlanPath $PlanSha256 -AllowExistingSeal
         Assert-RecoveryPredecessorStopped $Plan $root
+        if($savedReboot){
+            Assert-SavedRebootFreshClosedPair $Plan $PlanPath $PlanSha256
+            $fresh=$scm.Read($ServiceName)
+            if($fresh.Start -ne 4 -or $fresh.Image -cne $Current.PathName){throw 'initial_service_host_handoff'}
+            $fresh.Start=3
+            [TrustedStoppedV1.Contract]::Verify($fresh,$ServiceName,$Current.PathName)
+        }
         $confirmed=Get-CimInstance Win32_Service -Filter ("Name='"+$ServiceName+"'") -OperationTimeoutSec 5
         if($confirmed.State -cne 'Stopped' -or $confirmed.StartMode -cne 'Disabled' -or $confirmed.ProcessId -ne 0 -or
            $confirmed.PathName -cne $Current.PathName -or $confirmed.StartName -cne $Current.StartName){
@@ -1440,13 +1661,10 @@ try {
     }
     $hostPath = $current.PathName.Substring(1,$current.PathName.Length - 2)
     $plan = Read-PinnedJson $PlanPath $PlanSha256
-    if('initial_recovery_postboot' -cin $plan.PSObject.Properties.Name -and
+    $savedReboot='initial_recovery_postboot' -cin $plan.PSObject.Properties.Name -and
        'predecessor_kind' -cin $plan.initial_recovery_postboot.PSObject.Properties.Name -and
-       $plan.initial_recovery_postboot.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'){
-        # Cover arm, ordinary -Go Start-Service and transition dispatch before
-        # any service mutation until the on-host authenticated bridge exists.
-        throw 'initial_service_saved_reboot_authenticated_bridge_required'
-    }
+       $plan.initial_recovery_postboot.predecessor_kind -ceq 'published-postboot-saved-reboot-v1'
+    if($savedReboot -and ($transition -or -not $recovering)){throw 'initial_service_saved_reboot_mode'}
     $approval = Read-PinnedJson $ApprovalPath $ApprovalSha256
     if($ArmPostbootHost){Arm-SamebootSuccessorHost $plan $approval $current;return}
     Assert-Executable $hostPath $ServiceHostSha256
@@ -1529,6 +1747,7 @@ try {
     if ($recovering) {
         Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetDirectoryName($PlanPath))
     }
+    if($savedReboot){Assert-SavedRebootFreshClosedPair $plan $PlanPath $PlanSha256}
     $file = [IO.FileStream]::new($argsPath,[IO.FileMode]::CreateNew,
         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
         [IO.FileOptions]::WriteThrough,$security)
@@ -1586,6 +1805,18 @@ public static class HaInitialLeaseFileTime {
     } finally { $scm.Dispose() }
     if ($recovering) {
         Assert-RecoveryPredecessorStopped $plan ([IO.Path]::GetDirectoryName($PlanPath))
+    }
+    if($savedReboot){
+        Assert-SavedRebootFreshClosedPair $plan $PlanPath $PlanSha256
+        $scm=[TrustedStoppedV1.Native]::new()
+        try{
+            $scm.OpenForRead($ServiceName)
+            [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$current.PathName)
+            $confirmed=Get-CimInstance Win32_Service -Filter ("Name='"+$ServiceName+"'") -OperationTimeoutSec 5
+            if($confirmed.State -cne 'Stopped' -or $confirmed.StartMode -cne 'Manual' -or $confirmed.ProcessId -ne 0 -or
+               $confirmed.PathName -cne $current.PathName -or $confirmed.StartName -cne $current.StartName -or
+               $confirmed.ServiceType -cne 'Own Process' -or $confirmed.DesktopInteract){throw 'initial_service_saved_reboot_service_changed'}
+        }finally{$scm.Dispose()}
     }
     # Once invoked, a missing response is an uncertain activation. Preserve all records.
     Start-Service -Name $ServiceName -ErrorAction Stop

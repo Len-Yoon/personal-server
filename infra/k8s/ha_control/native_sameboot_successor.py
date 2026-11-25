@@ -88,14 +88,16 @@ def _endpoint(old, current):
 
 def assemble_material(previous_raw, terminal_raw, binding_raw, args_raw, stop_raw, *,
                       previous_sha256, attempt, successor_image_sha256, runtime, observers, evidence,
-                      pre_save_seal=None):
+                      pre_save_seal=None, reboot_runtime_manifest=None):
     """Prepare native input bytes from verified runtime, closure and observer receipts.
 
     The acceptance file in this result is the expected native result. The Windows
     sealer creates the actual file after checking the real predecessor and SCM.
     """
     reboot = pre_save_seal is not None
-    _need(not reboot or (type(pre_save_seal) is bytes and 0 < len(pre_save_seal) <= 8192))
+    _need((not reboot and reboot_runtime_manifest is None) or
+          (reboot and type(pre_save_seal) is bytes and 0 < len(pre_save_seal) <= 8192
+           and type(reboot_runtime_manifest) is bytes and 0 < len(reboot_runtime_manifest) <= 1048576))
     postboot = draft_postboot(previous_raw, terminal_raw, binding_raw, args_raw, stop_raw,
                              previous_sha256=previous_sha256, attempt=attempt,
                              successor_image_sha256=successor_image_sha256, saved_reboot=reboot)
@@ -119,6 +121,10 @@ def assemble_material(previous_raw, terminal_raw, binding_raw, args_raw, stop_ra
     _need(set(observers) == {'legacy', 'held_admission', 'provider_isolation'})
     plan = old | {**{key: provenance[key] for key in PROVENANCE},
                   'source_commit': provenance['source_commit'], 'controller_bundle_sha256': runtime['bundle_sha256']}
+    if reboot:
+        plan['saved_reboot_runtime_manifest_sha256'] = runtime['manifest_sha256']
+    else:
+        plan.pop('saved_reboot_runtime_manifest_sha256', None)
     python = runtime_directory / 'python' / 'python.exe'
     launcher = runtime_directory / 'controller' / 'files' / 'ha_control' / 'launcher.py'
     plan['windows_enforced'] = identity | {
@@ -177,6 +183,8 @@ def assemble_material(previous_raw, terminal_raw, binding_raw, args_raw, stop_ra
     files = dict(zip(FILES, (terminal_raw, binding_raw, args_raw, seal_raw, resumed_raw, _encoded(accepted), stop_raw),
                      strict=True))
     files['postboot-predecessor-plan.json'] = previous_raw
+    if reboot:
+        files['postboot-runtime-manifest.json'] = reboot_runtime_manifest
     bind_successor_plan(plan, previous_raw, plan_pin, files, allow_saved_reboot=reboot)
     return {'candidate': plan, 'previous_raw': previous_raw, 'plan_pin': plan_pin, 'files': files}
 
@@ -330,8 +338,6 @@ __ARM__
         return self._run(body.replace('__ARM__', options), deadline)
 
     def arm(self, deadline):
-        if self.reboot_pair is not None:
-            raise TransitionBlocked('initial_service_saved_reboot_authenticated_bridge_required')
         expected = {'host_handoff_armed': True, 'plan_sha256': self.checked['plan_sha256'],
                     'service_image_path_sha256': self.config['image_path_pin'], 'service_started': False}
         _need(self._invoke(deadline, arm=True) == expected)
@@ -359,8 +365,6 @@ $null=Read-Pin ($service.PathName.Trim('"')) $cfg.parameters.ServiceHostSha256 6
         return self.arm_evidence()
 
     def start(self, deadline):
-        if self.reboot_pair is not None:
-            raise TransitionBlocked('initial_service_saved_reboot_authenticated_bridge_required')
         return self._publication(self._invoke(deadline, arm=False))
 
     def observe_publication(self, deadline):

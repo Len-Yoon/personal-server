@@ -1,6 +1,6 @@
 """Isolated fixed postboot-contract tests. No live Windows/guest actions."""
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'infra/k8s'))
@@ -1548,7 +1548,10 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                           effects_runtime_sha256='2' * 64)
         runtime = dict.fromkeys(('manifest_sha256', 'bundle_sha256', 'python_sha256', 'launcher_sha256',
                                  'preflight_sha256', 'scm_sha256'), '4' * 64)
-        runtime.update(path=rf'C:\ProgramData\N100HA_{recovery[:24]}\runtime-{"4" * 24}', provenance=provenance)
+        runtime_manifest = encode({'fixture': 'runtime'})
+        runtime['manifest_sha256'] = hashlib.sha256(runtime_manifest).hexdigest()
+        runtime.update(path=rf'C:\ProgramData\N100HA_{recovery[:24]}\runtime-{runtime["manifest_sha256"][:24]}',
+                       provenance=provenance)
         observers = {name: {'pipe_name': 'n100ha-recovery-proof-' + digit * 32,
                             'server_pid': 300 + index, 'key_sha256': digit * 64}
                      for index, (name, digit) in enumerate(zip(('legacy', 'held_admission', 'provider_isolation'),
@@ -1598,9 +1601,15 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         reboot_material = native.assemble_material(
             old_raw, terminal, binding, args, files[FILES[6]], previous_sha256=old_pin, attempt='a1'*32,
             successor_image_sha256='a2'*32, runtime=runtime, observers=observers, evidence=reboot_evidence,
-            pre_save_seal=archived_seal)
+            pre_save_seal=archived_seal, reboot_runtime_manifest=runtime_manifest)
         self.assertEqual(reboot_material['files'][FILES[3]], archived_seal)
         self.assertEqual(reboot_material['files'][FILES[6]], files[FILES[6]])
+        self.assertEqual(reboot_material['candidate']['saved_reboot_runtime_manifest_sha256'],
+                         runtime['manifest_sha256'])
+        self.assertEqual(reboot_material['files']['postboot-runtime-manifest.json'], runtime_manifest)
+        changed_files = reboot_material['files'] | {'postboot-runtime-manifest.json': b'wrong'}
+        with self.assertRaises(TransitionBlocked):
+            self.module.bind_successor_plan(**(reboot_material | {'files': changed_files}), allow_saved_reboot=True)
         with self.assertRaises(TransitionBlocked):
             self.module.bind_successor_plan(**reboot_material)
         pair = Mock(spec=WindowsPairClosure)
@@ -1632,13 +1641,120 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertEqual(reboot_host.seal(deadline), 'cc'*32)
         pair.closed_pair_after_reboot.assert_called_with(draft['predecessor_terminal_sha256'], 'b0'*32, deadline)
         isolated_windows.powershell.reset_mock()
-        for operation in (reboot_host.arm, reboot_host.start):
-            with self.assertRaisesRegex(TransitionBlocked, 'saved_reboot_authenticated_bridge_required'):
-                operation(deadline)
-        isolated_windows.powershell.assert_not_called()
+        isolated_windows.powershell.return_value = {
+            'host_handoff_armed': True, 'plan_sha256': reboot_material['plan_pin'],
+            'service_image_path_sha256': reboot_host.config['image_path_pin'], 'service_started': False,
+        }
+        self.assertEqual(reboot_host.arm(deadline), reboot_host.arm_evidence())
+        self.assertIn('$p.ArmPostbootHost=$true', isolated_windows.powershell.call_args.args[0])
         material['files'][FILES[0]] += b' '
         with self.assertRaises(TransitionBlocked):
             self.module.bind_successor_plan(**material)
+
+
+class SavedRebootClosedPairTests(unittest.TestCase):
+    def test_pinned_launcher_refuses_changed_or_unlisted_code_before_import(self):
+        from tempfile import TemporaryDirectory
+
+        source = ROOT / 'infra/k8s/ha_control/launcher.py'
+        with TemporaryDirectory() as folder:
+            base = Path(folder).resolve()
+            controller = base / 'controller'
+            package = controller / 'files/ha_control'
+            package.mkdir(parents=True)
+            launcher = package / 'launcher.py'
+            launcher.write_bytes(source.read_bytes())
+            probe = package / 'initial_closed_pair.py'
+            marker = base / 'bundle-imported'
+            initial = (f'from pathlib import Path\nPath({str(marker)!r}).touch()\n'
+                       'def saved_reboot_main(argv): return 0\n')
+            probe.write_text(initial)
+            manifest = controller / 'source-manifest.json'
+            files = {p.relative_to(controller).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in (launcher, probe)}
+            manifest.write_text(json.dumps({'bundle_files': files}))
+            plan = base / 'plan.json'
+            plan.write_text(json.dumps({'controller_bundle_sha256':
+                                       hashlib.sha256(manifest.read_bytes()).hexdigest()}))
+            command = [sys.executable, '-I', '-B', str(launcher), '--verify-saved-reboot-closed-pair',
+                       str(plan), hashlib.sha256(plan.read_bytes()).hexdigest(), 'a'*64]
+            for untrusted_file in (probe, package / '__init__.py'):
+                with self.subTest(file=untrusted_file.name):
+                    untrusted_file.write_text(initial + '# Modified\n')
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=4)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(marker.exists())
+                    if untrusted_file == probe:
+                        probe.write_text(initial)
+                    else:
+                        untrusted_file.unlink()
+            result = subprocess.run(command, capture_output=True, text=True, timeout=4)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.exists())
+
+    def test_live_db_probe_requires_both_closed_and_synchronously_replayed(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from ha_control import initial_closed_pair as probe
+        from ha_runtime.effects import BINDING_SQL, EffectsBlocked
+
+        legacy = 'a'*64
+        plan = {
+            'cluster': 'fixture', 'system_id': '123',
+            'initial_cutover_handoff': {'legacy_plan_sha256': legacy},
+            'pg_enforcement': {'effects': {'broker_role': 'ha_broker',
+                'deployment_binding': {'plan_sha256': legacy, 'source_commit': '1'*40}}},
+            'pg_nodes': {
+                'A': dict(host='192.0.2.1', port=5432, dbname='test', user='observer',
+                          sslmode='verify-full', sslrootcert='ca', passfile='pass'),
+                'B': dict(host='192.0.2.2', port=5432, dbname='test', user='observer',
+                          sslmode='verify-full', sslrootcert='ca', passfile='pass'),
+            },
+        }
+        for fault in (None, 'a_open', 'b_open', 'b_not_standby', 'b_behind', 'b_async', 'b_effect_binding'):
+            with self.subTest(fault=fault):
+                connections = {node: Mock() for node in ('A', 'B')}
+                expires = datetime(2026, 11, 25, tzinfo=timezone.utc)
+                for node, conn in connections.items():
+                    def execute(query, *, node=node):
+                        self.assertIn(query.split()[0], {'SELECT', 'SHOW', 'BEGIN'})
+                        if query.startswith('BEGIN'):
+                            self.assertIn('READ ONLY', query)
+                            return None
+                        if query.startswith('SHOW'):
+                            return Mock(fetchone=Mock(return_value=('on',)))
+                        if query == BINDING_SQL:
+                            active_pin = '0'*64 if node == 'B' and fault == 'b_effect_binding' else legacy
+                            return Mock(fetchone=Mock(return_value=('fixture','123','1'*40,active_pin,'ha_broker')))
+                        if 'FROM ha.control' in query:
+                            row = ('fixture','123',1,21,1,'A','B',['A'],'A','AS',
+                                   fault == node.lower()+'_open', False, expires, True,
+                                   node == 'B' and fault != 'b_not_standby', 'ha_'+node,
+                                   'remote_apply','on','on',
+                                   '0/1' if node == 'B' and fault == 'b_behind' else '0/2',
+                                   'FIRST1(ha_b)' if node == 'A' else 'FIRST1(ha_a)',
+                                   True,'on',1,plan['pg_nodes'][node]['host'])
+                            return Mock(fetchone=Mock(return_value=row))
+                        if 'pg_stat_replication r' in query:
+                            peers = [('ha_b','ha_repl','192.0.2.2','streaming',
+                                      'async' if fault == 'b_async' else 'sync',True,'0/2')]
+                            return Mock(fetchall=Mock(return_value=peers))
+                        self.assertIn('pg_stat_wal_receiver', query)
+                        return Mock(fetchall=Mock(return_value=[('streaming',1)]))
+                    conn.execute.side_effect = execute
+
+                fake_driver = SimpleNamespace(connect=Mock(side_effect=[nullcontext(conn) for conn in connections.values()]))
+                with patch.dict(sys.modules, {'psycopg': fake_driver}), \
+                     patch('ha_control.pg._private_file'), patch('ha_runtime.effects.validate_catalog'), \
+                     patch.object(InitialPgLeaseRecovery, 'quarantine_binding', return_value=('a','b','c','d')), \
+                     patch.object(InitialPgLeaseRecovery, '_quarantine_observation', return_value=('a','c','d')):
+                    if fault is None:
+                        proof = probe.query_closed_pair(plan, 21, 'b'*64, 'c'*64, 'd'*64)
+                        self.assertEqual(proof['closed_revision'], 21)
+                        self.assertTrue(proof['full_closed_pair_verified'])
+                    else:
+                        with self.assertRaises((AssertionError, EffectsBlocked)):
+                            probe.query_closed_pair(plan, 21, 'b'*64, 'c'*64, 'd'*64)
 
 
 if __name__ == '__main__':

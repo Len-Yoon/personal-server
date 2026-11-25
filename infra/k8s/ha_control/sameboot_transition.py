@@ -82,6 +82,12 @@ def bind_successor_plan(candidate, previous_raw, plan_pin, files, *, allow_saved
     value = scope(candidate)
     _need((sameboot(value) or (allow_saved_reboot is True and saved_reboot(value)))
           and TRANSITION_FIELDS <= value.keys() and CARRYOVER_FIELD in value)
+    if saved_reboot(value):
+        runtime_pin = candidate.get('saved_reboot_runtime_manifest_sha256')
+        runtime = files.get('postboot-runtime-manifest.json')
+        _need(_pin(runtime_pin) and type(runtime) is bytes and 0 < len(runtime) <= 1048576
+              and hashlib.sha256(runtime).hexdigest() == runtime_pin)
+        files = {name: data for name, data in files.items() if name != 'postboot-runtime-manifest.json'}
     _need(_pin(plan_pin) and hashlib.sha256(_encoded(candidate)).hexdigest() == plan_pin)
     _need(files.get('postboot-predecessor-plan.json') == previous_raw
           and hashlib.sha256(previous_raw).hexdigest() == value['predecessor_plan_sha256'])

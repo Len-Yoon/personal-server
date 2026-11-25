@@ -8,7 +8,7 @@ It does not publish, stage a successor, modify apps, or reopen database writes.
 import base64
 import gzip
 import json
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 import secrets
 import time
 
@@ -359,80 +359,7 @@ function Current([string]$p,[long]$max,[string]$want,[string]$reader=''){
 }
 '''
 
-PAIRED_SQL = r'''
-import datetime,hashlib,json,os,re,sys,threading,time
-from contextlib import ExitStack
-from pathlib import Path
-
-runtime,plan_path,plan_pin,terminal_path,terminal_pin,challenge,expected_revision=sys.argv[1:]
-started=time.monotonic()
-watchdog=threading.Timer(6,lambda:os._exit(124))
-watchdog.daemon=True
-watchdog.start()
-def pin(raw):return hashlib.sha256(raw).hexdigest()
-raw=Path(plan_path).read_bytes()
-terminal_raw=Path(terminal_path).read_bytes()
-assert pin(raw)==plan_pin and pin(terminal_raw)==terminal_pin
-plan=json.loads(raw)
-terminal=json.loads(terminal_raw)
-assert terminal['phase'] in ('lease_lost','local_revoke_observed') and terminal['controller_plan_sha256']==plan_pin and terminal['sequence']>0
-assert terminal['revision']==int(expected_revision) and terminal['postboot']==plan['initial_recovery_postboot']
-revision=terminal['revision']+1
-sys.path.insert(0,str(Path(runtime)/'controller/files'))
-from ha_control.cli import validate_bundle
-from ha_control.initial_pg_lease import InitialPgLeaseRecovery
-from ha_runtime.effects import Binding,validate_catalog
-import psycopg
-validate_bundle(plan)
-expected=plan['pg_enforcement']['effects']['deployment_binding']
-assert expected['plan_sha256']==plan['initial_cutover_handoff']['legacy_plan_sha256']
-quarantine=InitialPgLeaseRecovery.quarantine_binding(plan)
-binding=Binding(plan['cluster'],str(plan['system_id']),expected['source_commit'],
-                expected['plan_sha256'],plan['pg_enforcement']['effects']['broker_role'],broker_instance='0'*64)
-def lsn(v):
-    assert type(v) is str and re.fullmatch('[0-9A-F]+/[0-9A-F]+',v)
-    a,b=v.split('/')
-    return (int(a,16)<<32)+int(b,16)
-with ExitStack() as stack:
-    nodes={n:stack.enter_context(psycopg.connect(**p,connect_timeout=2,autocommit=True,gssencmode='disable',
-          options='-c default_transaction_read_only=on -c statement_timeout=700 -c lock_timeout=500')) for n,p in plan['pg_nodes'].items()}
-    assert set(nodes)=={'A','B'}
-    facts={}
-    for node,conn in nodes.items():
-        conn.execute('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-        assert conn.execute('SHOW transaction_read_only').fetchone()==('on',)
-        validate_catalog(conn,binding)
-        assert InitialPgLeaseRecovery._quarantine_observation(conn,renewal=True)==(quarantine[0],quarantine[2],quarantine[3])
-        row=conn.execute("""SELECT c.cluster,(pg_control_system()).system_identifier::text,c.epoch,c.revision,c.timeline,
-            c.primary_node,c.partner,c.serving,c.worker,c.mode,c.writes_open,c.history_safe,c.expires_at,
-            c.expires_at<clock_timestamp(),pg_is_in_recovery(),current_setting('cluster_name'),
-            current_setting('synchronous_commit'),current_setting('fsync'),current_setting('full_page_writes'),
-            CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn() ELSE pg_current_wal_flush_lsn() END::text,
-            regexp_replace(current_setting('synchronous_standby_names'),'[[:space:]"]','','g'),
-            (SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()),current_setting('transaction_read_only'),
-            CASE WHEN pg_is_in_recovery() THEN (SELECT received_tli FROM pg_stat_wal_receiver)
-            ELSE ('x'||substring(pg_walfile_name(pg_current_wal_insert_lsn()),1,8))::bit(32)::integer END,
-            host(inet_server_addr()) FROM ha.control c WHERE singleton=1""").fetchone()
-        assert row[:12]==(plan['cluster'],str(plan['system_id']),1,revision,1,'A','B',['A'],'A','AS',False,False)
-        assert isinstance(row[12],datetime.datetime) and row[12].utcoffset() is not None
-        assert row[13:19]==(True,node=='B','ha_'+node,'remote_apply','on','on')
-        assert row[20:24]==('FIRST1(ha_b)' if node=='A' else 'FIRST1(ha_a)',True,'on',1)
-        facts[node]=row
-    primary,replica=facts['A'],facts['B']
-    assert primary[12]==replica[12] and 0<lsn(primary[19])<=lsn(replica[19])
-    peers=nodes['A'].execute("""SELECT r.application_name,r.usename,host(r.client_addr),r.state,r.sync_state,s.ssl,
-           r.replay_lsn::text FROM pg_stat_replication r JOIN pg_stat_ssl s USING(pid)""").fetchall()
-    assert len(peers)==1 and peers[0][:6]==('ha_b','ha_repl',replica[24],'streaming','sync',True)
-    assert lsn(peers[0][6])>=lsn(primary[19])
-    recv=nodes['B'].execute("SELECT status,received_tli FROM pg_stat_wal_receiver").fetchall()
-    assert recv==[('streaming',1)]
-    proof={'challenge':challenge,'plan_sha256':plan_pin,'terminal_sha256':terminal_pin,
-           'revision':revision,'expired_at':primary[12].isoformat(),'flush':primary[19],'replay':replica[19]}
-    assert time.monotonic()-started<6
-    print(json.dumps({'closed_revision':revision,'proof_sha256':pin(json.dumps(proof,sort_keys=True,separators=(',',':')).encode()),
-        'full_closed_pair_verified':True,'candidate_effects_binding_matches_both_databases':True,'exact_quarantine_matches':True},
-        sort_keys=True,separators=(',',':')))
-'''
+PAIRED_SQL = Path(__file__).with_name('initial_closed_pair.py').read_text(encoding='utf-8')
 
 WINDOWS_BODY = r'''
 function BoundService {
