@@ -3,11 +3,27 @@ from __future__ import annotations
 import json
 import os
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from app.crawlers.investing_news_rss import INVESTING_SOURCE
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 REQUEST_TIMEOUT_SECONDS = 8
+
+
+def is_investing_world_article(article: dict) -> bool:
+    if article.get("category") != "KR_WORLD" or article.get("source") != INVESTING_SOURCE:
+        return False
+    try:
+        url = urlsplit(str(article.get("url") or ""))
+        return (
+            url.scheme == "https"
+            and url.netloc.lower() in {"kr.investing.com", "www.investing.com", "investing.com"}
+            and url.path.startswith("/news/")
+        )
+    except ValueError:
+        return False
 
 
 def notify_new_investing_articles(articles: list[dict]) -> int:
@@ -22,7 +38,7 @@ def notify_new_investing_articles(articles: list[dict]) -> int:
 
     sent_count = 0
     for article in articles:
-        if not _is_alert_article(article):
+        if not is_investing_world_article(article) or not _is_alert_article(article):
             continue
         if _send_article(token, chat_id, article, broker=broker):
             sent_count += 1
@@ -30,13 +46,15 @@ def notify_new_investing_articles(articles: list[dict]) -> int:
 
 
 def notify_market_news_digest(articles: list[dict]) -> bool:
+    if not articles or not all(is_investing_world_article(article) for article in articles):
+        return False
     try:
         broker = _broker_enabled()
     except (OSError, ImportError, ValueError):
         return False
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not articles or (not broker and (not token or not chat_id)):
+    if not broker and (not token or not chat_id):
         return False
 
     lines = ["[시장 뉴스 요약]"]
