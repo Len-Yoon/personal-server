@@ -1745,6 +1745,32 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertEqual(self.calls.count(('apply', 'connect_rollback_held')), 1)
         self.assertEqual(self.driver.status()['stage'], 'stage_runtime')
 
+    def test_native_publication_reads_exact_carryover_without_issuing_guest_operation(self):
+        import base64
+
+        from ha_control import native_saved_site_publication as publication, native_stdio_bridge as wire
+
+        apps = object.__new__(publication.SavedSiteApps)
+        apps.dispatcher = Mock(binding=wire.Binding('1' * 64, '2' * 64, '3' * 64, '4' * 64, '5' * 64))
+        record = b'x' * 2048 + b'last slice'
+        plan = {'attempt_id': 'a' * 64, 'carryover_receipt_sha256': wire._digest(record)}
+
+        def read(config, code, body, _deadline):
+            self.assertEqual(code, publication._READ_CARRYOVER)
+            self.assertEqual(body, b'')
+            self.assertEqual(config['boot_sha256'], apps.dispatcher.binding.boot('A'))
+            self.assertEqual(config['carryover_sha256'], plan['carryover_receipt_sha256'])
+            offset = config['offset']
+            return {'offset': offset, 'size': len(record), 'part': base64.b64encode(record[offset:offset+2048]).decode()}
+
+        apps._exchange_guest = Mock(side_effect=read)
+        self.assertEqual(publication.read_carryover(apps, plan, self.clock() + 10), record)
+        self.assertEqual([c.args[0]['offset'] for c in apps._exchange_guest.call_args_list], [0, 2048])
+        wrong_pin = plan | {'carryover_receipt_sha256': wire._digest(record + b'bad')}
+        plan = wrong_pin
+        with self.assertRaises(TransitionBlocked):
+            publication.read_carryover(apps, wrong_pin, self.clock() + 10)
+
     def test_fresh_guard_failure_neither_issues_nor_dispatches(self):
         for _ in range(3):
             self.step()

@@ -10,6 +10,7 @@ from .native_saved_site_host import SavedSiteHostPaths
 from .native_saved_site_material import SavedSitePlanAssembly
 from .native_saved_site_observers import SavedSiteObservers
 from .native_saved_site_provider_replace import SavedSiteProviderReplace
+from .native_saved_site_publication import SavedSitePublication
 from .native_saved_site_runtime import WindowsSavedSiteRuntime
 from .native_sameboot_successor import draft_postboot
 from .sameboot_transition import ROLLBACK_RESUME_FIELD, _fallback_attempt, _pin, _scope, _validate
@@ -170,12 +171,16 @@ class SavedSitePlatform:
     def read_app_operation(self, operation, chain, deadline):
         return self.applications(operation, chain, deadline).read_app_operation(operation, chain, deadline)
 
-    def driver(self, *, release, saved_boot, paired_publication, app_stage):
+    def driver(self, *, release, saved_boot, paired_publication=None, app_stage=None, live_authority_sha256=None):
         """Connect the app factory to the same scoped adapter as its journal."""
         _need(type(release) is NativeSamebootRelease and release.scope == self.scope and release.pair is self.pair
               and release.expected_stopped_terminal_sha256 == self.stopped_terminal
-              and type(saved_boot) is WindowsSavedReboot and saved_boot.pair is self.pair
-              and callable(paired_publication) and callable(app_stage))
+              and type(saved_boot) is WindowsSavedReboot and saved_boot.pair is self.pair)
+        if live_authority_sha256 is not None:
+            _need(paired_publication is None and app_stage is None)
+            native = SavedSitePublication(self.plan, self.applications, live_authority_sha256=live_authority_sha256)
+            paired_publication, app_stage = native.paired_publication, native.app_stage
+        _need(callable(paired_publication) and callable(app_stage))
         self.release = release
 
         def create_app(operation, chain, publication, deadline):
