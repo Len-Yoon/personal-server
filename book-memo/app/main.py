@@ -32,9 +32,8 @@ from app.services.book_service import (
     delete_chapter,
     delete_memo,
     get_book,
-    list_books_page,
-    list_available_tags,
     list_chapters,
+    list_home,
     list_memos,
     memo_recovery_state,
     memo_trash_summary,
@@ -154,11 +153,9 @@ async def home(
         except Exception as exc:
             error = str(exc)
 
-    books, total_books, current_page = list_books_page(page, tag=tag)
-    available_tags = list_available_tags()
+    books, total_books, current_page, available_tags, chapters_by_book = list_home(page, tag=tag)
     active_tag = next((item for item in available_tags if item.casefold() == tag.strip().casefold()), tag.strip())
     total_pages = max(1, (total_books + 23) // 24)
-    chapters_by_book = {book["id"]: list_chapters(book["id"]) for book in books}
 
     return templates.TemplateResponse(
         request=request, name="home.html",

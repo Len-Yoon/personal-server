@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from fastapi.testclient import TestClient
+
 from tests.book_memo import test_ui_contract
 
 
@@ -46,6 +48,36 @@ class HaBackendTests(unittest.TestCase):
                 self.assertTrue(readiness.database_ready(service.DB_PATH, service._schema_ready))
                 runtime.require_schema.side_effect = sqlite3.OperationalError("unavailable")
                 self.assertFalse(readiness.database_ready(service.DB_PATH, service._schema_ready))
+
+    def test_pg_home_checks_schema_once_and_reads_chapters_in_one_batch(self):
+        with self.application() as (main, service, backend, _, _):
+            books = [service.create_or_get_book({"isbn": f"home-{i}", "title": f"Book {i}"}) for i in range(24)]
+            service.create_chapter(books[0]["id"], "Page chapter")
+            statements = []
+
+            @contextmanager
+            def data_connection():
+                connection = sqlite3.connect(service.DB_PATH)
+                connection.row_factory = sqlite3.Row
+                connection.set_trace_callback(statements.append)
+                try:
+                    yield connection
+                finally:
+                    connection.close()
+
+            runtime = MagicMock()
+            schema = MagicMock()
+            schema.__enter__.return_value.execute.return_value.fetchone.return_value = (1,)
+            runtime.connect.side_effect = [schema, data_connection()]
+            with patch.dict(os.environ, {"HA_PG_CONFIG": "fixture"}), patch.object(backend, "runtime", return_value=runtime):
+                response = TestClient(main.app).get("/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Page chapter", response.text)
+            runtime.require_schema.assert_called_once_with("book-memo", "main", backend.REQUIRED_TABLES)
+            self.assertEqual(runtime.connect.call_count, 2)
+            chapter_queries = [sql for sql in statements if sql.startswith("SELECT * FROM book_chapters")]
+            self.assertEqual(len(chapter_queries), 1)
+            self.assertIn("WHERE book_id IN (", chapter_queries[0])
 
     def test_pg_native_search_and_write_transaction(self):
         with self.application() as (_, _, backend, _, _):

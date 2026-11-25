@@ -206,41 +206,40 @@ def list_books() -> list[dict[str, Any]]:
 
 def list_books_page(page: int, page_size: int = 24, tag: str = "") -> tuple[list[dict[str, Any]], int, int]:
     init_db()
-
     with _connect() as connection:
         connection.execute("BEGIN")
-        tag = tag.strip()
-        tag_filter = """WHERE EXISTS (
-            SELECT 1 FROM book_memos AS tagged_memos
-            JOIN memo_tags ON memo_tags.memo_id = tagged_memos.id
-            WHERE tagged_memos.book_id = books.id AND memo_tags.tag_key = ?
-        )""" if tag else ""
-        parameters: tuple[Any, ...] = (tag.casefold(),) if tag else ()
-        total = connection.execute(f"SELECT COUNT(*) FROM books {tag_filter}".strip(), parameters).fetchone()[0]
-        last_page = max(1, (total + page_size - 1) // page_size)
-        page = min(max(1, page), last_page)
-        rows = connection.execute(
-            f"""
-            WITH selected AS (
-                SELECT * FROM books
-                {tag_filter}
-                ORDER BY
-                    CASE
-                        WHEN reading_status = '읽는 중' THEN 0
-                        WHEN reading_status = '읽을 예정' THEN 1
-                        WHEN progress_percent >= 100 OR reading_status = '완료' THEN 2
-                        ELSE 3
-                    END,
-                    updated_at DESC,
-                    id DESC
-                LIMIT ? OFFSET ?
-            )
-            SELECT
-                selected.*,
-                (SELECT COUNT(*) FROM book_memos WHERE book_id = selected.id) AS memo_count,
-                (SELECT COUNT(*) FROM book_chapters WHERE book_id = selected.id) AS chapter_count,
-                (SELECT COALESCE(SUM(is_done), 0) FROM book_chapters WHERE book_id = selected.id) AS done_chapter_count
-            FROM selected
+        return _list_books_page(connection, page, page_size, tag)
+
+
+def list_home(page: int, tag: str = "") -> tuple[
+    list[dict[str, Any]], int, int, list[str], dict[int, list[dict[str, Any]]]
+]:
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        books, total, current_page = _list_books_page(connection, page, 24, tag)
+        chapters = _list_chapters_by_book(connection, [book["id"] for book in books])
+        return books, total, current_page, _list_available_tags(connection), chapters
+
+
+def _list_books_page(
+    connection: sqlite3.Connection, page: int, page_size: int, tag: str
+) -> tuple[list[dict[str, Any]], int, int]:
+    tag = tag.strip()
+    tag_filter = """WHERE EXISTS (
+        SELECT 1 FROM book_memos AS tagged_memos
+        JOIN memo_tags ON memo_tags.memo_id = tagged_memos.id
+        WHERE tagged_memos.book_id = books.id AND memo_tags.tag_key = ?
+    )""" if tag else ""
+    parameters: tuple[Any, ...] = (tag.casefold(),) if tag else ()
+    total = connection.execute(f"SELECT COUNT(*) FROM books {tag_filter}".strip(), parameters).fetchone()[0]
+    last_page = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), last_page)
+    rows = connection.execute(
+        f"""
+        WITH selected AS (
+            SELECT * FROM books
+            {tag_filter}
             ORDER BY
                 CASE
                     WHEN reading_status = '읽는 중' THEN 0
@@ -250,9 +249,26 @@ def list_books_page(page: int, page_size: int = 24, tag: str = "") -> tuple[list
                 END,
                 updated_at DESC,
                 id DESC
-            """,
-            (*parameters, page_size, (page - 1) * page_size),
-        ).fetchall()
+            LIMIT ? OFFSET ?
+        )
+        SELECT
+            selected.*,
+            (SELECT COUNT(*) FROM book_memos WHERE book_id = selected.id) AS memo_count,
+            (SELECT COUNT(*) FROM book_chapters WHERE book_id = selected.id) AS chapter_count,
+            (SELECT COALESCE(SUM(is_done), 0) FROM book_chapters WHERE book_id = selected.id) AS done_chapter_count
+        FROM selected
+        ORDER BY
+            CASE
+                WHEN reading_status = '읽는 중' THEN 0
+                WHEN reading_status = '읽을 예정' THEN 1
+                WHEN progress_percent >= 100 OR reading_status = '완료' THEN 2
+                ELSE 3
+            END,
+            updated_at DESC,
+            id DESC
+        """,
+        (*parameters, page_size, (page - 1) * page_size),
+    ).fetchall()
 
     return [_with_computed_progress(_row_to_dict(row)) for row in rows], total, page
 
@@ -403,6 +419,20 @@ def list_chapters(book_id: int) -> list[dict[str, Any]]:
         ).fetchall()
 
     return [_row_to_dict(row) for row in rows]
+
+
+def _list_chapters_by_book(connection: sqlite3.Connection, book_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    chapters: dict[int, list[dict[str, Any]]] = {book_id: [] for book_id in book_ids}
+    if not chapters:
+        return chapters
+    placeholders = ",".join("?" for _ in chapters)
+    rows = connection.execute(
+        f"SELECT * FROM book_chapters WHERE book_id IN ({placeholders}) ORDER BY book_id, position, id",
+        tuple(chapters),
+    ).fetchall()
+    for row in rows:
+        chapters[row["book_id"]].append(_row_to_dict(row))
+    return chapters
 
 
 def create_chapter(book_id: int, title: str, request_id: str = "") -> None:
@@ -631,9 +661,13 @@ def list_memos(book_id: int) -> list[dict[str, Any]]:
 def list_available_tags() -> list[str]:
     init_db()
     with _connect() as connection:
-        return [row["tag"] for row in connection.execute(
-            "SELECT MIN(tag) AS tag FROM memo_tags GROUP BY tag_key ORDER BY tag_key"
-        )]
+        return _list_available_tags(connection)
+
+
+def _list_available_tags(connection: sqlite3.Connection) -> list[str]:
+    return [row["tag"] for row in connection.execute(
+        "SELECT MIN(tag) AS tag FROM memo_tags GROUP BY tag_key ORDER BY tag_key"
+    )]
 
 
 def _tags_for_memos(connection: sqlite3.Connection, memo_ids: list[int]) -> dict[int, list[str]]:
