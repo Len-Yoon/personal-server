@@ -11,7 +11,8 @@ from .native_saved_site_material import SavedSitePlanAssembly
 from .native_saved_site_observers import SavedSiteObservers
 from .native_saved_site_provider_replace import SavedSiteProviderReplace
 from .native_saved_site_runtime import WindowsSavedSiteRuntime
-from .sameboot_transition import ROLLBACK_RESUME_FIELD, _pin, _scope, _validate
+from .native_sameboot_successor import draft_postboot
+from .sameboot_transition import ROLLBACK_RESUME_FIELD, _fallback_attempt, _pin, _scope, _validate
 from .native_stdio_bridge import _need as require
 
 
@@ -62,7 +63,8 @@ class SavedSitePlatform:
         if phase == 'preflight':
             if self.scope.get(ROLLBACK_RESUME_FIELD) is True:
                 verify = getattr(self.guest_site, 'preflight_provider_recovery', None)
-                _need(callable(verify) and verify(operation, deadline) is True)
+                _need(callable(verify) and callable(getattr(self.guest_site, 'observe_held_carryover', None))
+                      and verify(operation, deadline) is True)
             self.host_paths.verify(deadline, stopped_terminal=self.stopped_terminal)
             self.runtime.preflight(operation, deadline, stopped_terminal=self.stopped_terminal)
             evidence = self.guest_site.preflight(operation, deadline)
@@ -71,11 +73,30 @@ class SavedSitePlatform:
         if phase == 'stage_runtime':
             evidence = self.runtime.stage(operation, chain, deadline, observe_only=observe_only)
             return {'status': 'PASS', 'evidence': evidence}
+        if phase == 'carryover' and 'verify_restored_pair' in chain:
+            evidence = self._rollback_carryover(operation, chain, deadline, observe_only=observe_only)
+            return {'status': 'PASS', 'evidence': evidence}
+        if phase == 'connect_rollback_held':
+            pin = chain['carryover']['carryover_sha256']
+            held_pin = self.guest_site.observe_held_carryover(operation, chain, pin, deadline, observe_only=observe_only)
+            _need(_pin(pin) and held_pin == pin and time.monotonic() < deadline)
+            return {'status': 'PASS', 'evidence': {'held_observation_sha256': held_pin}}
         if phase in {'carryover', 'fallback_carryover'}:
             evidence = self.guest_site.carryover(operation, chain, deadline, observe_only=observe_only)
             return {'status': 'PASS', 'evidence': evidence}
         _need(phase in {'replace_provider', 'restore_provider'})
         return getattr(self._provider(chain), phase)(operation, chain, deadline, observe_only=observe_only)
+
+    def _rollback_carryover(self, operation, chain, deadline, *, observe_only):
+        prior = self.plan.previous
+        terminal = self.plan.read_terminal(operation, chain, deadline)
+        draft = draft_postboot(prior['plan'], terminal, prior['binding'], prior['args'], prior['stopped'],
+                              previous_sha256=self.scope['previous_plan_sha256'],
+                              attempt=_fallback_attempt(self.scope),
+                              successor_image_sha256=self.scope['successor_image_sha256'])
+        pin = self.applications(operation, chain, deadline).attest_rollback_carryover(
+            operation, chain, deadline, draft=draft, predecessor_plan=prior['plan'], observe_only=observe_only)
+        return {'history_sha256': self.scope['history_sha256'], 'carryover_sha256': pin}
 
     def _provider(self, chain):
         pin = chain['retire_provider'].get('provider_retirement_sha256')

@@ -21,7 +21,8 @@ from .native_sameboot_release import WINDOWS_GUARD, WindowsPairClosure
 from .native_sameboot_successor import assemble_material
 from .native_stdio_bridge import _hash, _need as require, _pairs
 from .sameboot_transition import (
-    _closed, _encoded, _expects_reboot, _fallback_attempt, _private_file, _sameboot_recovery, bind_successor_plan,
+    _closed, _encoded, _expects_reboot, _fallback_attempt, _private_file, _sameboot_recovery, _validate,
+    bind_successor_plan,
 )
 
 ERROR = 'saved_site_material_unconfirmed'
@@ -91,6 +92,7 @@ class SavedSitePlanAssembly:
         _need(evidence['closed_pair_sha256'] == branch['closed_pair']['closed_proof_sha256']
               and evidence['carryover_sha256'] == carryover['carryover_sha256'])
         if 'verify_restored_pair' in chain:
+            _validate('connect_rollback_held', chain.get('connect_rollback_held'), self.scope, chain)
             _need({node: data['vm_id_sha256'] for node, data in evidence['guests'].items()}
                   == branch['vm_id_sha256'])
         if reboot:

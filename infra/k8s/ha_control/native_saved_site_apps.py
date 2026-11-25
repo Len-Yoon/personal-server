@@ -1,9 +1,8 @@
 """Concrete saved-VM site hooks for native quiescence and app journals.
 
 Constructing the adapter performs no I/O. Calls require the coordinator's exact
-private issued operation. Only quiesce_operation(observe_only=False) can append
-missing immutable predecessor terminal copies; native stop/start remain owned
-by NativeSamebootDriver and SuccessorAppStage. All readback paths are read-only.
+private issued operation. Terminal and carryover evidence are append-only;
+native stop/start remain owned by NativeSamebootDriver and SuccessorAppStage.
 """
 
 import base64
@@ -20,6 +19,7 @@ from . import native_guest_ssh as ssh, native_stdio_bridge as wire
 from .controller import TransitionBlocked
 from .initial_app_resume_wiring import SuccessorAppStage
 from .initial_unpublished import derive_predecessor
+from .native_guest_postboot import DRAFT_PIN
 from .native_sameboot_release import WindowsPairClosure
 from .sameboot_transition import _closed, _fallback_attempt, _private_file, _sameboot_recovery, _scope
 
@@ -110,6 +110,69 @@ else:
         assert CFG['action'] in {'archive','archive_terminal'}
         result={'terminal_sha256':wire._digest(terminal),'metadata_copies':2,'existing_records_preserved':True}
 print(json.dumps(result,sort_keys=True,separators=(',',':')))
+'''
+
+_CARRYOVER_GUEST = r'''
+from dataclasses import replace
+import json,os,sys
+from ha_control import native_guest_worker as w,native_guest_postboot as post,native_stdio_bridge as wire
+
+assert os.geteuid()==0
+def decode(value):
+    request=wire.Request(wire.Binding(**value['binding']),value['node'],value['verb'],
+                         value['sequence'],value['nonce'],value['args'])
+    wire._args(request.verb,request.node,request.args)
+    assert w._scope(request)|{'args':request.args}==value
+    return request
+
+previous,stop,draft=(decode(CFG[key]) for key in ('previous','stop','draft'))
+assert previous.binding==stop.binding==draft.binding and previous.node==stop.node==draft.node=='A'
+assert wire._digest(w.runtime.BOOT_ID.read_bytes())==previous.binding.boot('A')
+assert previous.verb==draft.verb==wire.GUEST_START_INITIAL_POSTBOOT
+assert stop.verb==wire.GUEST_QUIESCE_SAMEBOOT_SUCCESSOR
+assert len({previous.nonce,stop.nonce,draft.nonce})==3
+plan=sys.stdin.buffer.read(65537)
+assert 0<len(plan)<=65536 and wire._digest(plan)==previous.args['postboot_plan_sha256']
+history=CFG['history']; history_pin=wire._digest(wire._bytes(history)); stop_receipt=CFG['stop_receipt']
+postboot=draft.args['postboot']
+assert draft.args['postboot_plan_sha256']==postboot['carryover_receipt_sha256']==postboot['predecessor_seal_sha256']==post.DRAFT_PIN
+assert postboot['predecessor_plan_sha256']==stop.args['predecessor_plan_sha256']==wire._digest(plan)
+terminal=postboot['predecessor_terminal_sha256']
+assert terminal==stop.args['predecessor_terminal_sha256']
+paths=(w.ROOT/('predecessor-plan-'+wire._digest(plan)+'.json'),
+       w.ROOT/('predecessor-terminal-'+terminal+'.json'))
+def verified():
+    copies=[w.runtime._read(path,0,{0o400},limit=8192) for path in paths]
+    assert copies[0]==copies[1] and wire._digest(copies[0])==terminal
+    assert post.observe_quiesce_completion(stop,history_pin,expected=stop_receipt['stop_receipt_sha256'])==stop_receipt
+
+verified()
+target=post.carryover_path(draft,postboot['attempt_id'])
+intent_path=target.with_name('provider-rollback-carryover-'+postboot['attempt_id']+'-issued.json')
+intent=wire._bytes({'nonce':draft.nonce,'draft_sha256':wire._digest(wire._bytes(CFG['draft'])),
+    'stop_request_sha256':stop_receipt['request_sha256'],'stop_receipt_sha256':stop_receipt['stop_receipt_sha256'],
+    'predecessor_plan_sha256':wire._digest(plan),'history_sha256':history_pin,'automatic_retry':False})
+with w._guest_mutation_descriptor(wait=2):
+    if CFG['observe_only'] is False:
+        assert not os.path.lexists(target)
+        w.runtime._write(intent_path,intent,mode=0o400)
+    assert w.runtime._read(intent_path,0,{0o400},limit=4096)==intent
+receipt=None
+if CFG['observe_only'] is False:
+    receipt=post.attest_carryover(draft,predecessor_plan_raw=plan,predecessor_request=previous,history=history)
+    assert receipt.status=='PASS'
+body=w.runtime._read(target,0,{0o400},limit=262144)
+pin=wire._digest(body)
+assert receipt is None or receipt.receipt_sha256==pin
+admitted=replace(draft,args=draft.args|{'postboot':postboot|{'carryover_receipt_sha256':pin}})
+record=post.observe_carryover(admitted,postboot['attempt_id'],pin)
+assert record['history']==history and record['predecessor_request']=={'scope':w._scope(previous),'args':previous.args}
+verified()
+assert w.runtime._read(intent_path,0,{0o400},limit=4096)==intent
+assert w.runtime._read(target,0,{0o400},limit=262144)==body
+print(json.dumps({'nonce':draft.nonce,'attempt':postboot['attempt_id'],'carryover_sha256':pin,
+                  'history_sha256':history_pin,'stop_sha256':stop_receipt['stop_receipt_sha256']},
+                 sort_keys=True,separators=(',',':')))
 '''
 
 
@@ -212,7 +275,10 @@ class SavedSiteApps:
             _need(type(self.app) is SuccessorAppStage)
             data.update(instance=self.app.lease.service_instance_sha256, prior_intent=self.app.prior_intent,
                         prior_progress=self.app.prior_progress)
-        code = 'import json\nCFG=' + repr(data) + '\n' + self.launcher.split(MARKER)[0].decode() + _GUEST
+        return self._exchange_guest(data, _GUEST, b'', deadline)
+
+    def _exchange_guest(self, data, body, payload, deadline):
+        code = 'import json\nCFG=' + repr(data) + '\n' + self.launcher.split(MARKER)[0].decode() + body
         _need(len(code.encode()) <= 131072);compile(code, '<saved-site-apps>', 'exec')
         stamps, records = {}, {}
         self.guard();wire._remaining(deadline)
@@ -226,10 +292,42 @@ class SavedSiteApps:
             command = (ssh.SSH, '-F', str(config), '-T', self.dispatcher.guests['A'].alias,
                        shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', code)))
             _need(ssh._same_files(stamps))
-            result = json.loads(ssh._exchange(command, b'', deadline), object_pairs_hook=wire._pairs)
+            result = json.loads(ssh._exchange(command, payload, deadline), object_pairs_hook=wire._pairs)
             _need(ssh._same_files(stamps))
         self.guard();wire._remaining(deadline)
         return result
+
+    def attest_rollback_carryover(self, operation, chain, deadline, *, draft, predecessor_plan, observe_only):
+        self._operation(operation, 'carryover', deadline)
+        scope = operation['scope']
+        recovery = chain['verify_restored_pair']
+        _need(type(observe_only) is bool and type(predecessor_plan) is bytes and 0 < len(predecessor_plan) <= 65536
+              and wire._digest(predecessor_plan) == scope['previous_plan_sha256']
+              and _closed(recovery['closed_pair'], self.closed_revision, self.terminal_pin)
+              and type(draft) is dict and draft['attempt_id'] == _fallback_attempt(scope)
+              and draft['predecessor_terminal_sha256'] == self.terminal_pin)
+        stop = self.read_quiesce_request()
+        stopped = chain['quiesce_apps']
+        _need(wire._digest(wire._bytes(_scope_request(stop))) == stopped['request_sha256']
+              and stopped['history_sha256'] == scope['history_sha256']
+              and stopped['terminal_sha256'] == self.terminal_pin and stopped['revision'] == self.closed_revision
+              and operation['nonce'] not in {stop.nonce, self.previous.nonce})
+        args = {key: self.previous.args[key] for key in (*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256')}
+        args.update(postboot=draft, postboot_plan_sha256=DRAFT_PIN,
+                    postboot_stopped_receipt_sha256=self.previous.args['postboot_stopped_receipt_sha256'])
+        request = wire.Request(self.previous.binding, 'A', wire.GUEST_START_INITIAL_POSTBOOT, 1,
+                               operation['nonce'], args)
+        wire._args(request.verb, request.node, request.args)
+        data = {'observe_only': observe_only, 'previous': _scope_request(self.previous), 'stop': _scope_request(stop),
+                'draft': _scope_request(request), 'history': self.history, 'stop_receipt': stopped}
+        _need(_closed(self.pair.closed_pair(self.terminal_pin, deadline), self.closed_revision, self.terminal_pin))
+        result = self._exchange_guest(data, _CARRYOVER_GUEST, predecessor_plan, deadline)
+        _need(_closed(self.pair.closed_pair(self.terminal_pin, deadline), self.closed_revision, self.terminal_pin))
+        _need(type(result) is dict and result == {'nonce': request.nonce, 'attempt': draft['attempt_id'],
+              'carryover_sha256': result.get('carryover_sha256'), 'history_sha256': scope['history_sha256'],
+              'stop_sha256': stopped['stop_receipt_sha256']} and wire._hash(result['carryover_sha256']))
+        self.guard()
+        return result['carryover_sha256']
 
     def _closed(self, deadline):
         # Cooperative release closes the writer before quiescence. The later

@@ -244,11 +244,18 @@ def _validate(stage, value, scope, receipts):
         _need(value['old_port_owner_verified'] is True and _pin(value['old_provider_proof_sha256'])
               and value['rollback_sha256'] == receipts['preflight']['rollback_sha256'])
     elif stage in {'carryover', 'fallback_carryover'}:
-        _need(set(value) == {'history_sha256', 'carryover_sha256', 'held_observation_sha256'})
-        _need(value['history_sha256'] == scope['history_sha256'] and _pin(value['carryover_sha256'])
-              and value['held_observation_sha256'] == value['carryover_sha256'])
+        fields = {'history_sha256', 'carryover_sha256'}
+        if stage != 'carryover' or 'verify_restored_pair' not in receipts:
+            fields.add('held_observation_sha256')
+            _need(value.get('held_observation_sha256') == value.get('carryover_sha256'))
+        _need(set(value) == fields)
+        _need(value['history_sha256'] == scope['history_sha256'] and _pin(value['carryover_sha256']))
         if stage == 'fallback_carryover':
             _need(value['carryover_sha256'] != receipts['carryover']['carryover_sha256'])
+    elif stage == 'connect_rollback_held':
+        _need('verify_restored_pair' in receipts and set(value) == {'held_observation_sha256'}
+              and _pin(value['held_observation_sha256'])
+              and value['held_observation_sha256'] == receipts['carryover']['carryover_sha256'])
     elif stage == 'stage_runtime':
         _need(set(value) == {'runtime_stage_sha256', 'manifest_sha256', 'old_runtime_preserved', 'authority_issued'})
         _need(_pin(value['runtime_stage_sha256']) and value['manifest_sha256'] == scope['runtime_manifest_sha256']
@@ -417,8 +424,8 @@ class SamebootTransition:
                     receipts['replace_provider_failed'] = {'nonce': issued['nonce'], 'receipt_sha256': _digest(result)}
                     restore = 'restore_provider'
                     if self.scope.get(ROLLBACK_RESUME_FIELD) is True:
-                        stages[index + 1:] = [restore, 'verify_restored_pair', *(
-                            phase for phase in stages[index + 1:] if phase not in SAVED_STAGES)]
+                        stages[index + 1:] = [restore, 'verify_restored_pair', 'carryover', 'connect_rollback_held', *(
+                            phase for phase in stages[index + 1:] if phase not in (*SAVED_STAGES, 'carryover'))]
                         previous = _digest(result)
                         continue
                 self._check_entries(allowed | {restore + '.issued.json', restore + '.observed.json'})
@@ -583,7 +590,8 @@ class SamebootTransition:
         """Continue one protected saved-VM journal across a host disconnect."""
         _need(self.scope.get('saved_reboot') is True)
         reconcile = {*STAGES, *SAVED_STAGES, 'release_writer', 'quiesce_apps', 'restore_provider',
-                     'restore_saved_guests', 'verify_restored_pair', 'publish_material', 'seal_material', 'fallback_carryover'}
+                     'restore_saved_guests', 'verify_restored_pair', 'connect_rollback_held',
+                     'publish_material', 'seal_material', 'fallback_carryover'}
         while time.monotonic() < deadline:
             before = self.status()
             if before['status'] != 'PENDING':

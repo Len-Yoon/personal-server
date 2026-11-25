@@ -408,7 +408,7 @@ class NativeSamebootRelease:
         # facts, while the enclosing custody guard verifies that new owner.
         _need(type(request) is dict and request.get("scope") == self.scope
               and request.get("stage") in {"quiesce_apps", "replace_provider", "restore_provider", "carryover",
-                                           "fallback_carryover", "stage_runtime", "arm_host"}
+                                           "fallback_carryover", "connect_rollback_held", "stage_runtime", "arm_host"}
               and wire._hash(request.get("nonce")) and wire._hash(request.get("previous_sha256"))
               and type(receipts) is dict and type(receipts.get("retire_provider")) is dict
               and type(receipts.get("close_pair")) is dict)

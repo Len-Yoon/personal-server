@@ -17,7 +17,7 @@ from .sameboot_transition import ROLLBACK_RESUME_FIELD, SAVED_STAGES, _closed, _
 
 ERROR = 'sameboot_native_driver_unconfirmed'
 PRE_PUBLISH_CLOSED = {'quiesce_apps', 'replace_provider', 'restore_provider', 'carryover', 'fallback_carryover', 'stage_runtime',
-                      'arm_host', 'publish'}
+                      'connect_rollback_held', 'arm_host', 'publish'}
 
 
 def _need(condition):
@@ -299,7 +299,7 @@ class NativeSamebootDriver:
             evidence = self._apps(operation, chain, deadline, observe_only=observe_only)
         else:
             _need(phase in {'preflight', 'replace_provider', 'restore_provider', 'carryover',
-                            'fallback_carryover', 'stage_runtime'})
+                            'fallback_carryover', 'connect_rollback_held', 'stage_runtime'})
             result = (self.platform.observe if observe_only else self.platform.apply)(operation, chain, deadline)
             _need(type(result) is dict and set(result) == {'status', 'evidence'})
             return _reply(request, result['evidence'], status=result['status'])

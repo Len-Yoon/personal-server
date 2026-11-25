@@ -1441,6 +1441,9 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         if stage == 'replace_provider' and self.reject_provider:
             return {'issued_sha256': hashlib.sha256(request).hexdigest(),
                     'status': 'REJECTED', 'evidence': {'replacement_failed': True}}
+        if stage == 'connect_rollback_held':
+            return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS',
+                    'evidence': {'held_observation_sha256': carryover}}
         app_check = 'app_inventory_verified' if self.driver.scope.get('saved_reboot') else 'all_apps_stopped'
         evidence = {
             'preflight': {
@@ -1481,6 +1484,8 @@ class SamebootTransitionDriverTests(unittest.TestCase):
             'start_apps': {'instance_sha256': self.instance, 'startup_sha256': 'f' * 64,
                            'ready': list(self.module.RECOVERY_START_ORDER)},
         }[stage]
+        if stage == 'carryover' and self.reject_provider and self.driver.scope.get(self.module.ROLLBACK_RESUME_FIELD):
+            del evidence['held_observation_sha256']
         return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS', 'evidence': evidence}
 
     def observe(self, request, _chain, _deadline):
@@ -1600,6 +1605,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
 
         self.assertEqual(result['status'], self.module.RECOVERED_AFTER_PROVIDER_ROLLBACK)
         self.assertIn(('observe', 'verify_restored_pair'), self.calls)
+        self.assertLess(self.calls.index(('apply', 'carryover')), self.calls.index(('apply', 'connect_rollback_held')))
         self.assertFalse(set(self.module.SAVED_STAGES).intersection(stage for _, stage in self.calls))
         self.assertEqual([stage for kind, stage in self.calls if kind == 'apply'][-4:],
                          ['seal_material', 'arm_host', 'publish', 'start_apps'])
@@ -1663,6 +1669,73 @@ class SamebootTransitionDriverTests(unittest.TestCase):
             pair.closed_pair.return_value = observed['closed_pair'] | {'synchronous': False}
             with self.assertRaises(TransitionBlocked):
                 driver.observe(request, receipts, deadline)
+
+    def test_provider_rollback_carryover_binds_old_stop_and_reconciles_without_issuing_again(self):
+        from ha_control import native_saved_site_apps as apps, native_stdio_bridge as wire
+
+        self.saved_scope()
+        adapter = object.__new__(apps.SavedSiteApps)
+        adapter.closed_revision, adapter.terminal_pin = 15, self.terminal
+        adapter.history = {'historical': True}
+        adapter.guard, adapter._operation, adapter.pair = Mock(), Mock(), Mock()
+        plan_raw = b'protected predecessor plan bytes'
+        scope = self.driver.scope | {'previous_plan_sha256': wire._digest(plan_raw)}
+        binding = wire.Binding('1' * 64, '2' * 64, '3' * 64, '4' * 64, '5' * 64)
+        args = dict.fromkeys((*wire.INITIAL_RECOVERY_ARGS, 'hold_sha256'), '1' * 64)
+        previous = args | {'postboot': envelope(), 'postboot_plan_sha256': wire._digest(plan_raw),
+                           'postboot_stopped_receipt_sha256': '6' * 64}
+        adapter.previous = wire.Request(binding, 'A', wire.GUEST_START_INITIAL_POSTBOOT, 3, '7' * 64, previous)
+        stop_args = args | {'postboot_attempt_id': scope['attempt_sha256'],
+                            'predecessor_postboot_attempt_id': previous['postboot']['attempt_id'],
+                            'predecessor_plan_sha256': wire._digest(plan_raw), 'predecessor_terminal_sha256': self.terminal}
+        stop = wire.Request(binding, 'A', wire.GUEST_QUIESCE_SAMEBOOT_SUCCESSOR, 4, '8' * 64, stop_args)
+        adapter.read_quiesce_request = Mock(return_value=stop)
+        op = {'scope': scope, 'stage': 'carryover', 'nonce': 'a' * 64}
+        closed = self.result(self.module._encoded({'stage': 'close_pair'}), 'observe')['evidence']
+        stopped = {'history_sha256': scope['history_sha256'], 'terminal_sha256': self.terminal, 'revision': 15,
+                   'request_sha256': wire._digest(wire._bytes(apps._scope_request(stop))), 'stop_receipt_sha256': 'b' * 64}
+        chain = {'quiesce_apps': stopped, 'verify_restored_pair': {'closed_pair': closed}}
+        draft = SamebootPostbootSealTests().transition_fixture()[0]['initial_recovery_postboot'] | {
+            'attempt_id': self.module._fallback_attempt(scope), 'predecessor_terminal_sha256': self.terminal,
+            'predecessor_plan_sha256': wire._digest(plan_raw), 'predecessor_seal_sha256': apps.DRAFT_PIN,
+            'carryover_receipt_sha256': apps.DRAFT_PIN}
+        pin = 'e' * 64
+        adapter._exchange_guest = Mock(return_value={'nonce': op['nonce'], 'attempt': draft['attempt_id'],
+            'carryover_sha256': pin, 'history_sha256': scope['history_sha256'], 'stop_sha256': stopped['stop_receipt_sha256']})
+        adapter.pair.closed_pair.return_value = closed
+        deadline = self.clock() + 10
+
+        def run(observe_only):
+            return adapter.attest_rollback_carryover(op, chain, deadline, draft=draft, predecessor_plan=plan_raw,
+                                                    observe_only=observe_only)
+
+        self.assertEqual(run(False), pin)
+        data, source, streamed_plan, _ = adapter._exchange_guest.call_args.args
+        self.assertIs(data['observe_only'], False)
+        self.assertNotIn(plan_raw.decode(), repr(data))
+        self.assertEqual(streamed_plan, plan_raw)
+        compile(source, '<guest-carryover-test>', 'exec')
+        self.assertEqual(run(True), pin)
+        self.assertIs(adapter._exchange_guest.call_args.args[0]['observe_only'], True)
+        stopped['request_sha256'] = 'f' * 64
+        with self.assertRaises(TransitionBlocked):
+            run(False)
+        self.assertEqual(adapter._exchange_guest.call_count, 2)
+
+    def test_provider_rollback_held_reconciliation_does_not_repeat_carryover(self):
+        self.saved_scope()
+        self.driver.scope = self.module._scope(self.driver.scope | {self.module.ROLLBACK_RESUME_FIELD: True})
+        self.reject_provider = True
+        while self.driver.status()['stage'] != 'connect_rollback_held':
+            self.step()
+        self.fail_apply = 'connect_rollback_held'
+        with self.assertRaises(OSError):
+            self.step()
+        self.assertTrue(self.driver.status()['observe_only'])
+        self.assertEqual(self.step(observe_only=True)['stage'], 'connect_rollback_held')
+        self.assertEqual(self.calls.count(('apply', 'carryover')), 1)
+        self.assertEqual(self.calls.count(('apply', 'connect_rollback_held')), 1)
+        self.assertEqual(self.driver.status()['stage'], 'stage_runtime')
 
     def test_fresh_guard_failure_neither_issues_nor_dispatches(self):
         for _ in range(3):
