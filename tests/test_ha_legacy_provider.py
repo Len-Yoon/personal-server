@@ -413,6 +413,34 @@ class SamebootReleaseTest(unittest.TestCase):
             driver.observe(self.release._encoded(request), self.release._encoded(receipts), time.monotonic() + 30)
         self.assertEqual(driver.pair.closed_pair.call_count, 1)
 
+    def test_saved_writer_release_is_observed_before_quiesce_or_provider_changes(self):
+        import time
+        driver, request, receipts = self.coordinator()
+        driver.scope |= {"saved_reboot": True, "saved_vm_pair_sha256": "6" * 64,
+                         "previous_windows_boot_sha256": "8" * 64}
+        request.update(scope=driver.scope, stage="release_writer")
+        receipts["preflight"].update(history_sha256=driver.scope["history_sha256"],
+            previous_instance_sha256=driver.scope["previous_instance_sha256"], revision=14,
+            app_inventory_verified=True, successor_runtime_verified=True, successor_provider_verified=True,
+            handoff_driver_verified=True, old_provider_only_retirement=True)
+        pair = driver.pair
+        pair.request_release, pair.observe_release = Mock(), Mock()
+        pair.closed_pair_before_disable = Mock(return_value=pair.closed_pair.return_value)
+        deadline = time.monotonic() + 30
+        with self.assertRaises(TransitionBlocked):
+            driver.release_writer(request, receipts, deadline, observe_only=False)
+        pair.request_release.assert_called_once_with(deadline)
+        completion = driver.release_writer(request, receipts, deadline, observe_only=True)
+        self.assertTrue(completion["cooperative_release_verified"])
+        pair.request_release.assert_called_once()
+        pair.observe_release.assert_called_once_with("3" * 64, deadline)
+        request["stage"] = "close_pair"
+        receipts["release_writer"] = completion
+        self.assertEqual(driver.observe_closed(request, receipts, deadline)["closed_nodes"], ["A", "B"])
+        pair.closed_pair_before_disable.assert_called_once_with("3" * 64, deadline)
+        pair.disable_stopped.assert_not_called()
+        driver.guest.retire.assert_not_called()
+
     def test_changed_package_or_guard_denial_fails_before_guest_mutation(self):
         import time
         driver, request, receipts = self.coordinator()

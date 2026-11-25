@@ -113,8 +113,9 @@ class WindowsPairClosure:
 
     def _command(self, mode, terminal_sha256=None, *, successor=None, verify_runtime=False,
                  resumed_windows_boot=None):
-        _need(mode in {"snapshot", "disable", "closed", "closed_after_arm", "closed_before_disable"})
-        if mode != "snapshot":
+        _need(mode in {"snapshot", "disable", "closed", "closed_after_arm", "closed_before_disable",
+                       "check_release", "request_release", "observed_release"})
+        if mode not in {"snapshot", "check_release", "request_release"}:
             _need(wire._hash(terminal_sha256))
         if mode == "closed_after_arm":
             _need(type(successor) is dict and set(successor) == {"path_sha256", "image_sha256"}
@@ -165,6 +166,14 @@ class WindowsPairClosure:
             _need(result == {"challenge": challenge, "status": "STOPPED_DISABLED",
                              "terminal_sha256": terminal_sha256})
             return result
+        if mode in {"check_release", "request_release"}:
+            status = "COOPERATIVE_RELEASE_READY" if mode == "check_release" else "COOPERATIVE_RELEASE_REQUESTED"
+            _need(result == {"challenge": challenge, "status": status})
+            return result
+        if mode == "observed_release":
+            _need(result == {"challenge": challenge, "status": "COOPERATIVE_RELEASED",
+                             "terminal_sha256": terminal_sha256})
+            return result
         _need(set(result) == {"challenge", "status", "terminal_sha256", "proof_sha256", "closed_revision"}
               and result["status"] == "CLOSED_PAIR_VERIFIED" and result["terminal_sha256"] == terminal_sha256
               and type(result["closed_revision"]) is int and result["closed_revision"] == self.config["revision"] + 1
@@ -178,6 +187,15 @@ class WindowsPairClosure:
 
     def disable_stopped(self, terminal_sha256, deadline):
         return self._call("disable", deadline, terminal_sha256)
+
+    def request_release(self, deadline):
+        return self._call("request_release", deadline, verify_runtime=True)
+
+    def check_release(self, deadline):
+        return self._call("check_release", deadline, verify_runtime=True)
+
+    def observe_release(self, terminal_sha256, deadline):
+        return self._call("observed_release", deadline, terminal_sha256)
 
     def closed_pair(self, terminal_sha256, deadline):
         return self._call("closed", deadline, terminal_sha256)
@@ -209,8 +227,9 @@ class NativeSamebootRelease:
 
     guest.retire and guest.observe_retired authenticate the exact issued bytes
     and return retire_guest/observe_guest_retired results from the guest package.
-    custody_guard must freshly bind boot, stopped app inventory, latest intent,
-    protected resources, original writer lineage and absence of a successor.
+    custody_guard must freshly bind boot, the phase-appropriate app inventory,
+    latest intent, protected resources, original writer lineage and absence
+    of a successor. Saved recovery quiesces apps after the paired closure.
     Those safety observations are required again inside every guest boundary;
     a static hash or coordinator journal is never a substitute.
     """
@@ -260,16 +279,21 @@ class NativeSamebootRelease:
         # Validate the old code package and still-running original before any
         # guest stop. A changed runtime fails before changing a provider.
         before = self.pair.snapshot(deadline, verify_runtime=True)
-        if self.expected_stopped_terminal_sha256 is None:
+        expected_stopped = self.expected_stopped_terminal_sha256
+        if self.scope.get("saved_reboot"):
+            _validate("release_writer", receipts.get("release_writer"), self.scope, receipts)
+            _validate("quiesce_apps", receipts.get("quiesce_apps"), self.scope, receipts)
+            expected_stopped = receipts["release_writer"]["terminal_sha256"]
+        if expected_stopped is None:
             _need(before["status"] == "RUNNING")
         else:
             _need(before["status"] == "STOPPED"
-                  and before["terminal_sha256"] == self.expected_stopped_terminal_sha256)
+                  and before["terminal_sha256"] == expected_stopped)
             # An independently stopped predecessor is permitted only with this
             # exact preobserved native terminal and fresh paired closure. Its
             # provider and held observer are still verified separately before
             # retiring the exact archived provider.
-            self.pair.closed_pair_before_disable(self.expected_stopped_terminal_sha256, deadline)
+            self.pair.closed_pair_before_disable(expected_stopped, deadline)
         retired = self.guest.retire(request_raw, receipts_raw, deadline)
         self._retired_guest(retired, receipts)
         self._guard(request_raw, receipts_raw, deadline, True)
@@ -282,6 +306,23 @@ class NativeSamebootRelease:
         self._guard(request_raw, receipts_raw, deadline, True)
         self.pair.disable_stopped(stopped["terminal_sha256"], deadline)
         return self.observe(request_raw, receipts_raw, deadline)
+
+    def release_writer(self, request, receipts, deadline, *, observe_only):
+        _need(self.scope.get("saved_reboot") is True and request.get("scope") == self.scope
+              and request.get("stage") == "release_writer" and wire._hash(request.get("nonce"))
+              and wire._hash(request.get("previous_sha256")) and time.monotonic() < deadline)
+        _validate("preflight", receipts.get("preflight"), self.scope, receipts)
+        raw, chain = _encoded(request), _encoded(receipts)
+        _need(self.custody_guard(raw, chain, deadline, observe_only=observe_only) is True)
+        if not observe_only:
+            self.pair.request_release(deadline)
+        stopped = self.pair.snapshot(deadline)
+        _need(stopped["status"] == "STOPPED")
+        terminal = stopped["terminal_sha256"]
+        self.pair.observe_release(terminal, deadline)
+        _need(self.custody_guard(raw, chain, deadline, observe_only=True) is True)
+        return {"terminal_sha256": terminal, "previous_instance_sha256": self.scope["previous_instance_sha256"],
+                "cooperative_release_verified": True}
 
     def observe(self, request_raw, receipts_raw, deadline):
         request, receipts = self._request(request_raw, receipts_raw)
@@ -308,13 +349,23 @@ class NativeSamebootRelease:
         return self.observe(_encoded(request), _encoded(receipts), deadline)["evidence"]
 
     def observe_closed(self, request, receipts, deadline):
+        if self.scope.get("saved_reboot") and request.get("stage") in {"close_pair", "quiesce_apps"}:
+            _need(request.get("scope") == self.scope and wire._hash(request.get("nonce"))
+                  and wire._hash(request.get("previous_sha256")))
+            _validate("release_writer", receipts.get("release_writer"), self.scope, receipts)
+            raw, chain = _encoded(request), _encoded(receipts)
+            _need(self.custody_guard(raw, chain, deadline, observe_only=True) is True)
+            terminal = receipts["release_writer"]["terminal_sha256"]
+            closed = self.pair.closed_pair_before_disable(terminal, deadline)
+            _need(self.custody_guard(raw, chain, deadline, observe_only=True) is True)
+            return closed
         if request.get("stage") == "close_pair":
             return self.observe(_encoded(request), _encoded(receipts), deadline)["evidence"]
         # After replacement the provider port legitimately has a different
         # owner. Recheck the original Windows terminal and exact closed A/B
         # facts, while the enclosing custody guard verifies that new owner.
         _need(type(request) is dict and request.get("scope") == self.scope
-              and request.get("stage") in {"replace_provider", "restore_provider", "carryover",
+              and request.get("stage") in {"quiesce_apps", "replace_provider", "restore_provider", "carryover",
                                            "fallback_carryover", "stage_runtime", "arm_host"}
               and wire._hash(request.get("nonce")) and wire._hash(request.get("previous_sha256"))
               and type(receipts) is dict and type(receipts.get("retire_provider")) is dict
@@ -482,12 +533,24 @@ SameScope $record.recovery $plan.initial_cutover_recovery
 SameScope $record.postboot $plan.initial_recovery_postboot
 $terminalPin=Pin $raw
 if($service.State -ceq 'Running'){
- if($cfg.mode -cne 'snapshot' -or $service.ProcessId -ne $binding.service_pid -or
+ if($cfg.mode -cnotin @('snapshot','check_release','request_release') -or $service.ProcessId -ne $binding.service_pid -or
     $service.StartMode -cne 'Manual' -or $record.phase -cne 'serving'){throw 'release_still_running'}
  $process=Get-Process -Id $binding.service_pid -ErrorAction Stop
  try{
   if($process.HasExited -or $process.SessionId -ne 0 -or ('"'+$process.MainModule.FileName+'"') -ine $service.PathName -or
      $process.StartTime.ToUniversalTime().Ticks.ToString() -cne $binding.service_created_ticks){throw 'release_instance'}
+  if($cfg.mode -cin @('check_release','request_release')){
+   if($service.AcceptStop -isnot [bool] -or $service.AcceptStop){throw 'release_cooperative_host'}
+   if($cfg.mode -ceq 'check_release'){
+    @{challenge=$cfg.challenge;status='COOPERATIVE_RELEASE_READY'}|ConvertTo-Json -Compress
+    return
+   }
+   $sc=Join-Path ([Environment]::SystemDirectory) 'sc.exe'
+   $null=& $sc control $service.Name 128
+   if($LASTEXITCODE -ne 0){throw 'release_cooperative_request'}
+   @{challenge=$cfg.challenge;status='COOPERATIVE_RELEASE_REQUESTED'}|ConvertTo-Json -Compress
+   return
+  }
  }finally{$process.Dispose()}
  @{challenge=$cfg.challenge;status='RUNNING';terminal_base64=[Convert]::ToBase64String($raw);terminal_sha256=$terminalPin;disabled=$false}|ConvertTo-Json -Compress
  return
@@ -507,6 +570,12 @@ if($cfg.mode -ceq 'snapshot'){
  return
 }
 if($terminalPin -cne $cfg.terminal_sha256){throw 'release_terminal'}
+if($cfg.mode -ceq 'observed_release'){
+ if($record.phase -cne 'local_revoke_observed' -or $service.ExitCode -ne 0 -or
+    $service.ServiceSpecificExitCode -ne 0 -or 'failure_code' -cin $record.PSObject.Properties.Name){throw 'release_cooperative_terminal'}
+ @{challenge=$cfg.challenge;status='COOPERATIVE_RELEASED';terminal_sha256=$terminalPin}|ConvertTo-Json -Compress
+ return
+}
 if($cfg.mode -ceq 'disable'){
  # This is deliberately the only SCM mutation. A running process is never
  # stopped here; provider loss must first finish its native terminal path.

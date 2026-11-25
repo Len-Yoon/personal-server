@@ -118,6 +118,7 @@ class WindowsSavedReboot:
               and scope['previous_plan_sha256'] == self.pair.config['plan_sha256']
               and scope['previous_instance_sha256'] == self.pair.config['binding_sha256']
               and _closed(close, revision, terminal))
+        _validate('quiesce_apps', receipts.get('quiesce_apps'), scope, receipts)
         return scope, stage, terminal, revision
 
     def run(self, operation, receipts, deadline, *, observe_only):

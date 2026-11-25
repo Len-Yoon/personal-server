@@ -18,7 +18,9 @@ STAGES = (
     'preflight', 'retire_provider', 'close_pair', 'replace_provider',
     'carryover', 'stage_runtime', 'arm_host', 'publish', 'start_apps', 'portal',
 )
-SAVED_STAGES = ('save_guests', 'reboot_windows', 'resume_guests')
+SAVED_STAGES = ('save_guests', 'reboot_windows', 'resume_guests', 'rebind_observers')
+OBSERVER_ROLES = ('legacy', 'held_admission', 'provider_isolation')
+OBSERVER_ENDPOINT = {'server_pid', 'pipe_name', 'key_sha256'}
 RECOVERED_WITHOUT_REBOOT = 'RECOVERED_WITHOUT_REBOOT'
 READ_ONLY = {'preflight', 'close_pair', 'portal'}
 HASH = re.compile(r'[0-9a-f]{64}')
@@ -173,14 +175,15 @@ def _validate(stage, value, scope, receipts):
     _need(type(value) is dict)
     revision = scope['previous_revision']
     if stage == 'preflight':
+        app_check = 'app_inventory_verified' if scope.get('saved_reboot') else 'all_apps_stopped'
         _need(set(value) == {'history_sha256', 'rollback_sha256', 'previous_instance_sha256', 'revision',
-                             'all_apps_stopped', 'successor_runtime_verified', 'successor_provider_verified',
+                             app_check, 'successor_runtime_verified', 'successor_provider_verified',
                              'handoff_driver_verified', 'old_provider_only_retirement'})
         _need(value['history_sha256'] == scope['history_sha256']
               and value['previous_instance_sha256'] == scope['previous_instance_sha256']
               and type(value['revision']) is int and value['revision'] == revision
               and _pin(value['rollback_sha256'])
-              and all(value[key] is True for key in ('all_apps_stopped', 'successor_runtime_verified',
+              and all(value[key] is True for key in (app_check, 'successor_runtime_verified',
                     'successor_provider_verified', 'handoff_driver_verified', 'old_provider_only_retirement')))
     elif stage == 'retire_provider':
         _need(set(value) == {'previous_instance_sha256', 'terminal_sha256', 'other_observers_preserved',
@@ -189,10 +192,27 @@ def _validate(stage, value, scope, receipts):
               and _pin(value['terminal_sha256'])
               and all(value[key] is True for key in ('other_observers_preserved', 'old_service_stopped_disabled',
                                                      'native_terminal_preserved')))
+        if scope.get('saved_reboot'):
+            _need(value['terminal_sha256'] == receipts['release_writer']['terminal_sha256'])
+    elif stage == 'release_writer':
+        _need(scope.get('saved_reboot') is True
+              and set(value) == {'terminal_sha256', 'previous_instance_sha256', 'cooperative_release_verified'}
+              and value['previous_instance_sha256'] == scope['previous_instance_sha256']
+              and _pin(value['terminal_sha256']) and value['cooperative_release_verified'] is True)
     elif stage == 'close_pair':
         _need(set(value) == {'closed_nodes', 'synchronous', 'same_expiry', 'replay_verified',
                              'effects_isolated', 'revision', 'terminal_sha256', 'closed_proof_sha256'})
-        _need(_closed(value, revision + 1, receipts['retire_provider']['terminal_sha256']))
+        terminal = receipts['release_writer' if scope.get('saved_reboot') else 'retire_provider']['terminal_sha256']
+        _need(_closed(value, revision + 1, terminal))
+    elif stage == 'quiesce_apps':
+        _need(scope.get('saved_reboot') is True
+              and set(value) == {'stop_receipt_sha256', 'request_sha256', 'terminal_sha256', 'history_sha256',
+                                 'revision', 'stopped', 'closed_proof_sha256'}
+              and value['terminal_sha256'] == receipts['close_pair']['terminal_sha256']
+              and value['history_sha256'] == scope['history_sha256']
+              and type(value['revision']) is int and value['revision'] == revision + 1
+              and value['stopped'] == list(RECOVERY_START_ORDER)
+              and all(_pin(value[key]) for key in ('stop_receipt_sha256','request_sha256','closed_proof_sha256')))
     elif stage == 'replace_provider':
         _need(set(value) == {'owned_port', 'provider_proof_sha256'})
         _need(value['owned_port'] is True and _pin(value['provider_proof_sha256']))
@@ -227,6 +247,17 @@ def _validate(stage, value, scope, receipts):
         _need(value['windows_boot_sha256'] == boot and value['states'] == {'A':'Running','B':'Running'}
               and type(value['closed_pair']) is dict
               and _closed(value['closed_pair'], revision + 1, value['terminal_sha256']))
+    elif stage == 'rebind_observers':
+        _need(scope.get('saved_reboot') is True
+              and set(value) == {'windows_boot_sha256', 'observers'}
+              and value['windows_boot_sha256'] == receipts['resume_guests']['windows_boot_sha256']
+              and type(value['observers']) is dict and set(value['observers']) == set(OBSERVER_ROLES))
+        endpoints = tuple(value['observers'].values())
+        _need(all(type(row) is dict and set(row) == OBSERVER_ENDPOINT
+                  and type(row['server_pid']) is int and row['server_pid'] > 0
+                  and type(row['pipe_name']) is str and re.fullmatch(r'n100ha-(?:lease|recovery)-proof-[0-9a-f]{32}', row['pipe_name'])
+                  and _pin(row['key_sha256']) for row in endpoints)
+              and all(len({row[field] for row in endpoints}) == len(OBSERVER_ROLES) for field in OBSERVER_ENDPOINT))
     elif stage == 'arm_host':
         _need(set(value) == {'successor_image_sha256', 'plan_sha256', 'carryover_sha256', 'service_stopped'})
         carryover = receipts.get('fallback_carryover', receipts['carryover'])
@@ -314,6 +345,7 @@ class SamebootTransition:
         stages = list(STAGES)
         if self.scope.get('saved_reboot'):
             stages[boundary:boundary] = SAVED_STAGES
+            stages[1:3] = ('release_writer', 'close_pair', 'quiesce_apps', 'retire_provider')
         for index, stage in enumerate(stages):
             allowed.update({stage + '.issued.json', stage + '.observed.json'})
             issued = self._read(stage + '.issued.json')
@@ -334,14 +366,14 @@ class SamebootTransition:
                     receipts['save_rejected'] = result['evidence']
                     # Keep the pre-save attestation intact. The same-boot
                     # plan pins a different carryover for a new attempt.
-                    stages[index + 1:index + 3] = ['restore_saved_guests', 'fallback_carryover']
+                    stages[index + 1:index + 4] = ['restore_saved_guests', 'fallback_carryover']
                     previous = _digest(result)
                     continue
                 elif stage == 'reboot_windows':
                     _validate('save_guests', result['evidence'], self.scope, receipts)
                     _need(result['evidence'] == receipts['save_guests'])
                     receipts['reboot_cancelled'] = {'saved': result['evidence'], 'nonce': issued['nonce']}
-                    stages[index + 1:index + 2] = ['restore_saved_guests', 'fallback_carryover']
+                    stages[index + 1:index + 3] = ['restore_saved_guests', 'fallback_carryover']
                     previous = _digest(result)
                     continue
                 else:
@@ -423,6 +455,13 @@ class SamebootTransition:
                     _need(saved_reboot(postboot_scope(material['candidate'])))
                     pre = json.loads(material['files'][FILES[3]])
                     resumed = receipts['resume_guests']
+                    candidate = material['candidate']
+                    rebound = receipts['rebind_observers']['observers']
+                    actual = (candidate['windows_initial_observer'],
+                              candidate['windows_recovery_observers']['held_admission'],
+                              candidate['windows_recovery_observers']['provider_isolation'])
+                    _need(all({key: row[key] for key in OBSERVER_ENDPOINT} == rebound[role]
+                              for role, row in zip(OBSERVER_ROLES, actual, strict=True)))
                     _need(pre['closed_pair_sha256'] == receipts['close_pair']['closed_proof_sha256']
                           and material['candidate']['saved_reboot_runtime_manifest_sha256']
                           == self.scope['runtime_manifest_sha256']
@@ -484,7 +523,9 @@ class SamebootTransition:
     def run_saved(self, deadline):
         """Continue one protected saved-VM journal across a host disconnect."""
         _need(self.scope.get('saved_reboot') is True)
-        reconcile = {*SAVED_STAGES, 'restore_saved_guests', 'fallback_carryover', 'arm_host', 'publish', 'start_apps'}
+        reconcile = {*SAVED_STAGES, 'release_writer', 'close_pair', 'quiesce_apps',
+                     'retire_provider', 'restore_saved_guests',
+                     'fallback_carryover', 'arm_host', 'publish', 'start_apps'}
         while time.monotonic() < deadline:
             before = self.status()
             if before['status'] != 'PENDING':

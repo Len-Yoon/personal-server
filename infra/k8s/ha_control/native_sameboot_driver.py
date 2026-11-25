@@ -8,12 +8,14 @@ from .controller import TransitionBlocked
 from .initial_postboot import saved_reboot, scope as postboot_scope
 from .initial_unpublished import derive_predecessor
 from .native_saved_reboot import WindowsSavedReboot
+from .native_saved_observers import WindowsSavedObservers
 from .native_sameboot_successor import WindowsSamebootHost
-from .native_stdio_bridge import RECOVERY_START_ORDER
-from .sameboot_transition import SAVED_STAGES, _expects_reboot
+from .native_guest_ssh import GuestSshDispatcher
+from .native_stdio_bridge import GUEST_QUIESCE_SAMEBOOT_SUCCESSOR, RECOVERY_START_ORDER, VERSION, Request, _bytes as _wire_bytes
+from .sameboot_transition import SAVED_STAGES, _closed, _expects_reboot
 
 ERROR = 'sameboot_native_driver_unconfirmed'
-PRE_PUBLISH_CLOSED = {'replace_provider', 'restore_provider', 'carryover', 'fallback_carryover', 'stage_runtime',
+PRE_PUBLISH_CLOSED = {'quiesce_apps', 'replace_provider', 'restore_provider', 'carryover', 'fallback_carryover', 'stage_runtime',
                       'arm_host', 'publish'}
 
 
@@ -55,13 +57,16 @@ class NativeSamebootDriver:
         operation, chain = _decoded(request, receipts)
         phase = operation['stage']
         if phase == 'preflight' and operation['scope'].get('saved_reboot') is True:
-            _need(type(self.saved_boot) is WindowsSavedReboot)
+            _need(type(self.saved_boot) is WindowsSavedReboot
+                  and callable(getattr(self.platform, 'quiesce_operation', None))
+                  and callable(getattr(self.platform, 'saved_observers', None)))
             self.saved_boot.verify_boot_task(deadline)
+            self.release.pair.check_release(deadline)
         if phase in (*SAVED_STAGES, 'restore_saved_guests'):
             _need(type(self.saved_boot) is WindowsSavedReboot and operation['scope'].get('saved_reboot') is True)
             # A suspended VM cannot answer app or DB queries. The native
             # boundary has an exact stopped Windows witness for those phases.
-            if phase != 'save_guests' or observe_only:
+            if phase not in {'save_guests', 'rebind_observers'} or (phase == 'save_guests' and observe_only):
                 return time.monotonic() < deadline
         _need(time.monotonic() < deadline and self.platform.guard(
             operation, chain, deadline, observe_only=observe_only) is True)
@@ -155,14 +160,67 @@ class NativeSamebootDriver:
               and receipt['ready'] == list(RECOVERY_START_ORDER))
         return receipt
 
+    def _quiesce_apps(self, operation, chain, deadline, *, observe_only):
+        _need(operation['scope'].get('saved_reboot') is True and 'close_pair' in chain)
+        material = self.platform.quiesce_operation(operation, chain, deadline, observe_only=observe_only)
+        _need(type(material) is dict and set(material) == {
+            'dispatcher', 'request', 'assert_windows_closed', 'observe_stopped'})
+        dispatcher, request = material['dispatcher'], material['request']
+        scope, closed = operation['scope'], chain['close_pair']
+        _need(type(dispatcher) is GuestSshDispatcher and type(request) is Request
+              and request.binding == dispatcher.binding and request.node == 'A'
+              and request.verb == GUEST_QUIESCE_SAMEBOOT_SUCCESSOR and request.nonce == operation['nonce']
+              and request.args.get('predecessor_plan_sha256') == scope['previous_plan_sha256']
+              and request.args.get('predecessor_terminal_sha256') == closed['terminal_sha256']
+              and request.args.get('postboot_attempt_id') == scope['attempt_sha256']
+              and callable(material['assert_windows_closed']) and callable(material['observe_stopped']))
+        pin = None
+        if not observe_only:
+            stopped = dispatcher.quiesce_sameboot_successor(
+                request, deadline, assert_windows_closed=material['assert_windows_closed'])
+            _need(stopped.status == 'PASS')
+            pin = stopped.receipt_sha256
+        result = material['observe_stopped'](request, pin, deadline)
+        scope = {'version': VERSION, 'binding': request.binding.fields(), 'node': request.node,
+                 'boot_sha256': request.binding.boot(request.node), 'verb': request.verb,
+                 'sequence': request.sequence, 'nonce': request.nonce, 'args': request.args}
+        _need(time.monotonic() < deadline and type(result) is dict
+              and result.get('request_sha256') == hashlib.sha256(_wire_bytes(scope)).hexdigest()
+              and (pin is None or result.get('stop_receipt_sha256') == pin))
+        return result
+
+    def _rebind_observers(self, operation, chain, deadline, *, observe_only):
+        scope, resumed = operation['scope'], chain['resume_guests']
+        _need(scope.get('saved_reboot') is True)
+        observer = self.platform.saved_observers(operation, chain, deadline)
+        _need(type(observer) is WindowsSavedObservers and observer.windows is self.release.pair.windows)
+        expected = {'plan_sha256': scope['previous_plan_sha256'],
+                    'binding_sha256': scope['previous_instance_sha256'],
+                    'terminal_sha256': resumed['terminal_sha256'],
+                    'previous_windows_boot_sha256': scope['previous_windows_boot_sha256'],
+                    'windows_boot_sha256': resumed['windows_boot_sha256'],
+                    'vm_id_sha256': resumed['vm_id_sha256']}
+        _need(all(observer.writer[key] == value for key, value in expected.items()))
+        closed = self.release.pair.closed_pair_after_reboot(
+            resumed['terminal_sha256'], resumed['windows_boot_sha256'], deadline)
+        _need(_closed(closed, scope['previous_revision'] + 1, resumed['terminal_sha256']))
+        endpoints = (observer.observe if observe_only else observer.apply)(deadline)
+        return {'windows_boot_sha256': resumed['windows_boot_sha256'], 'observers': endpoints}
+
     def _dispatch(self, request, receipts, deadline, *, observe_only):
         operation, chain = _decoded(request, receipts)
         phase = operation['stage']
         if phase == 'retire_provider':
             evidence = (self.release.observe_retired if observe_only else self.release.retire_provider)(
                 operation, chain, deadline)
+        elif phase == 'release_writer':
+            evidence = self.release.release_writer(operation, chain, deadline, observe_only=observe_only)
         elif phase == 'close_pair':
             evidence = self.release.observe_closed(operation, chain, deadline)
+        elif phase == 'quiesce_apps':
+            evidence = self._quiesce_apps(operation, chain, deadline, observe_only=observe_only)
+        elif phase == 'rebind_observers':
+            evidence = self._rebind_observers(operation, chain, deadline, observe_only=observe_only)
         elif phase in (*SAVED_STAGES, 'restore_saved_guests'):
             _need(type(self.saved_boot) is WindowsSavedReboot)
             evidence = self.saved_boot.run(operation, chain, deadline, observe_only=observe_only)

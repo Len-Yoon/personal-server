@@ -1359,6 +1359,11 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.saved_vm_ids = {node: value['vm_id_sha256'] for node, value in seal['guests'].items()}
         self.old_boot = seal['windows_boot_sha256']
         self.new_boot = plan['windows_initial_observer']['windows_boot_sha256']
+        self.observers = {
+            role: {'server_pid': index + 100, 'pipe_name': 'n100ha-' + kind + '-proof-' + str(index + 1) * 32,
+                   'key_sha256': str(index + 1) * 64}
+            for index, (role, kind) in enumerate(zip(self.module.OBSERVER_ROLES, ('lease', 'recovery', 'recovery')))
+        }
         self.partial_save = False
         self.driver.scope = self.module._scope(self.scope | {
             'saved_reboot': True, 'previous_windows_boot_sha256': self.old_boot,
@@ -1376,6 +1381,9 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         carryover = 'e3' * 32 if getattr(self, 'partial_save', False) else self.carryover
         if kind == 'apply' and stage == self.fail_apply:
             raise OSError('unconfirmed side effect')
+        if stage == 'rebind_observers':
+            return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS',
+                    'evidence': {'windows_boot_sha256': self.new_boot, 'observers': self.observers}}
         if stage in (*self.module.SAVED_STAGES, 'restore_saved_guests'):
             old = stage in {'save_guests','restore_saved_guests'}
             running = stage in {'resume_guests','restore_saved_guests'}
@@ -1395,20 +1403,29 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         if stage == 'replace_provider' and self.reject_provider:
             return {'issued_sha256': hashlib.sha256(request).hexdigest(),
                     'status': 'REJECTED', 'evidence': {'replacement_failed': True}}
+        app_check = 'app_inventory_verified' if self.driver.scope.get('saved_reboot') else 'all_apps_stopped'
         evidence = {
             'preflight': {
                 'history_sha256': self.scope['history_sha256'], 'rollback_sha256': '6' * 64,
                 'previous_instance_sha256': self.scope['previous_instance_sha256'], 'revision': 14,
-                'all_apps_stopped': True, 'successor_runtime_verified': True,
+                app_check: True, 'successor_runtime_verified': True,
                 'successor_provider_verified': True, 'handoff_driver_verified': True,
                 'old_provider_only_retirement': True},
             'retire_provider': {
                 'previous_instance_sha256': self.scope['previous_instance_sha256'], 'terminal_sha256': self.terminal,
                 'other_observers_preserved': True, 'old_service_stopped_disabled': True,
                 'native_terminal_preserved': True},
+            'release_writer': {'terminal_sha256': self.terminal,
+                               'previous_instance_sha256': self.scope['previous_instance_sha256'],
+                               'cooperative_release_verified': True},
             'close_pair': {'closed_nodes': ['A', 'B'], 'revision': 15, 'synchronous': True,
                            'same_expiry': True, 'replay_verified': True, 'effects_isolated': True,
                            'terminal_sha256': self.terminal, 'closed_proof_sha256': '7' * 64},
+            'quiesce_apps': {'stop_receipt_sha256': 'c' * 64, 'request_sha256': 'b' * 64,
+                             'terminal_sha256': self.terminal,
+                             'history_sha256': self.scope['history_sha256'], 'revision': 15,
+                             'stopped': list(self.module.RECOVERY_START_ORDER),
+                             'closed_proof_sha256': '8' * 64},
             'replace_provider': {'owned_port': True, 'provider_proof_sha256': '8' * 64},
             'restore_provider': {'old_port_owner_verified': True, 'old_provider_proof_sha256': '9' * 64,
                                  'rollback_sha256': '6' * 64},
@@ -1612,9 +1629,11 @@ class SamebootTransitionDriverTests(unittest.TestCase):
 
     def test_saved_reboot_journal_binds_archival_and_fresh_closed_proofs(self):
         self.saved_scope()
-        for _ in range(9):
+        for _ in range(12):
             self.step()
         plan, files = SamebootPostbootSealTests().saved_reboot_fixture()
+        plan['windows_initial_observer'].update(self.observers['legacy'])
+        plan['windows_recovery_observers'].update({role: value for role, value in self.observers.items() if role != 'legacy'})
         plan['saved_reboot_runtime_manifest_sha256'] = self.scope['runtime_manifest_sha256']
         material = {'candidate':plan,'plan_pin':self.plan,'files':files,'previous_raw':b''}
         with patch.object(self.driver.driver, 'arm_material', return_value=material), \
@@ -1633,7 +1652,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
 
     def test_lost_reboot_response_only_observes_reconnect_then_resumes(self):
         self.saved_scope()
-        for _ in range(7):
+        for _ in range(9):
             self.step()
         self.assertEqual(self.driver.status()['stage'], 'reboot_windows')
         self.fail_apply = 'reboot_windows'
@@ -1644,13 +1663,15 @@ class SamebootTransitionDriverTests(unittest.TestCase):
             self.step()
         self.step(observe_only=True)
         self.step()
+        self.assertEqual(self.driver.status()['stage'], 'rebind_observers')
+        self.step()
         self.assertEqual(self.driver.status()['stage'], 'arm_host')
         self.assertEqual(self.calls.count(('apply','reboot_windows')), 1)
         self.assertEqual(self.calls.count(('apply','resume_guests')), 1)
 
     def test_partial_save_recovers_a_and_apps_in_old_boot_without_issuing_reboot(self):
         self.saved_scope()
-        for _ in range(6):
+        for _ in range(8):
             self.step()
         self.fail_apply = 'save_guests'
         self.partial_save = True
@@ -1678,7 +1699,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
 
     def test_only_an_authenticated_unissued_reboot_cancellation_opens_fallback(self):
         self.saved_scope()
-        for _ in range(7):
+        for _ in range(9):
             self.step()
         self.fail_apply = 'reboot_windows'
         with self.assertRaises(OSError):
@@ -1700,6 +1721,45 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.driver.status()['stage'], 'fallback_carryover')
         self.assertEqual(self.calls.count(('apply','reboot_windows')), 1)
+
+    def test_saved_quiesce_follows_pair_closure_and_reconciles_without_issuing_again(self):
+        self.saved_scope()
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'release_writer')
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'close_pair')
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'quiesce_apps')
+        self.fail_apply = 'quiesce_apps'
+        with self.assertRaises(OSError):
+            self.step()
+        self.assertTrue(self.driver.status()['observe_only'])
+        with self.assertRaises(TransitionBlocked):
+            self.step()
+        self.step(observe_only=True)
+        self.assertEqual(self.driver.status()['stage'], 'retire_provider')
+        self.assertEqual(self.calls.count(('apply', 'quiesce_apps')), 1)
+
+    def test_saved_runner_retries_closed_pair_read_after_writer_release(self):
+        self.saved_scope()
+        self.step()
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'close_pair')
+        calls = []
+
+        def observe(request, chain, deadline):
+            calls.append(json.loads(request)['stage'])
+            if len(calls) == 1:
+                raise OSError('first paired read unavailable')
+            return self.result(request, 'observe')
+
+        self.denied_guard = 'quiesce_apps'
+        with patch.object(self, 'observe', side_effect=observe), patch.object(self.module.time, 'sleep'):
+            with self.assertRaises(TransitionBlocked):
+                self.driver.run_saved(self.clock() + 100)
+        self.assertEqual(calls, ['close_pair', 'close_pair'])
+        self.assertEqual(self.driver.status()['stage'], 'quiesce_apps')
+        self.assertNotIn(('apply', 'quiesce_apps'), self.calls)
 
     def test_lost_app_reply_uses_native_completion_without_starting(self):
         from types import SimpleNamespace
@@ -1760,7 +1820,7 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         adapter = native.WindowsSavedReboot(pair, script_sha256='1' * 64, boot_task_sha256='2' * 64,
                                           boot_script_sha256='3' * 64, vm_ids=saved['vm_id_sha256'])
         operation = {'scope': scope, 'stage': 'save_guests', 'nonce': 'b' * 64}
-        receipts = {'close_pair': closure}
+        receipts = {'close_pair': closure, 'quiesce_apps': evidence('quiesce_apps')}
         deadline = self.clock() + 20
         with patch.object(pair, '_command', return_value=('probe', 'a' * 64)), \
              patch.object(adapter, '_boot_task_command', return_value='bootProbe'), \
@@ -1775,6 +1835,8 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                 driver.guard(preflight, b'{}', deadline, observe_only=False)
             platform.guard.assert_not_called()
 
+            with self.assertRaises(TransitionBlocked):
+                adapter.run(operation, {'close_pair': closure}, deadline, observe_only=False)
             with self.assertRaises(TransitionBlocked):
                 adapter.run(operation, {'close_pair': closure | {'closed_nodes': ['A']}},
                             deadline, observe_only=False)
@@ -1867,11 +1929,48 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         self.assertIn('Read-Pin $cfg.starter_path $cfg.starter_pin $cfg.starter_max_bytes', commands[1])
         self.assertNotIn('$p.Go', commands[-1])
 
+        from dataclasses import replace
+        from ha_control import native_saved_guest_evidence as saved_evidence
         from ha_control.native_sameboot_release import WindowsPairClosure
-        reboot_evidence = {key: value for key, value in evidence.items() if key != 'observed'}
-        reboot_evidence.update(new_windows_boot_sha256='b0'*32, closed_pair_sha256='c9'*32,
-                               saved={'A':'Saved','B':'Saved'}, resumed={'A':'Running','B':'Running'})
-        archived_seal = encode(json.loads(material['files'][FILES[3]]) | {'saved': reboot_evidence['saved']})
+        seal = json.loads(material['files'][FILES[3]]) | {'saved': {'A': 'Saved', 'B': 'Saved'}}
+        archived_seal = encode(seal)
+        hardware = {node: saved_evidence.VmHardware(**{key: row[key] for key in saved_evidence.HARDWARE_FIELDS})
+                    for node, row in seal['guests'].items()}
+
+        def capture(boot, challenge, start):
+            first = saved_evidence.WindowsVmSnapshot(challenge, boot, start, start + 1,
+                                                       dict.fromkeys(hardware, 'Running'), hardware)
+            last = replace(first, utc_before_ns=start + 9, utc_after_ns=start + 10)
+            observations, sockets = {}, {}
+            for node, row in seal['guests'].items():
+                pin = self.module._digest({'node': node, 'challenge': challenge})
+                observations[node] = saved_evidence.GuestObservation(
+                    node, challenge, boot, row['guest_boot_sha256'], row['container_inventory_sha256'],
+                    row['container_inventory_sha256'], 8 if node == 'A' else 2, start + 3,
+                    'a3' * 32, pin, seal['hold_sha256'] if node == 'A' else None)
+                sockets[node] = saved_evidence.VsockObservation(
+                    node, challenge, boot, row['vm_id_sha256'], row['guest_boot_sha256'], start + 4, pin)
+            return saved_evidence.GuestPairCapture(first, last, observations, sockets)
+
+        before = capture(seal['windows_boot_sha256'], 'a4' * 32, 10_000_000_000)
+        resumed = capture('b0' * 32, 'a5' * 32, 20_000_000_000)
+        saved = replace(before.after, challenge='a6' * 32, utc_before_ns=15_000_000_000,
+                        utc_after_ns=15_000_000_001, states=seal['saved'])
+        native_resume = {'windows_boot_sha256': 'b0' * 32,
+                         'vm_id_sha256': {node: row.vm_id_sha256 for node, row in hardware.items()},
+                         'states': dict.fromkeys(hardware, 'Running'), 'plan_sha256': old_pin,
+                         'binding_sha256': seal['predecessor_binding_sha256'],
+                         'terminal_sha256': seal['predecessor_terminal_sha256'],
+                         'closed_pair': {'closed_nodes': ['A', 'B'], 'synchronous': True, 'same_expiry': True,
+                                         'replay_verified': True, 'effects_isolated': True,
+                                         'revision': seal['closed_revision'], 'closed_proof_sha256': 'c9' * 32,
+                                         'terminal_sha256': seal['predecessor_terminal_sha256']}}
+        evidence_args = {'saved_snapshot': saved, 'pre_save_seal': archived_seal, 'carryover_sha256': 'd' * 64}
+        reboot_evidence = saved_evidence.assemble_saved_evidence(before, resumed, native_resume=native_resume,
+                                                                **evidence_args)
+        with self.assertRaises(TransitionBlocked):
+            saved_evidence.assemble_saved_evidence(before, resumed, **evidence_args,
+                native_resume=native_resume | {'windows_boot_sha256': seal['windows_boot_sha256']})
         reboot_material = native.assemble_material(
             old_raw, terminal, binding, args, files[FILES[6]], previous_sha256=old_pin, attempt='a1'*32,
             successor_image_sha256='a2'*32, runtime=runtime, observers=observers, evidence=reboot_evidence,

@@ -223,11 +223,10 @@ class ProviderRetirement:
         """Stop only the archived provider, leaving the held observer running.
 
         assert_safe freshly checks stopped applications, protected inventory,
-        original writer lineage, and no successor writer. Before/dispatch need
-        the exact running old writer; provider loss triggers its own revocation.
-        The after gate observes the same writer lineage without claiming a
-        stopped Windows service or closed A/B pair. The coordinator proves
-        native terminal + stopped/disabled service and closed A/B separately.
+        original writer lineage, and no successor writer. Before/dispatch
+        accepts either the exact running old writer awaiting provider loss or
+        an authenticated cooperative stop and fresh closed A/B proof. After
+        dispatch the same lineage is verified separately from provider state.
         Caller holds the guest mutation lock for this entire call.
         """
         return self._operate("retire", assert_safe)

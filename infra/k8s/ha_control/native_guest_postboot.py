@@ -141,6 +141,33 @@ def observe(request, attempt, expected, *, require_stopped=True, _runtime=True):
     return record
 
 
+def observe_quiesce_completion(request, history_sha256, *, expected=None):
+    """Read the exact issued stop request and completed stopped inventory."""
+    worker._need(type(request) is wire.Request and request.node == 'A'
+        and request.verb == wire.GUEST_QUIESCE_SAMEBOOT_SUCCESSOR
+        and wire._hash(history_sha256) and (expected is None or wire._hash(expected)), ERROR)
+    wire._args(request.verb, request.node, request.args)
+    with worker._guest_mutation_descriptor(wait=2):
+        attempt = request.args['postboot_attempt_id']
+        intent_path, done_path = paths(request, attempt)
+        intent_raw, intent = worker._read_json(intent_path)
+        done_raw, _ = worker._read_json(done_path)
+        done_pin = wire._digest(done_raw)
+        worker._need(expected is None or expected == done_pin, ERROR)
+        stopped = observe(request, attempt, done_pin)
+        scope = worker._scope(request) | {'args': request.args}
+        proof = intent.get('closed_proof_sha256')
+        worker._need(wire._hash(proof) and stopped['args'] == request.args
+            and intent == {'schema_version': 1, **scope, 'closed_proof_sha256': proof,
+                           'containers': stopped['containers'], 'automatic_retry_permitted': False}
+            and worker._read_json(intent_path)[0] == intent_raw
+            and worker._read_json(done_path)[0] == done_raw, ERROR)
+        return {'stop_receipt_sha256': done_pin, 'request_sha256': wire._digest(wire._bytes(scope)),
+                'terminal_sha256': request.args['predecessor_terminal_sha256'], 'history_sha256': history_sha256,
+                'revision': stopped['closed_revision'], 'stopped': list(wire.RECOVERY_START_ORDER),
+                'closed_proof_sha256': stopped['closed_proof_sha256']}
+
+
 CARRYOVER_KIND = 'authenticated-postboot-app-carryover-v1'
 DRAFT_PIN = '0' * 64
 CARRYOVER_FIELDS = {'schema_version', 'kind', 'binding', 'postboot', 'recovery_args',
