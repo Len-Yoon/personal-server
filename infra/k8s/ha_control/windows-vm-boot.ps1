@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[a-f0-9]{64}$')]
     [string]$VmBIdSha256,
-    [switch]$StartGuests
+    [switch]$StartGuests,
+    [switch]$SavedGuestsOnly
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +30,9 @@ function Assert-VmScope($VM) {
         [string]$VM.AutomaticStopAction -cne 'TurnOff' -or
         [string]$VM.State -cnotin @('Off', 'Saved', 'Running')) {
         throw 'n100_boot_vm_state_unverified'
+    }
+    if ($SavedGuestsOnly -and [string]$VM.State -ceq 'Off') {
+        throw 'n100_boot_saved_guest_missing'
     }
 }
 
@@ -71,6 +75,9 @@ try {
     $a = Find-Guest $inventory $VmAIdSha256
     $b = Find-Guest $inventory $VmBIdSha256
     if ($StartGuests) {
+        if ($SavedGuestsOnly -and [string]$a.State -ceq 'Running' -and [string]$b.State -cne 'Running') {
+            throw 'n100_boot_saved_guest_order_unverified'
+        }
         $clock = [Diagnostics.Stopwatch]::StartNew()
         Start-Guest $b $clock
         Start-Guest $a $clock

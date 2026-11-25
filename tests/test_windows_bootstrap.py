@@ -1325,9 +1325,37 @@ try {
     if ($_.Exception.Message -ne 'n100_boot_vm_identity_unverified') { throw }
 }
 if ($calls.Count -ne 0) { throw 'started_before_validating_both_guests' }
-$result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | ConvertFrom-Json
+foreach ($coldIndex in @(0, 1)) {
+    $inventory[0].State = 'Saved'
+    $inventory[1].State = 'Saved'
+    $inventory[$coldIndex].State = 'Off'
+    try {
+        & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | Out-Null
+        throw 'cold_guest_was_accepted'
+    } catch {
+        if ($_.Exception.Message -ne 'n100_boot_saved_guest_missing') { throw }
+    }
+    if ($calls.Count -ne 0) { throw 'started_before_validating_saved_pair' }
+}
+$inventory[0].State = 'Running'
+$inventory[1].State = 'Saved'
+try {
+    & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | Out-Null
+    throw 'active_guest_before_standby_was_accepted'
+} catch {
+    if ($_.Exception.Message -ne 'n100_boot_saved_guest_order_unverified') { throw }
+}
+if ($calls.Count -ne 0) { throw 'started_before_validating_saved_order' }
+$inventory[0].State = 'Saved'
+$inventory[1].State = 'Saved'
+$result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | ConvertFrom-Json
+& $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | Out-Null
+$savedCalls = @($calls.ToArray())
+$calls.Clear()
+$inventory[0].State = 'Off'
+$inventory[1].State = 'Saved'
 & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | Out-Null
-@{calls=@($calls.ToArray()); unrelated=$inventory[2].State; result=$result}|ConvertTo-Json -Depth 4 -Compress
+@{calls=@($calls.ToArray()); savedCalls=$savedCalls; unrelated=$inventory[2].State; result=$result}|ConvertTo-Json -Depth 4 -Compress
 '''
         pins = [hashlib.sha256(f'00000000-0000-0000-0000-{i:012d}'.encode()).hexdigest()
                 for i in (1, 2)]
@@ -1339,6 +1367,7 @@ $result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | Conver
         self.assertEqual(result.returncode, 0, result.stderr)
         state = json.loads(result.stdout)
         self.assertEqual([x[-1] for x in state['calls']], ['2', '1'])
+        self.assertEqual([x[-1] for x in state['savedCalls']], ['2', '1'])
         self.assertEqual(state['unrelated'], 'Off')
         self.assertEqual(state['result'], {'a':'Running','b':'Running','mode':'guests_started',
                                           'database_authority':'separate_admission_required'})

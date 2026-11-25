@@ -12,7 +12,8 @@ param(
     [string]$ScriptSha256,
     [Parameter(Mandatory)]
     [string]$ScriptBase64,
-    [switch]$Install
+    [switch]$Install,
+    [switch]$SavedGuestsOnly
 )
 
 Set-StrictMode -Version Latest
@@ -41,6 +42,7 @@ if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw 'n100_boot_tas
 # no user checkout, shell profile, local script file, or network.
 $template = '$ErrorActionPreference=''Stop''; &([ScriptBlock]::Create([Text.UTF8Encoding]::new($false,$true).GetString([Convert]::FromBase64String(''{0}'')))) -VmAIdSha256 ''{1}'' -VmBIdSha256 ''{2}'' -StartGuests'
 $launch = $template -f $ScriptBase64, $VmAIdSha256, $VmBIdSha256
+if ($SavedGuestsOnly) { $launch += ' -SavedGuestsOnly' }
 $payload = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launch))
 $arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $payload
 if ($arguments.Length -gt 24000) { throw 'n100_boot_task_action_too_large' }
