@@ -21,7 +21,7 @@ from .controller import TransitionBlocked
 from .initial_app_resume_wiring import SuccessorAppStage
 from .initial_unpublished import derive_predecessor
 from .native_sameboot_release import WindowsPairClosure
-from .sameboot_transition import _closed, _fallback_attempt, _private_file, _scope
+from .sameboot_transition import _closed, _fallback_attempt, _private_file, _sameboot_recovery, _scope
 
 MARKER = b'from ha_control.native_guest_worker import main\nraise SystemExit(main())'
 
@@ -333,9 +333,9 @@ class SavedSiteApps:
               and chain['publish']['instance_sha256'] == self.app.lease.service_instance_sha256
               and chain['publish']['plan_sha256'] == chain['arm_host']['plan_sha256'] == self.app.proof_inputs.plan_sha256
               and chain['publish']['revision'] == self.app.open_revision)
-        fallback = 'restore_saved_guests' in chain
-        expected_attempt = _fallback_attempt(operation['scope']) if fallback else operation['scope']['attempt_sha256']
-        carryover = chain['fallback_carryover' if fallback else 'carryover']
+        sameboot = _sameboot_recovery(chain) is not None
+        expected_attempt = _fallback_attempt(operation['scope']) if sameboot else operation['scope']['attempt_sha256']
+        carryover = chain.get('fallback_carryover', chain['carryover'])
         _need(self.app.postboot['attempt_id'] == expected_attempt
               and self.app.postboot['carryover_receipt_sha256'] == carryover['carryover_sha256'])
         return operation_pin

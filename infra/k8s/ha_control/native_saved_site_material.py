@@ -20,7 +20,9 @@ from .initial_postboot import FILES, files_for, saved_reboot, scope as postboot_
 from .native_sameboot_release import WINDOWS_GUARD, WindowsPairClosure
 from .native_sameboot_successor import assemble_material
 from .native_stdio_bridge import _hash, _need as require, _pairs
-from .sameboot_transition import _closed, _encoded, _expects_reboot, _fallback_attempt, _private_file, bind_successor_plan
+from .sameboot_transition import (
+    _closed, _encoded, _expects_reboot, _fallback_attempt, _private_file, _sameboot_recovery, bind_successor_plan,
+)
 
 ERROR = 'saved_site_material_unconfirmed'
 KEYS = {'initial-cutover-proof.key', 'initial-recovery-held_admission.key',
@@ -84,10 +86,13 @@ class SavedSitePlanAssembly:
         data = self.read_evidence(operation, chain, deadline)
         _need(type(data) is dict and set(data) == {'evidence', 'pre_save_seal', 'runtime_manifest', 'fallback_observers'})
         evidence = data['evidence']
-        branch = chain['resume_guests'] if reboot else chain['restore_saved_guests']
-        carryover = chain['carryover'] if reboot else chain['fallback_carryover']
+        branch = chain['resume_guests'] if reboot else _sameboot_recovery(chain)
+        carryover = chain.get('fallback_carryover', chain['carryover'])
         _need(evidence['closed_pair_sha256'] == branch['closed_pair']['closed_proof_sha256']
               and evidence['carryover_sha256'] == carryover['carryover_sha256'])
+        if 'verify_restored_pair' in chain:
+            _need({node: data['vm_id_sha256'] for node, data in evidence['guests'].items()}
+                  == branch['vm_id_sha256'])
         if reboot:
             _need(evidence['new_windows_boot_sha256'] == branch['windows_boot_sha256']
                   and type(data['runtime_manifest']) is bytes

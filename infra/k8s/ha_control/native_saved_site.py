@@ -11,7 +11,7 @@ from .native_saved_site_material import SavedSitePlanAssembly
 from .native_saved_site_observers import SavedSiteObservers
 from .native_saved_site_provider_replace import SavedSiteProviderReplace
 from .native_saved_site_runtime import WindowsSavedSiteRuntime
-from .sameboot_transition import _pin, _scope, _validate
+from .sameboot_transition import ROLLBACK_RESUME_FIELD, _pin, _scope, _validate
 from .native_stdio_bridge import _need as require
 
 
@@ -60,6 +60,9 @@ class SavedSitePlatform:
         self._check(operation, deadline)
         phase = operation['stage']
         if phase == 'preflight':
+            if self.scope.get(ROLLBACK_RESUME_FIELD) is True:
+                verify = getattr(self.guest_site, 'preflight_provider_recovery', None)
+                _need(callable(verify) and verify(operation, deadline) is True)
             self.host_paths.verify(deadline, stopped_terminal=self.stopped_terminal)
             self.runtime.preflight(operation, deadline, stopped_terminal=self.stopped_terminal)
             evidence = self.guest_site.preflight(operation, deadline)
@@ -94,6 +97,18 @@ class SavedSitePlatform:
         self._check(operation, deadline)
         _need(operation['stage'] == 'restore_provider')
         return self._provider(chain).resume_provider_restore(operation, chain, deadline)
+
+    def verify_restored_provider(self, operation, chain, deadline):
+        self._check(operation, deadline)
+        _need(operation['stage'] == 'verify_restored_pair')
+        original = chain['restore_provider_operation']
+        _need(original['stage'] == 'restore_provider' and original['scope'] == self.scope)
+        predecessor = {field: value for field, value in chain.items()
+                       if field not in {'restore_provider', 'restore_provider_operation'}}
+        restored = self._provider(chain).restore_provider(original, predecessor, deadline, observe_only=True)
+        _need(restored['status'] == 'PASS')
+        _validate('restore_provider', restored['evidence'], self.scope, predecessor)
+        return True
 
     def saved_observers(self, operation, chain, deadline):
         self._check(operation, deadline)

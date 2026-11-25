@@ -1422,9 +1422,9 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                 'acceptance_sha256': 'a8' * 32}
             return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': 'PASS',
                     'evidence': {'plan_sha256': self.plan, **pin}}
-        if stage in (*self.module.SAVED_STAGES, 'restore_saved_guests'):
-            old = stage in {'save_guests','restore_saved_guests'}
-            running = stage in {'resume_guests','restore_saved_guests'}
+        if stage in (*self.module.SAVED_STAGES, 'restore_saved_guests', 'verify_restored_pair'):
+            old = stage in {'save_guests','restore_saved_guests','verify_restored_pair'}
+            running = stage in {'resume_guests','restore_saved_guests','verify_restored_pair'}
             snapshot = {'windows_boot_sha256':self.old_boot if old else self.new_boot,
                         'vm_id_sha256':self.saved_vm_ids, 'states':dict.fromkeys(('A','B'), 'Running' if running else 'Saved'),
                         'plan_sha256':self.scope['previous_plan_sha256'],
@@ -1564,6 +1564,105 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         reconcile.assert_called_once()
         self.assertEqual(self.calls.count(('apply', 'restore_provider')), 1)
         self.assertNotIn(('apply', 'publish'), self.calls)
+
+    def test_opted_in_provider_rollback_recovers_apps_without_vm_power_changes(self):
+        self.saved_scope()
+        field = self.module.ROLLBACK_RESUME_FIELD
+        self.driver.scope = self.module._scope(self.driver.scope | {field: True})
+        self.reject_provider = True
+        now = self.clock()
+        portal = dict(landing_http=200, health_http=[200, 200, 200],
+                      health_started_monotonic=[now-21, now-11, now-1])
+        wrong_vm_id = True
+
+        def material(_operation, receipts, _deadline):
+            chain = json.loads(receipts)
+            self.assertEqual(chain['verify_restored_pair']['windows_boot_sha256'], self.old_boot)
+            self.assertEqual(chain['restore_provider_operation']['stage'], 'restore_provider')
+            plan, files = SamebootPostbootSealTests().transition_fixture()
+            plan['initial_recovery_postboot']['attempt_id'] = self.module._fallback_attempt(self.driver.scope)
+            plan['windows_initial_observer']['windows_boot_sha256'] = self.old_boot
+            pre = json.loads(files[FILES[3]])
+            for node, pin in self.saved_vm_ids.items():
+                pre['guests'][node]['vm_id_sha256'] = 'f' * 64 if wrong_vm_id and node == 'B' else pin
+            files[FILES[3]] = self.module._encoded(pre)
+            return {'candidate': plan, 'plan_pin': self.plan, 'files': files, 'previous_raw': b''}
+
+        bound = self.arm_binding() | {'closed_proof_sha256': 'c3' * 32}
+        with (patch.object(self, 'arm_material', side_effect=material),
+              patch.object(self.module, 'bind_successor_plan', return_value=bound),
+              patch.object(self.module, 'observe_portal', return_value=portal)):
+            with self.assertRaises(TransitionBlocked):
+                self.driver.run_saved(self.clock() + 100)
+            self.assertNotIn(('apply', 'arm_host'), self.calls)
+            wrong_vm_id = False
+            result = self.driver.run_saved(self.clock() + 100)
+
+        self.assertEqual(result['status'], self.module.RECOVERED_AFTER_PROVIDER_ROLLBACK)
+        self.assertIn(('observe', 'verify_restored_pair'), self.calls)
+        self.assertFalse(set(self.module.SAVED_STAGES).intersection(stage for _, stage in self.calls))
+        self.assertEqual([stage for kind, stage in self.calls if kind == 'apply'][-4:],
+                         ['seal_material', 'arm_host', 'publish', 'start_apps'])
+
+    def test_provider_rollback_rejects_changed_windows_boot_before_carryover(self):
+        self.saved_scope()
+        self.driver.scope = self.module._scope(self.driver.scope | {self.module.ROLLBACK_RESUME_FIELD: True})
+        self.reject_provider = True
+        while self.driver.status()['stage'] != 'verify_restored_pair':
+            self.step()
+
+        def wrong_boot(request, _chain, _deadline):
+            reply = self.result(request, 'observe')
+            reply['evidence']['windows_boot_sha256'] = self.new_boot
+            return reply
+
+        with patch.object(self, 'observe', side_effect=wrong_boot), self.assertRaises(TransitionBlocked):
+            self.step()
+        self.assertEqual(self.driver.status()['stage'], 'verify_restored_pair')
+        self.assertNotIn(('apply', 'carryover'), self.calls)
+
+    def test_native_provider_rollback_rechecks_provider_and_closed_pair_read_only(self):
+        from ha_control import native_saved_reboot as native
+        from ha_control.native_sameboot_driver import NativeSamebootDriver
+
+        self.saved_scope()
+        scope = self.module._scope(self.driver.scope | {self.module.ROLLBACK_RESUME_FIELD: True})
+        def make_evidence(stage):
+            return self.result(self.module._encoded({'stage': stage}), 'observe')['evidence']
+
+        closure = make_evidence('close_pair')
+        observed = make_evidence('verify_restored_pair')
+        snapshot = {key: value for key, value in observed.items() if key != 'closed_pair'}
+        pair = object.__new__(native.WindowsPairClosure)
+        pair.config = {'boot_sha256': self.old_boot, 'plan_sha256': scope['previous_plan_sha256'],
+                       'binding_sha256': scope['previous_instance_sha256']}
+        pair.closed_pair = Mock(return_value=observed['closed_pair'])
+        adapter = native.WindowsSavedReboot(pair, script_sha256='1' * 64, boot_task_sha256='2' * 64,
+                                          boot_script_sha256='3' * 64, vm_ids=snapshot['vm_id_sha256'])
+        platform, release = Mock(), Mock(pair=pair)
+        driver = NativeSamebootDriver(release=release, platform=platform, windows=None, successor_options={},
+                                      paired_publication=None, apps_factory=None, saved_boot=adapter)
+        operation = {'scope': scope, 'stage': 'verify_restored_pair', 'nonce': 'a' * 64}
+        chain = {'close_pair': closure, 'quiesce_apps': make_evidence('quiesce_apps'),
+                 'preflight': make_evidence('preflight'), 'restore_provider': make_evidence('restore_provider'),
+                 'replace_provider_failed': {'nonce': 'b' * 64, 'receipt_sha256': 'c' * 64}}
+        deadline = self.clock() + 10
+        request, receipts = map(self.module._encoded, (operation, chain))
+        with patch.object(adapter, '_call', return_value=snapshot) as call:
+            with self.assertRaises(TransitionBlocked):
+                driver.apply(request, receipts, deadline)
+            platform.verify_restored_provider.return_value = False
+            with self.assertRaises(TransitionBlocked):
+                driver.observe(request, receipts, deadline)
+            call.assert_not_called()
+            platform.verify_restored_provider.reset_mock(return_value=True)
+            platform.verify_restored_provider.return_value = True
+            self.assertEqual(driver.observe(request, receipts, deadline)['evidence'], observed)
+            platform.verify_restored_provider.assert_called_once_with(operation, chain, deadline)
+            call.assert_called_once_with('Observe', self.terminal, deadline)
+            pair.closed_pair.return_value = observed['closed_pair'] | {'synchronous': False}
+            with self.assertRaises(TransitionBlocked):
+                driver.observe(request, receipts, deadline)
 
     def test_fresh_guard_failure_neither_issues_nor_dispatches(self):
         for _ in range(3):

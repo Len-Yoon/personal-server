@@ -22,12 +22,14 @@ SAVED_STAGES = ('save_guests', 'reboot_windows', 'resume_guests', 'rebind_observ
 OBSERVER_ROLES = ('legacy', 'held_admission', 'provider_isolation')
 OBSERVER_ENDPOINT = {'server_pid', 'pipe_name', 'key_sha256'}
 RECOVERED_WITHOUT_REBOOT = 'RECOVERED_WITHOUT_REBOOT'
-READ_ONLY = {'preflight', 'close_pair', 'portal'}
+RECOVERED_AFTER_PROVIDER_ROLLBACK = 'RECOVERED_AFTER_PROVIDER_ROLLBACK'
+READ_ONLY = {'preflight', 'close_pair', 'verify_restored_pair', 'portal'}
 HASH = re.compile(r'[0-9a-f]{64}')
 SCOPE_FIELDS = {'attempt_sha256', 'previous_plan_sha256', 'previous_instance_sha256',
                 'history_sha256', 'successor_image_sha256', 'runtime_manifest_sha256',
                 'previous_revision', 'driver_sha256'}
 SAVED_SCOPE_FIELDS = {'saved_reboot', 'saved_vm_pair_sha256', 'previous_windows_boot_sha256'}
+ROLLBACK_RESUME_FIELD = 'resume_after_provider_restore'
 ERROR = 'sameboot_transition_unconfirmed'
 
 
@@ -72,7 +74,9 @@ def _digest(value):
 def _scope(value):
     _need(type(value) is dict and
           (set(value) == SCOPE_FIELDS or
-           (set(value) == SCOPE_FIELDS | SAVED_SCOPE_FIELDS and value['saved_reboot'] is True
+           (set(value) in (SCOPE_FIELDS | SAVED_SCOPE_FIELDS,
+                           SCOPE_FIELDS | SAVED_SCOPE_FIELDS | {ROLLBACK_RESUME_FIELD})
+            and value.get(ROLLBACK_RESUME_FIELD, True) is True and value['saved_reboot'] is True
             and _pin(value['saved_vm_pair_sha256']) and _pin(value['previous_windows_boot_sha256']))))
     _need(all(_pin(value[key]) for key in SCOPE_FIELDS - {'previous_revision'}))
     revision = value['previous_revision']
@@ -114,7 +118,17 @@ def _save_rejected(value, scope, receipts):
 
 
 def _expects_reboot(scope, receipts):
-    return scope.get('saved_reboot') is True and 'restore_saved_guests' not in receipts
+    return scope.get('saved_reboot') is True and _sameboot_recovery(receipts) is None
+
+
+def _sameboot_recovery(receipts):
+    return receipts.get('verify_restored_pair', receipts.get('restore_saved_guests'))
+
+
+def _complete(receipts):
+    if 'verify_restored_pair' in receipts:
+        return RECOVERED_AFTER_PROVIDER_ROLLBACK
+    return RECOVERED_WITHOUT_REBOOT if 'restore_saved_guests' in receipts else 'COMPLETE'
 
 
 def _fallback_attempt(scope):
@@ -249,9 +263,12 @@ def _validate(stage, value, scope, receipts):
         _need(value['windows_boot_sha256'] != receipts['save_guests']['windows_boot_sha256']
               and value['states'] in ({'A':'Saved','B':'Saved'}, {'A':'Saved','B':'Running'},
                                       {'A':'Running','B':'Running'}))
-    elif stage in {'resume_guests', 'restore_saved_guests'}:
+    elif stage in {'resume_guests', 'restore_saved_guests', 'verify_restored_pair'}:
         _saved_snapshot(value, scope, receipts, has_closed_pair=True)
-        boot = (scope['previous_windows_boot_sha256'] if stage == 'restore_saved_guests' else
+        if stage == 'verify_restored_pair':
+            _need(scope.get(ROLLBACK_RESUME_FIELD) is True and 'replace_provider_failed' in receipts)
+            _validate('restore_provider', receipts.get('restore_provider'), scope, receipts)
+        boot = (scope['previous_windows_boot_sha256'] if stage != 'resume_guests' else
                 receipts['reboot_windows']['windows_boot_sha256'])
         _need(value['windows_boot_sha256'] == boot and value['states'] == {'A':'Running','B':'Running'}
               and type(value['closed_pair']) is dict
@@ -399,6 +416,11 @@ class SamebootTransition:
                     _need(stage == 'replace_provider' and result['evidence'] == {'replacement_failed': True})
                     receipts['replace_provider_failed'] = {'nonce': issued['nonce'], 'receipt_sha256': _digest(result)}
                     restore = 'restore_provider'
+                    if self.scope.get(ROLLBACK_RESUME_FIELD) is True:
+                        stages[index + 1:] = [restore, 'verify_restored_pair', *(
+                            phase for phase in stages[index + 1:] if phase not in SAVED_STAGES)]
+                        previous = _digest(result)
+                        continue
                 self._check_entries(allowed | {restore + '.issued.json', restore + '.observed.json'})
                 return restore, _digest(result), receipts, self._read(restore + '.issued.json')
             _need(result['status'] == 'PASS')
@@ -406,6 +428,8 @@ class SamebootTransition:
             if stage == 'arm_host':
                 _need(result['evidence']['plan_sha256'] == issued['plan_material_sha256'])
             receipts[stage] = result['evidence']
+            if stage == 'restore_provider':
+                receipts['restore_provider_operation'] = issued
             previous = _digest(result)
         self._check_entries(allowed)
         return None, previous, receipts, None
@@ -417,11 +441,11 @@ class SamebootTransition:
         self._private()
         with exclusive(self.directory / 'lock'):
             stage, previous, receipts, issued = self._position()
-            if stage == 'restore_provider':
+            if stage == 'restore_provider' and not self.scope.get(ROLLBACK_RESUME_FIELD):
                 record = self._restored(stage, previous, receipts, issued)
                 if record:
                     return record
-            complete = RECOVERED_WITHOUT_REBOOT if 'restore_saved_guests' in receipts else 'COMPLETE'
+            complete = _complete(receipts)
             return {'status': complete if stage is None else 'PENDING', 'stage': stage,
                     'observe_only': issued is not None, 'previous_sha256': previous}
 
@@ -451,9 +475,8 @@ class SamebootTransition:
             _need(expected_stage is None or stage == expected_stage,
                   'sameboot_transition_stage_changed')
             if stage is None:
-                complete = RECOVERED_WITHOUT_REBOOT if 'restore_saved_guests' in receipts else 'COMPLETE'
-                return {'status': complete, 'receipt_sha256': previous}
-            if stage == 'restore_provider':
+                return {'status': _complete(receipts), 'receipt_sha256': previous}
+            if stage == 'restore_provider' and not self.scope.get(ROLLBACK_RESUME_FIELD):
                 record = self._restored(stage, previous, receipts, issued)
                 if record:
                     return record
@@ -491,11 +514,15 @@ class SamebootTransition:
                           == resumed['windows_boot_sha256'])
                     fresh = json.loads(material['files'][FILES[4]])['closed_pair_sha256']
                     _need(fresh == resumed['closed_pair']['closed_proof_sha256'])
-                elif 'restore_saved_guests' in receipts:
-                    restored = receipts['restore_saved_guests']
+                elif _sameboot_recovery(receipts) is not None:
+                    restored = _sameboot_recovery(receipts)
                     _need(material['candidate']['windows_initial_observer']['windows_boot_sha256']
                           == restored['windows_boot_sha256']
                           and postboot_scope(material['candidate'])['attempt_id'] == _fallback_attempt(self.scope))
+                    if 'verify_restored_pair' in receipts:
+                        pre = json.loads(material['files'][FILES[3]])
+                        _need({node: data['vm_id_sha256'] for node, data in pre['guests'].items()}
+                              == restored['vm_id_sha256'])
                     fresh = restored['closed_pair']['closed_proof_sha256']
                 else:
                     fresh = receipts['close_pair']['closed_proof_sha256']
@@ -548,7 +575,7 @@ class SamebootTransition:
                 _validate(stage, reply['evidence'], self.scope, receipts)
                 _need(arm is None or reply['evidence']['plan_sha256'] == arm['plan_sha256'])
             self._write(stage + '.observed.json', reply)
-            if stage == 'restore_provider':
+            if stage == 'restore_provider' and not self.scope.get(ROLLBACK_RESUME_FIELD):
                 return {'status': 'PROVIDER_RESTORED', 'receipt_sha256': _digest(reply)}
             return {'status': reply['status'], 'stage': stage, 'receipt_sha256': _digest(reply)}
 
@@ -556,7 +583,7 @@ class SamebootTransition:
         """Continue one protected saved-VM journal across a host disconnect."""
         _need(self.scope.get('saved_reboot') is True)
         reconcile = {*STAGES, *SAVED_STAGES, 'release_writer', 'quiesce_apps', 'restore_provider',
-                     'restore_saved_guests', 'publish_material', 'seal_material', 'fallback_carryover'}
+                     'restore_saved_guests', 'verify_restored_pair', 'publish_material', 'seal_material', 'fallback_carryover'}
         while time.monotonic() < deadline:
             before = self.status()
             if before['status'] != 'PENDING':

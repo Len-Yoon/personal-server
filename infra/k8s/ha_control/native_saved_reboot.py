@@ -124,6 +124,13 @@ class WindowsSavedReboot:
     def run(self, operation, receipts, deadline, *, observe_only):
         scope, stage, terminal, revision = self._bound(operation, receipts)
         old_boot = self.pair.config['boot_sha256']
+        if stage == 'verify_restored_pair':
+            _need(observe_only)
+            state = self._call('Observe', terminal, deadline)
+            fresh = self.pair.closed_pair(terminal, deadline)
+            observed = state | {'closed_pair': fresh}
+            _validate(stage, observed, scope, receipts)
+            return observed
         if stage == 'save_guests':
             if not observe_only:
                 return self._call('SavePair', terminal, deadline)
