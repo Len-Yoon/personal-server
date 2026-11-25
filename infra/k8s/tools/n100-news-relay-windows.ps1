@@ -28,6 +28,37 @@ function Format-IPv4Number([uint64]$Number) {
         (($Number -shr 8) -band 255), ($Number -band 255))
 }
 
+function Assert-PublicTarget([string]$Address) {
+    $value = Convert-IPv4Number $Address
+    foreach ($network in @('0.0.0.0/8','10.0.0.0/8','100.64.0.0/10','127.0.0.0/8',
+            '169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.0.2.0/24',
+            '192.168.0.0/16','198.18.0.0/15','198.51.100.0/24','203.0.113.0/24','224.0.0.0/3')) {
+        $parts = $network.Split('/')
+        $shift = 32 - [int]$parts[1]
+        if (($value -shr $shift) -eq ((Convert-IPv4Number $parts[0]) -shr $shift)) {
+            throw 'relay_target_not_public'
+        }
+    }
+}
+
+function Assert-PinnedProviderTls([string]$Provider, [string]$Address) {
+    $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+    try {
+        $connect = $client.ConnectAsync([Net.IPAddress]::Parse($Address), 443)
+        if (-not $connect.Wait(3500)) { throw 'relay_provider_connect_timeout' }
+        $tls = [Net.Security.SslStream]::new($client.GetStream(), $false)
+        try {
+            $authentication = $tls.AuthenticateAsClientAsync($Provider)
+            if (-not $authentication.Wait(3500)) { throw 'relay_provider_tls_timeout' }
+            if (-not $tls.IsAuthenticated -or -not $tls.IsEncrypted) { throw 'relay_provider_tls_unverified' }
+        } finally {
+            $tls.Dispose()
+        }
+    } finally {
+        $client.Dispose()
+    }
+}
+
 function Invoke-PortProxy([string]$Action, [int]$Port, [string]$Provider = '') {
     $fields = @("listenport=$Port", "listenaddress=$($interface.IPAddress)", 'protocol=tcp')
     if ($Action -eq 'add') { $fields += @("connectaddress=$Provider", 'connectport=443') }
@@ -73,8 +104,7 @@ try {
         if ($targets.Count -ne $providers.Count) { throw 'relay_target_pin_required' }
         foreach ($provider in $providers.Keys) {
             if (-not $targets.ContainsKey($provider)) { throw 'relay_target_pin_required' }
-            $targetValue = Convert-IPv4Number $targets[$provider]
-            if ($targetValue -lt 16777216 -or $targetValue -ge 3758096384) { throw 'relay_target_unusable' }
+            Assert-PublicTarget $targets[$provider]
         }
     }
 
@@ -112,11 +142,19 @@ try {
 
     $addresses = @{}
     foreach ($provider in $providers.Keys) {
-        $first = @(Resolve-DnsName -Name $provider -Type A -DnsOnly | Where-Object Type -eq A |
-            Select-Object -ExpandProperty IPAddress | Sort-Object -Unique | Select-Object -First 1)
-        if ($first.Count -ne 1) { throw 'relay_provider_dns_unavailable' }
-        $addresses[$provider] = $first[0]
-        if ($Mode -eq 'Apply' -and $addresses[$provider] -ne $targets[$provider]) { throw 'relay_provider_dns_changed' }
+        if ($Mode -eq 'Apply') {
+            # The reviewed Check result may remain reachable after DNS rotation.
+            # Authenticate the original name at the exact IP before any local changes.
+            $address = $targets[$provider]
+            Assert-PinnedProviderTls $provider $address
+        } else {
+            $first = @(Resolve-DnsName -Name $provider -Type A -DnsOnly | Where-Object Type -eq A |
+                Select-Object -ExpandProperty IPAddress | Sort-Object -Unique | Select-Object -First 1)
+            if ($first.Count -ne 1) { throw 'relay_provider_dns_unavailable' }
+            $address = $first[0]
+            Assert-PublicTarget $address
+        }
+        $addresses[$provider] = $address
     }
     if ($Mode -eq 'Apply') {
         $written = [Collections.Generic.List[int]]::new()
@@ -139,10 +177,13 @@ try {
                 Invoke-PortProxy 'add' $providers[$provider] $targets[$provider]
                 $written.Add($providers[$provider])
             }
-            $listeners = @(Get-NetTCPConnection -LocalAddress $interface.IPAddress -LocalPort $ports -State Listen)
-            if (@($listeners | Select-Object -ExpandProperty LocalPort -Unique).Count -ne $ports.Count) {
-                throw 'relay_listener_readback_failed'
-            }
+            $until = (Get-Date).AddSeconds(4)
+            do {
+                $listeners = @(Get-NetTCPConnection -LocalAddress $interface.IPAddress -LocalPort $ports -State Listen -ErrorAction SilentlyContinue)
+                $ready = @($listeners | Select-Object -ExpandProperty LocalPort -Unique).Count -eq $ports.Count
+                if (-not $ready) { Start-Sleep -Milliseconds 300 }
+            } until ($ready -or (Get-Date) -ge $until)
+            if (-not $ready) { throw 'relay_listener_readback_failed' }
         } catch {
             foreach ($port in $written) { Invoke-PortProxy 'delete' $port }
             foreach ($name in $addedRules) { Remove-NetFirewallRule -Name $name -ErrorAction SilentlyContinue }
