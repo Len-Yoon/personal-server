@@ -5,6 +5,7 @@ import json
 import time
 
 from .controller import TransitionBlocked
+from .initial_postboot import saved_reboot, scope as postboot_scope
 from .initial_unpublished import derive_predecessor
 from .native_sameboot_successor import WindowsSamebootHost
 from .native_stdio_bridge import RECOVERY_START_ORDER
@@ -52,14 +53,21 @@ class NativeSamebootDriver:
             operation, chain, deadline, observe_only=observe_only) is True)
         if phase in PRE_PUBLISH_CLOSED and not (observe_only and phase == 'publish'):
             original = chain['close_pair']
-            if phase == 'publish' or (observe_only and phase == 'arm_host'):
+            after_arm = phase == 'publish' or (observe_only and phase == 'arm_host')
+            reboot = operation.get('scope', {}).get('saved_reboot', False)
+            if after_arm or (reboot and phase == 'arm_host'):
                 host = self._host(operation, chain, deadline)
                 expected = (chain['arm_host']['plan_sha256'] if phase == 'publish'
                             else operation['plan_material_sha256'])
                 _need(host.checked['plan_sha256'] == expected)
-                closed = self.release.pair.closed_pair_after_arm(
-                    original['terminal_sha256'], host.config['image_path_pin'],
-                    host.checked['successor_image_sha256'], deadline)
+                if after_arm:
+                    boot = {'resumed_windows_boot': host.config['boot_pin']} if reboot else {}
+                    closed = self.release.pair.closed_pair_after_arm(
+                        original['terminal_sha256'], host.config['image_path_pin'],
+                        host.checked['successor_image_sha256'], deadline, **boot)
+                else:
+                    closed = self.release.pair.closed_pair_after_reboot(
+                        original['terminal_sha256'], host.config['boot_pin'], deadline)
             else:
                 closed = self.release.observe_closed(operation, chain, deadline)
             _need(closed['terminal_sha256'] == original['terminal_sha256']
@@ -77,7 +85,10 @@ class NativeSamebootDriver:
 
     def _host(self, operation, chain, deadline):
         material = self.platform.read_arm_material(operation, chain, deadline)
-        return WindowsSamebootHost(self.windows, material=material, **self.successor_options)
+        reboot = saved_reboot(postboot_scope(material['candidate']))
+        _need(reboot == operation['scope'].get('saved_reboot', False))
+        bridge = {'reboot_pair': self.release.pair} if reboot else {}
+        return WindowsSamebootHost(self.windows, material=material, **self.successor_options, **bridge)
 
     def _publication(self, host, published, operation, chain, deadline):
         armed = chain['arm_host']

@@ -1524,6 +1524,59 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                 driver.guard(publish, chain, deadline, observe_only=False)
             self.assertTrue(driver.guard(publish, chain, deadline, observe_only=True))
 
+    def test_native_saved_guard_uses_new_boot_before_and_after_arm(self):
+        from types import SimpleNamespace
+        from ha_control.native_sameboot_driver import NativeSamebootDriver
+        encode = self.module._encoded
+        boot = 'd'*64
+        closed = {'terminal_sha256': self.terminal, 'revision': 15, 'closed_nodes': ['A','B'],
+                  'synchronous': True, 'same_expiry': True, 'replay_verified': True, 'effects_isolated': True}
+        release = Mock()
+        release.pair.closed_pair_after_reboot.return_value = closed
+        release.pair.closed_pair_after_arm.return_value = closed
+        platform = Mock()
+        platform.guard.return_value = True
+        host = SimpleNamespace(checked={'plan_sha256':self.plan,'successor_image_sha256':'4'*64},
+                               config={'image_path_pin':'8'*64,'boot_pin':boot})
+        driver = NativeSamebootDriver(release=release, platform=platform, windows=None, successor_options={},
+                                      paired_publication=None, apps_factory=None)
+        chain = encode({'close_pair': closed, 'arm_host': {'plan_sha256': self.plan}})
+        saved = {'scope': {'saved_reboot': True}}
+        arm = encode(saved | {'stage':'arm_host','plan_material_sha256':self.plan})
+        publish = encode(saved | {'stage':'publish'})
+        deadline = self.clock() + 10
+        with patch.object(driver, '_host', return_value=host):
+            self.assertTrue(driver.guard(arm, chain, deadline, observe_only=False))
+            release.pair.closed_pair_after_reboot.assert_called_once_with(self.terminal, boot, deadline)
+            self.assertTrue(driver.guard(publish, chain, deadline, observe_only=False))
+            release.pair.closed_pair_after_arm.assert_called_once_with(
+                self.terminal, '8'*64, '4'*64, deadline, resumed_windows_boot=boot)
+            release.observe_closed.assert_not_called()
+            release.pair.closed_pair_after_reboot.return_value = closed | {'closed_nodes':['A']}
+            with self.assertRaises(TransitionBlocked):
+                driver.guard(arm, chain, deadline, observe_only=False)
+
+    def test_saved_reboot_journal_binds_archival_and_fresh_closed_proofs(self):
+        self.driver.scope = self.module._scope(self.scope | {'saved_reboot': True})
+        for _ in range(6):
+            self.step()
+        plan, files = SamebootPostbootSealTests().saved_reboot_fixture()
+        plan['saved_reboot_runtime_manifest_sha256'] = self.scope['runtime_manifest_sha256']
+        material = {'candidate':plan,'plan_pin':self.plan,'files':files,'previous_raw':b''}
+        with patch.object(self.driver.driver, 'arm_material', return_value=material), \
+             patch.object(self.module, 'bind_successor_plan') as bind:
+            bind.return_value = self.arm_binding() | {
+                'closed_proof_sha256':json.loads(files[FILES[4]])['closed_pair_sha256']}
+            with self.assertRaises(TransitionBlocked):
+                self.step()
+            self.assertNotIn(('apply','arm_host'), self.calls)
+            before = json.loads(files[FILES[3]])
+            before['closed_pair_sha256'] = self.arm_binding()['closed_proof_sha256']
+            files[FILES[3]] = self.module._encoded(before)
+            self.step()
+            self.assertIn(('apply','arm_host'), self.calls)
+            self.assertTrue(bind.call_args.kwargs['allow_saved_reboot'])
+
     def test_native_successor_builder_preserves_validated_predecessor_material(self):
         from pathlib import PureWindowsPath
         from unittest.mock import Mock

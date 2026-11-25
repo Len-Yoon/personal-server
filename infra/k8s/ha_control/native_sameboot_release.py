@@ -124,7 +124,7 @@ class WindowsPairClosure:
             _need(successor is None)
         previous_boot = self.config["boot_sha256"]
         if resumed_windows_boot is not None:
-            _need(mode == "closed" and wire._hash(resumed_windows_boot)
+            _need(mode in {"closed", "closed_after_arm"} and wire._hash(resumed_windows_boot)
                   and resumed_windows_boot != previous_boot)
         live_boot = resumed_windows_boot if resumed_windows_boot is not None else previous_boot
         challenge = wire._digest(bytes.fromhex(secrets.token_hex(32) + live_boot))
@@ -188,7 +188,7 @@ class WindowsPairClosure:
         return self._call("closed_before_disable", deadline, terminal_sha256)
 
     def closed_pair_after_arm(self, terminal_sha256, successor_image_path_sha256,
-                              successor_image_sha256, deadline):
+                              successor_image_sha256, deadline, *, resumed_windows_boot=None):
         """Read the original closed pair while the same stopped SCM is armed.
 
         The old protected plan/binding/terminal remain the query authority. Only
@@ -196,7 +196,8 @@ class WindowsPairClosure:
         and protected binary must match independently approved successor pins.
         """
         return self._call("closed_after_arm", deadline, terminal_sha256, successor={
-            "path_sha256": successor_image_path_sha256, "image_sha256": successor_image_sha256})
+            "path_sha256": successor_image_path_sha256, "image_sha256": successor_image_sha256},
+            resumed_windows_boot=resumed_windows_boot)
 
 
 class NativeSamebootRelease:

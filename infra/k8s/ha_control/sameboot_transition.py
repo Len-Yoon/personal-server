@@ -1,4 +1,4 @@
-"""Coordinate one same-boot authority replacement without replaying an issued action."""
+"""Coordinate one authority replacement without replaying an issued action."""
 
 import argparse
 import hashlib
@@ -55,7 +55,9 @@ def _digest(value):
 
 
 def _scope(value):
-    _need(type(value) is dict and set(value) == SCOPE_FIELDS)
+    _need(type(value) is dict and
+          (set(value) == SCOPE_FIELDS or
+           (set(value) == SCOPE_FIELDS | {'saved_reboot'} and value['saved_reboot'] is True)))
     _need(all(_pin(value[key]) for key in SCOPE_FIELDS - {'previous_revision'}))
     revision = value['previous_revision']
     _need(type(revision) is int and 0 < revision < 2**63 - 3 and revision % 2 == 0)
@@ -328,12 +330,23 @@ class SamebootTransition:
             if stage == 'arm_host':
                 material = self.driver.arm_material(_encoded(issued), _encoded(receipts), deadline)
                 _need(type(material) is dict and set(material) == {'candidate', 'previous_raw', 'plan_pin', 'files'})
-                arm = bind_successor_plan(**material)
+                from .initial_postboot import FILES, saved_reboot, scope as postboot_scope
+                expects_reboot = self.scope.get('saved_reboot', False)
+                arm = bind_successor_plan(**material, allow_saved_reboot=expects_reboot)
+                if expects_reboot:
+                    _need(saved_reboot(postboot_scope(material['candidate'])))
+                    pre = json.loads(material['files'][FILES[3]])
+                    _need(pre['closed_pair_sha256'] == receipts['close_pair']['closed_proof_sha256']
+                          and material['candidate']['saved_reboot_runtime_manifest_sha256']
+                          == self.scope['runtime_manifest_sha256'])
+                    fresh = json.loads(material['files'][FILES[4]])['closed_pair_sha256']
+                else:
+                    fresh = receipts['close_pair']['closed_proof_sha256']
                 _need(arm == {'plan_sha256': material['plan_pin'],
                               'carryover_sha256': receipts['carryover']['carryover_sha256'],
                               'successor_image_sha256': self.scope['successor_image_sha256'],
                               'terminal_sha256': receipts['retire_provider']['terminal_sha256'],
-                              'closed_proof_sha256': receipts['close_pair']['closed_proof_sha256'],
+                              'closed_proof_sha256': fresh,
                               'previous_plan_sha256': self.scope['previous_plan_sha256']})
                 if observe_only:
                     _need(issued['plan_material_sha256'] == arm['plan_sha256'])
