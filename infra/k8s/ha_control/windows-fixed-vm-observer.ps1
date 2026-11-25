@@ -32,12 +32,13 @@ function Get-FixedVmObserverDisks($drives) {
     return ,$paths
 }
 
-function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B,[hashtable]$Progress) {
-    if ($Installation -cnotmatch '\A[a-f0-9]{64}\z' -or $A -eq [guid]::Empty -or $B -eq [guid]::Empty -or $A -eq $B) {
+function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B,[hashtable]$Progress,[string]$InstallationB) {
+    if (-not $PSBoundParameters.ContainsKey('InstallationB')) { $InstallationB = $Installation }
+    if ($Installation -cnotmatch '\A[a-f0-9]{64}\z' -or $InstallationB -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $A -eq [guid]::Empty -or $B -eq [guid]::Empty -or $A -eq $B) {
         throw 'fixed_observer_targets'
     }
-    $prefix = 'N100HA_' + $Installation.Substring(0,16) + '_'
-    $notes = 'ha-owned-guest-v1:' + $Installation + ':'
+    $installations = @{ A = $Installation; B = $InstallationB }
     $targets = [ordered]@{ A = $A; B = $B }
     $ids = @($A, $B)
     $first = $null
@@ -48,6 +49,9 @@ function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B,[ha
         $rows = @($ids | Get-VM -ErrorAction Stop)
         if ($rows.Count -ne 2) { throw 'fixed_observer_vm_binding' }
         foreach ($node in $targets.Keys) {
+            $installationForNode = $installations[$node]
+            $prefix = 'N100HA_' + $installationForNode.Substring(0,16) + '_'
+            $notes = 'ha-owned-guest-v1:' + $installationForNode + ':'
             $id = $targets[$node]
             $row = @($rows | Where-Object { [guid]$_.Id -eq $id })
             if ($row.Count -ne 1 -or $row[0].Name -cne ($prefix + $node) -or

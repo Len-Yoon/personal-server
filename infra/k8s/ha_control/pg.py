@@ -7,6 +7,7 @@ is implemented. All database/transport failures are static fail-closed labels.
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -87,6 +88,7 @@ class PgBackend:
         self.depth = 0
         self.plan = None
         self.validated = None
+        self.transition_observer = None
 
     @contextmanager
     def guard(self):
@@ -117,12 +119,43 @@ class PgBackend:
         # A fence-only approval never authorizes PostgreSQL state changes.
         if isinstance(value, dict):
             expected = 'ha-initial-wsl-cutover' if 'initial_wsl_cutover' in value else 'ha-transition'
+            if 'initial_cutover_recovery' in value:
+                from .initial_windows_gate import InitialWindowsGate, RECOVERY_ACTION, RECOVERY_FIELDS
+
+                recovery = value['initial_cutover_recovery']
+                if (type(self.fence_adapter) is not InitialWindowsGate
+                        or self.fence_adapter._installed_runtime is not True
+                        or self.fence_adapter.plan_data is not value
+                        or 'initial_wsl_cutover' not in value or value.get('profile') != 'enforced-vm-v1'
+                        or value.get('node') != 'A'
+                        or any(type(value.get(key)) is not int or value[key] != 1 for key in ('generation', 'timeline'))
+                        or type(recovery) is not dict or recovery.keys() != RECOVERY_FIELDS
+                        or not all(type(pin) is str and re.fullmatch(r'[a-f0-9]{64}', pin)
+                                   for pin in recovery.values())):
+                    _deny('initial_recovery_native_scope_required')
+                expected = RECOVERY_ACTION
+                if 'initial_recovery_rearm' in value:
+                    from .initial_pg_lease import REARM_ACTION, rearm_scope
+                    rearm_scope(value)
+                    expected = REARM_ACTION
+                if 'initial_recovery_postboot' in value:
+                    from .initial_postboot import ACTION, scope
+                    scope(value)
+                    expected = ACTION
+                if 'initial_unpublished_recovery' in value:
+                    from .initial_unpublished import ACTION,scope
+                    scope(value)
+                    expected=ACTION
+            elif 'initial_effect_quarantine' in value or 'initial_unpublished_recovery' in value or 'initial_recovery_rearm' in value or 'initial_recovery_postboot' in value:
+                _deny('initial_recovery_native_scope_required')
             if value.get('_approval_action') != expected:
                 _deny('ha_transition_approval_required')
         if (not isinstance(value, dict) or not isinstance(value.get("cluster"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value["cluster"])
                 or value.get("node") not in {"A", "B"} or type(value.get("generation")) is not int
                 or value["generation"] < 1 or type(value.get("timeline")) is not int or value["timeline"] < 1
+                or type(value.get("source_lease_close_required", False)) is not bool
+                or (value.get("source_lease_close_required", False) and value.get("profile") != "enforced-vm-v1")
                 or not re.fullmatch(r"[0-9]+", str(value.get("system_id", "")))
                 or not isinstance(value.get("pg_nodes"), dict) or set(value["pg_nodes"]) != {"A", "B"}):
             _deny("invalid_pg_controller_plan")
@@ -212,14 +245,52 @@ class PgBackend:
                 or state["target"] not in {"A", "B"} or state["target"] == state["old"]
                 or state["generation"] != p["generation"] or state["timeline"] != p["timeline"]):
             _deny("controller_plan_state_mismatch")
+        self._promotion_replay_floor()
+        if self.plan.get("source_lease_close_required", False) and state["phase"] != "fencing":
+            self._planned_promotion_floor(state)
+
+    def _planned_promotion_floor(self, state):
+        checkpoint = state.get("source_fence_wal")
+        if type(checkpoint) is not int or not 0 < checkpoint < 2**64:
+            _deny("source_fence_wal_record_required")
+        return max(checkpoint, self._promotion_replay_floor())
+
+    def _uses_replica_fence_wal(self):
+        return (self.plan.get("profile") == "enforced-vm-v1"
+                and not self.plan.get("source_lease_close_required", False))
+
+    def _recorded_promotion_floor(self, state):
+        if self.plan.get("source_lease_close_required", False):
+            return self._planned_promotion_floor(state)
+        floor = self._promotion_replay_floor()
+        if self._uses_replica_fence_wal():
+            received = state.get("replica_fence_wal")
+            if type(received) is not int or not 0 < received < 2**64:
+                _deny("replica_fence_wal_record_required")
+            return max(received, floor)
+        return floor
+
+    def _promotion_replay_floor(self):
+        if self.plan.get("profile") != "enforced-vm-v1" and "required_replay_lsn" not in self.plan:
+            return None
+        # The approval binds this checkpoint to the cluster, previous node,
+        # timeline and new generation before the previous primary is fenced.
+        value = self.plan.get("required_replay_lsn")
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", value):
+            _deny("promotion_replay_floor_required")
+        floor = self._lsn(value)
+        if floor == 0:
+            _deny("promotion_replay_floor_required")
+        return floor
 
     @contextmanager
-    def _connection(self, node):
+    def _connection(self, node, *, replication=False):
         import psycopg
         connection = None
         phase = "connect"
         try:
-            connection = psycopg.connect(**self.plan["pg_nodes"][node], autocommit=True,
+            protocol = {"replication": "database", "cursor_factory": psycopg.ClientCursor} if replication else {}
+            connection = psycopg.connect(**self.plan["pg_nodes"][node], **protocol, autocommit=True,
                                          connect_timeout=1, application_name="ha_native_controller")
             phase = "setup"
             connection.execute("SET statement_timeout='700ms'")
@@ -283,8 +354,24 @@ class PgBackend:
         value = value[0] if value else None
         if (not isinstance(value, dict) or value.get("cluster") != state["cluster"]
                 or value.get("system_id") != str(self.plan["system_id"]) or value.get("node") != "ha_" + node
-                or type(value.get("actual_timeline")) is not int or value["actual_timeline"] < state["timeline"]
                 or type(value.get("epoch")) is not int or value["epoch"] > state["generation"]):
+            _deny("pg_identity_mismatch")
+        if (value.get("recovery") is True and node == state["target"]
+                and state["phase"] in {"fencing", "promoting"} and self._promotion_replay_floor() is not None):
+            # IDENTIFY_SYSTEM on a standby reports its replay timeline even
+            # after the upstream WAL receiver has exited. Its position can be
+            # ahead of replay, so retain the separately observed replay LSN.
+            with self._connection(node, replication=True) as replication:
+                status = replication.execute("IDENTIFY_SYSTEM").fetchone()
+            if (not status or len(status) != 4 or status[0] != value["system_id"]
+                    or status[3] != self.plan["pg_nodes"][node]["dbname"]
+                    or type(status[1]) is not int or status[1] != state["timeline"]
+                    or self._lsn(value["replay"]) > self._lsn(status[2])):
+                _deny("promotion_replay_identity_unconfirmed")
+            if self._uses_replica_fence_wal():
+                value["received_wal"] = value["flush"]
+            value = {**value, "actual_timeline": status[1], "flush": status[2]}
+        if type(value.get("actual_timeline")) is not int or value["actual_timeline"] < state["timeline"]:
             _deny("pg_identity_mismatch")
         return value
 
@@ -421,11 +508,34 @@ class PgBackend:
         self._promotion_intent(state)
         if value["actual_timeline"] <= state["timeline"]:
             _deny("promoted_timeline_required")
+        if state["phase"] == "promoting" and self.plan.get("profile") == "enforced-vm-v1":
+            self._prove_promotion_fork(value, state)
         if (state["phase"] == "promoting" and value["epoch"] < state["generation"]
                 and value["primary"] == state["old"] and value["partner"] == state["target"]
                 and value["timeline"] == state["timeline"]):
             return  # The one durable promotion intent may publish new history.
         self._recorded_primary(value, state)
+
+    def _prove_promotion_fork(self, value, state):
+        floor = self._recorded_promotion_floor(state)
+        timeline = value["actual_timeline"]
+        if type(timeline) is not int or not 1 < timeline < 2**32:
+            _deny("promotion_fork_unconfirmed")
+        node = state["target"]
+        with self._connection(node, replication=True) as connection:
+            identity = connection.execute("IDENTIFY_SYSTEM").fetchone()
+            if (not identity or len(identity) != 4 or identity[0] != value["system_id"]
+                    or identity[1] != timeline or identity[3] != self.plan["pg_nodes"][node]["dbname"]):
+                _deny("promotion_fork_unconfirmed")
+            history = connection.execute(f"TIMELINE_HISTORY {timeline}").fetchone()
+        if (not history or len(history) != 2 or history[0] != f"{timeline:08X}.history"
+                or not isinstance(history[1], str) or not 0 < len(history[1]) <= 1048576):
+            _deny("promotion_fork_unconfirmed")
+        entries = [line.split() for line in history[1].splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if (not entries or len(entries[-1]) < 2 or entries[-1][0] != str(state["timeline"])
+                or not re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", entries[-1][1])
+                or self._lsn(entries[-1][1]) < floor):
+            _deny("promotion_fork_unconfirmed")
 
     def _best_effort_revoke(self, state):
         self.validated = None
@@ -463,14 +573,12 @@ class PgBackend:
                 _deny("primary_metadata_required")
             if promoted:
                 self._promoted_history(value, state)
-                if state["phase"] == "promoting":
-                    connection.execute("UPDATE ha.control SET primary_node=%s,partner=%s,timeline=%s,epoch=%s,revision=GREATEST(revision+1,%s),serving=ARRAY[%s]::text[],worker=%s,writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second' WHERE singleton=1", (state["target"], state["old"], value["actual_timeline"], state["generation"], state["generation"], state["target"], state["target"]))
-                else:
-                    # Rejoin/validation/ready may revoke a lease, but must never
-                    # adopt a later fork using an older transition approval.
-                    connection.execute("UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1 WHERE singleton=1")
+            if promoted and state["phase"] == "promoting" and value["epoch"] < state["generation"]:
+                connection.execute("UPDATE ha.control SET primary_node=%s,partner=%s,timeline=%s,epoch=%s,revision=GREATEST(revision+1,%s),serving=ARRAY[%s]::text[],worker=%s,writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second' WHERE singleton=1", (state["target"], state["old"], value["actual_timeline"], state["generation"], state["generation"], state["target"], state["target"]))
             else:
-                connection.execute("UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1 WHERE singleton=1")
+                # Reconciliation must not advance a closed generation's revision.
+                connection.execute("""UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1
+                    WHERE singleton=1 AND (writes_open OR history_safe OR expires_at > clock_timestamp())""")
             connection.execute("COMMIT")
 
     def close(self, state):
@@ -481,10 +589,16 @@ class PgBackend:
             # Highest priority after a lost pg_promote response: close the real
             # primary before attempting old-host or replay observations.
             self._local_metadata(state["target"], state)
+            if self._uses_replica_fence_wal() and not self.fenced(state):
+                _deny("crash_source_off_unconfirmed")
             self._promoted_history(candidate, state)
             self._local_metadata(state["target"], state, promoted=True)
             return
         self._candidate(candidate, state)
+        if self._uses_replica_fence_wal():
+            if not self.fenced(state):
+                _deny("crash_source_off_unconfirmed")
+            return
         try:
             self._local_metadata(state["old"], state)
         except TransitionBlocked as error:
@@ -496,10 +610,44 @@ class PgBackend:
 
     def fenced(self, state):
         self.bind(state)
-        return self.fence_adapter.fenced(state)
+        stopped = self.fence_adapter.fenced(state)
+        if stopped and self.plan.get("source_lease_close_required", False):
+            self._planned_promotion_floor(state)
+        return stopped
 
-    def fence(self, state):
+    def fence(self, state, *, record_source_wal=None):
         self.bind(state)
+        if self._uses_replica_fence_wal():
+            _deny("crash_source_off_unconfirmed")
+        if self.plan.get("source_lease_close_required", False):
+            # Before inducing an outage on a running VM, prove the old
+            # authority is closed and all permit holders have released the
+            # database role lock. An already-Off VM is handled by fenced().
+            old, target = state["old"], state["target"]
+            with self._connection(old) as connection:
+                connection.execute("BEGIN")
+                connection.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
+                connection.execute("SET LOCAL transaction_timeout = 0")
+                connection.execute("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
+                value = self._observe(connection, old, state)
+                remaining = value["remaining"]
+                if (value["recovery"] is not False or value["primary"] != old or value["partner"] != target
+                        or value["epoch"] != state["generation"] - 1
+                        or value["timeline"] != state["timeline"] or value["actual_timeline"] != state["timeline"]
+                        or value["writes"] is not False or value["history"] is not False
+                        or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
+                    _deny("source_write_authority_not_closed")
+                peer = self._read(target, state)
+                self._candidate(peer, state)
+                floor = max(self._lsn(value["flush"]), self._promotion_replay_floor(), state.get("source_fence_wal", 0))
+                if peer["epoch"] != value["epoch"] or self._lsn(peer["replay"]) < floor:
+                    _deny("source_final_wal_not_replayed")
+                if record_source_wal is None:
+                    _deny("source_fence_wal_record_required")
+                record_source_wal(floor)
+                # Keep the role lock through dispatch. Closing the connection
+                # releases it if the original server remains reachable.
+                return self.fence_adapter.fence(state)
         self.fence_adapter.fence(state)
 
     def promoted(self, state):
@@ -515,7 +663,7 @@ class PgBackend:
         self._local_metadata(state["target"], state, promoted=True)
         return True
 
-    def promote(self, state):
+    def promote(self, state, *, record_replica_wal=None):
         self.bind(state)
         self._promotion_intent(state)
         if not self.fenced(state):
@@ -524,6 +672,22 @@ class PgBackend:
             value = self._observe(connection, state["target"], state)
             if value["recovery"]:
                 self._candidate(value, state)
+                floor = (self._planned_promotion_floor(state) if self.plan.get("source_lease_close_required", False)
+                         else self._promotion_replay_floor())
+                if floor is not None and self._lsn(value["replay"]) < floor:
+                    _deny("promotion_replay_floor_not_reached")
+                if self._uses_replica_fence_wal():
+                    received = self._lsn(value["received_wal"])
+                    flush = self._lsn(value["flush"])
+                    if (value["fsync"] is not True or value["full_page_writes"] is not True
+                            or not 0 < received < 2**64 or not 0 < flush < 2**64):
+                        _deny("replica_fence_wal_unconfirmed")
+                    floor = max(floor, received, flush, state.get("replica_fence_wal", 0))
+                    if self._lsn(value["replay"]) < floor:
+                        _deny("replica_fence_wal_not_replayed")
+                    if record_replica_wal is None:
+                        _deny("replica_fence_wal_record_required")
+                    record_replica_wal(floor)
                 started = time.monotonic()
                 if not self.fenced(state):
                     _deny("positive_fence_required")
@@ -549,6 +713,81 @@ class PgBackend:
         if state["phase"] not in {"promoting", "rejoining", "validating", "ready"}:
             _deny("unexpected_primary_before_promotion_intent")
 
+    @staticmethod
+    def _require_closed_lease(value):
+        remaining = value["remaining"]
+        if (value["writes"] is not False or value["history"] is not False
+                or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
+            _deny("rejoin_primary_authority_not_closed")
+
+    def observe_transition_lease_closed(self, plan_sha256, generation, deadline):
+        """Read both authenticated cluster members until the exact lease has expired."""
+        if (self.plan.get("profile") != "enforced-vm-v1"
+                or self.fence_adapter.plan_sha256 != plan_sha256
+                or self.plan["generation"] != generation.epoch or self.plan["node"] != generation.partner):
+            _deny("transition_db_closure_unconfirmed")
+        if (generation.primary not in ("A", "B") or generation.primary == generation.partner
+                or type(generation.timeline) is not int or generation.timeline <= self.plan["timeline"]
+                or type(generation.revision) is not int or generation.revision < generation.epoch):
+            _deny("transition_db_closure_unconfirmed")
+        while time.monotonic() < deadline:
+            proofs = {}
+            for node in ("A", "B"):
+                if time.monotonic() >= deadline:
+                    _deny("transition_db_closure_unconfirmed")
+                with self._connection(node) as connection, connection.transaction():
+                    connection.execute("SET TRANSACTION READ ONLY")
+                    row = connection.execute(
+                        "SELECT current_setting('cluster_name'), system_identifier::text, pg_is_in_recovery(), "
+                        "c.cluster, c.epoch, c.primary_node, c.partner, c.timeline, c.revision, "
+                        "COALESCE(c.expires_at <= clock_timestamp(), false) "
+                        "FROM pg_control_system(), ha.control c WHERE c.singleton=1"
+                    ).fetchone()
+                expected = ("ha_" + node, str(self.plan["system_id"]), node == generation.partner,
+                            self.plan["cluster"], generation.epoch, generation.primary, generation.partner,
+                            generation.timeline)
+                if (not row or len(row) != 10 or
+                        any(type(actual) is not type(wanted) or actual != wanted
+                            for actual, wanted in zip(row[:8], expected, strict=True))
+                        or type(row[8]) is not int or row[8] < generation.revision or type(row[9]) is not bool):
+                    _deny("transition_db_closure_unconfirmed")
+                if row[9]:
+                    proofs[node] = hashlib.sha256(json.dumps([plan_sha256, *row], separators=(",", ":")).encode()).hexdigest()
+            if len(proofs) == 2 and time.monotonic() < deadline:
+                return {"plan_sha256": plan_sha256, "generation": generation.epoch, "node_proofs": proofs}
+            time.sleep(max(0, min(0.2, deadline - time.monotonic())))
+        _deny("transition_db_closure_unconfirmed")
+
+    def assert_rejoin_pending(self, state):
+        self.bind(state)
+        if state["phase"] != "rejoining" or not self.fenced(state):
+            _deny("rejoin_staging_phase_invalid")
+        value = self._read(state["target"], state)
+        self._recorded_primary(value, state)
+        self._require_closed_lease(value)
+        if not self.fenced(state):
+            _deny("positive_fence_required")
+
+    def assert_rejoin_synchronized(self, state):
+        """Read-only verification of both private PostgreSQL endpoints with writes closed."""
+        self.bind(state)
+        if state["phase"] != "rejoining" or not self.fenced(state):
+            _deny("rejoin_staging_phase_invalid")
+        primary = self._read(state["target"], state)
+        peer = self._read(state["old"], state)
+        self._pair(primary, peer, state)
+        self._require_closed_lease(primary)
+        self._require_closed_lease(peer)
+        floor = self._recorded_promotion_floor(state)
+        if self._lsn(peer["replay"]) < max(floor or 0, self._lsn(primary["flush"])):
+            _deny("replacement_standby_replay_not_current")
+        if not self.fenced(state):
+            _deny("positive_fence_required")
+        revision = primary["revision"]
+        if type(revision) is not int or not state["generation"] <= revision < 2**63:
+            _deny("rejoin_revision_unconfirmed")
+        return revision
+
     def rejoined(self, state):
         self.bind(state)
         if not self.fenced(state):
@@ -557,6 +796,8 @@ class PgBackend:
             primary = self._read(state["target"], state)
             peer = self._read(state["old"], state)
             self._pair(primary, peer, state)
+            if self._uses_replica_fence_wal() and self._lsn(peer["replay"]) < self._recorded_promotion_floor(state):
+                _deny("replacement_standby_replay_not_current")
             return True
         except TransitionBlocked:
             return False
@@ -621,7 +862,7 @@ class PgBackend:
         if shared and not lease:
             _deny("shared_lock_only_for_lease_renewal")
         try:
-            self._fresh_observation(state, lease=lease, shared=shared)
+            return self._fresh_observation(state, lease=lease, shared=shared)
         except Exception:
             self._best_effort_revoke(state)
             raise
@@ -633,6 +874,18 @@ class PgBackend:
         started = time.monotonic()
         if not self.fenced(state):
             _deny("positive_fence_required")
+        if "windows_transition_observer" in self.plan:
+            observer = self.transition_observer
+            deadline = started + PROOF_SECONDS
+            if observer is None:
+                _deny("transition_legacy_closure_unverified")
+            try:
+                observed = observer(deadline)
+            except (ValueError, OSError):
+                _deny("transition_legacy_closure_unverified")
+            if (type(observed) is not str or not re.fullmatch(r"[a-f0-9]{64}", observed)
+                    or time.monotonic() >= deadline):
+                _deny("transition_legacy_closure_unverified")
         nonce = str(uuid.uuid4())
         with self._connection(state["target"]) as primary, self._connection(state["old"]) as peer:
             before, replica = self._observe(primary, state["target"], state), self._observe(peer, state["old"], state)
@@ -672,6 +925,7 @@ class PgBackend:
                 self._commit(primary)
                 if not suffix:
                     watermark = self._lsn(primary.execute("SELECT pg_current_wal_insert_lsn()::text").fetchone()[0])
+            sampled_at_ms = time.time_ns() // 1_000_000
             after, replica = self._observe(primary, state["target"], state), self._observe(peer, state["old"], state)
             self._pair(after, replica, state)
             if shared and self._authority_stamp(after) != self._authority_stamp(before):
@@ -687,6 +941,11 @@ class PgBackend:
             if lease and (not after["writes"] or not after["history"] or not 0 < after["remaining"] <= LEASE_SECONDS):
                 _deny("authority_lease_not_open")
             self.validated = (state["cluster"], state["generation"], state["target"], after["actual_timeline"], time.monotonic())
+            if shared:
+                proof = {"epoch": after["epoch"], "timeline": after["actual_timeline"], "revision": after["revision"],
+                         "sampled_at_ms": sampled_at_ms, "valid_until_ms": sampled_at_ms + int(after["remaining"] * 1000),
+                         "postcommit_nonce_sha256": hashlib.sha256((nonce + ":flush").encode()).hexdigest()}
+                return proof
 
     def validate(self, state):
         self.validated = None
@@ -745,4 +1004,4 @@ class PgBackend:
         exclusive role lock; lease serving never performs that transition.
         """
         self.validated = None
-        self._fresh(state, lease=True, shared=True)
+        return self._fresh(state, lease=True, shared=True)

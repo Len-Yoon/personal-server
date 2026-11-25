@@ -55,16 +55,18 @@ $installation='f'*64
 $a=[guid]'11111111-1111-1111-1111-111111111111'
 $b=[guid]'22222222-2222-2222-2222-222222222222'
 $script:drift=$false
+$script:replacement=$installation
 $script:reads=0
 function Get-VM {
  [CmdletBinding()]
  param([Parameter(Mandatory,ValueFromPipeline)][guid]$Id)
  process {
-  $prefix='N100HA_'+$installation.Substring(0,16)+'_'
   $node=if($Id -eq $a){'A'}elseif($Id -eq $b){'B'}else{throw 'unexpected_id'}
+  $owner=if($node -ceq 'A'){$installation}else{$script:replacement}
+  $prefix='N100HA_'+$owner.Substring(0,16)+'_'
   $script:observedIds.Add($Id)
   [pscustomobject]@{Id=$Id;Name=($prefix+$node);
-   Notes=('ha-owned-guest-v1:'+$installation+':seed');Generation=2;AutomaticStartAction='Nothing';State='Running'}
+   Notes=('ha-owned-guest-v1:'+$owner+':seed');Generation=2;AutomaticStartAction='Nothing';State='Running'}
  }
 }
 function Get-VMHardDiskDrive($VM){
@@ -89,6 +91,19 @@ try{$null=Get-FixedVmObserverSnapshot $installation $a $b $progress;throw 'drift
  if($_.Exception.Message -cne 'fixed_observer_disks_changed'){throw}
 }
 if($progress.vm_step -cne 'validate_1'){throw 'drift_progress_missing'}
+$script:drift=$false
+$script:replacement='d'*64
+$rows=Get-FixedVmObserverSnapshot $installation $a $b $progress -InstallationB $script:replacement
+if($rows.Count -ne 2 -or $rows[1].id -cne $b.ToString()){throw 'replacement_mismatch'}
+try{$null=Get-FixedVmObserverSnapshot $installation $a $b $progress;throw 'unbound_replacement_accepted'}catch{
+ if($_.Exception.Message -cne 'fixed_observer_vm_binding'){throw}
+}
+try{$null=Get-FixedVmObserverSnapshot $script:replacement $a $b $progress -InstallationB $installation;throw 'swapped_owners_accepted'}catch{
+ if($_.Exception.Message -cne 'fixed_observer_vm_binding'){throw}
+}
+try{$null=Get-FixedVmObserverSnapshot $installation $a $b $progress -InstallationB '';throw 'empty_owner_accepted'}catch{
+ if($_.Exception.Message -cne 'fixed_observer_targets'){throw}
+}
 'PASS'
 """)
         self.assertEqual(output.strip(), "PASS")

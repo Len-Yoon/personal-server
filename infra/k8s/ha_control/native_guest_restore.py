@@ -1,13 +1,17 @@
 """Run one closed seven-service migration on the pinned A guest."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -193,6 +197,86 @@ def _inventory(excluded=None):
     return objects
 
 
+class _ObserverSocket(socket.socket):
+    def __init__(self, remaining):
+        super().__init__(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.remaining = remaining
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        # Buffered HTTP headers can take several reads, each in the same budget.
+        self.settimeout(self.remaining())
+        return super().recv_into(buffer, nbytes, flags)
+
+
+def _observer_inventory(deadline):
+    """Read the same complete inventory under the observer's existing deadline."""
+    endpoint = Path("/run/docker.sock")
+    error = "guest_restore_inventory_rejected"
+    witness = endpoint.lstat()
+    _need(stat.S_ISSOCK(witness.st_mode) and witness.st_uid == 0 and not witness.st_mode & 0o002
+          and Path("/var/run/docker.sock").resolve(strict=True) == endpoint, error)
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        _need(seconds > 0, error)
+        return seconds
+
+    def read(path):
+        budget = remaining()
+        with _ObserverSocket(remaining) as stream:
+            conn = http.client.HTTPConnection("localhost", timeout=budget)
+            try:
+                stream.settimeout(budget)
+                stream.connect(str(endpoint))
+                peer = stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                pid, uid, _ = struct.unpack("3i", peer)
+                _need(pid > 0 and uid == 0 and stamp(endpoint.lstat()) == stamp(witness), error)
+                conn.sock = stream
+                stream.settimeout(remaining())
+                conn.request("GET", path)
+                stream.settimeout(remaining())
+                with conn.getresponse() as response:
+                    _need(response.status == 200, error)
+                    expected_length = response.length
+                    payload = bytearray()
+                    while True:
+                        chunk = response.read1(65536)
+                        if not chunk:
+                            break
+                        payload.extend(chunk)
+                        _need(len(payload) <= 16 * 1024 * 1024, error)
+                    _need(expected_length is None or len(payload) == expected_length, error)
+                remaining()
+                return json.loads(payload)
+            except http.client.HTTPException:
+                raise TransitionBlocked(error) from None
+            finally:
+                conn.close()
+
+    version = read("/version")["ApiVersion"]
+    _need(type(version) is str and re.fullmatch(r"1\.[0-9]{2,3}", version) is not None, error)
+    prefix = f"/v{version}/containers/"
+
+    def identifiers():
+        rows = read(prefix + "json?all=1")
+        _need(type(rows) is list, error)
+        ids = [row["Id"] for row in rows]
+        _need(ids and all(type(item) is str and SHA.fullmatch(item) for item in ids)
+              and len(ids) == len(set(ids)), error)
+        return ids
+
+    def inspect(identifier):
+        item = read(prefix + identifier + "/json")
+        _need(type(item) is dict and item.get("Id") == identifier, error)
+        return item
+
+    ids = identifiers()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        objects = dict(zip(ids, pool.map(inspect, ids), strict=True))
+    _need(set(ids) == set(identifiers()), error)
+    return objects
+
+
 def inventory_sha256(objects):
     """Return the private inventory pin. Container environment values never leave this function."""
     protected = {
@@ -265,11 +349,11 @@ def _identity(pins):
     _need(raw.decode().strip() == pins.utility_digest + " amd64 linux", "guest_restore_utility_mismatch")
 
 
-def _pg(pins, sql):
+def _pg(pins, sql, *, timeout=10):
     raw = _docker("exec", "--user", f"{pins.uid}:{pins.gid}", "--env",
                   "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=3000",
                   "--env", "PGCONNECT_TIMEOUT=3", pins.postgres_id, "psql", "-XqwAt", "-v", "ON_ERROR_STOP=1",
-                  "-h", "/var/run/postgresql", "-U", "postgres", "-d", "ha", "-c", sql)
+                  "-h", "/var/run/postgresql", "-U", "postgres", "-d", "ha", "-c", sql, timeout=timeout)
     return json.loads(raw)
 
 

@@ -1,4 +1,4 @@
-"""Render initial guest configuration without starting apps or issuing authority."""
+"""Render guest configuration without starting apps or issuing authority."""
 import re
 import secrets
 
@@ -63,17 +63,25 @@ def _postgres(role, password, root):
     return endpoints, passfile
 
 
+def _partner(primary_node, generation):
+    _need(primary_node in NODES and type(generation) is int and generation >= 1,
+          "guest_activation_generation_invalid")
+    _need(generation != 1 or primary_node == "A", "guest_activation_generation_invalid")
+    return "B" if primary_node == "A" else "A"
+
+
 def application_config(*, cluster, release, plan_sha256, node, installation_id, system_id,
-                       service, password, broker_server_sha256):
+                       service, password, broker_server_sha256, primary_node="A", generation=1):
     """Return the exact app config and this node's private passfile bytes."""
     _guest_identity(cluster, release, plan_sha256, node, installation_id, system_id)
     _need(service in SERVICES and _match(HEX, broker_server_sha256), "guest_application_configuration_invalid")
+    partner = _partner(primary_node, generation)
     endpoints, passfile = _postgres(service.replace("-", "_") + "_" + node.lower(), password, "/etc/ha")
     return {
         **release, "scope": "n100-approved", "profile": "enforced-vm-v1",
-        "enforcement_sha256": definition_sha256(), "installation_id": installation_id, "generation": 1,
-        "cluster": cluster, "system_id": system_id, "node": node, "service": service, "primary_node": "A",
-        "primary": endpoints["A"], "partner": endpoints["B"],
+        "enforcement_sha256": definition_sha256(), "installation_id": installation_id, "generation": generation,
+        "cluster": cluster, "system_id": system_id, "node": node, "service": service, "primary_node": primary_node,
+        "primary": endpoints[primary_node], "partner": endpoints[partner],
         "effects": {"url": "https://ha-broker:8443", "ca": "/etc/ha/broker-ca.crt",
                     "certificate": "/etc/ha/broker-client.crt", "key": "/etc/ha/broker-client.key",
                     "server_sha256": broker_server_sha256, "plan_sha256": plan_sha256},
@@ -81,9 +89,10 @@ def application_config(*, cluster, release, plan_sha256, node, installation_id, 
 
 
 def broker_config(*, cluster, release, plan_sha256, node, installation_id, system_id, broker_instance,
-                  password, client_sha256, ingress_server_sha256, engine_id, targets):
+                  password, client_sha256, ingress_server_sha256, engine_id, targets, primary_node="A", generation=1):
     """Return a broker config containing only private provider file references."""
     _guest_identity(cluster, release, plan_sha256, node, installation_id, system_id)
+    partner = _partner(primary_node, generation)
     _need(_match(HEX, broker_instance) and type(client_sha256) is dict and set(client_sha256) == SERVICES
           and all(_match(HEX, value) for value in client_sha256.values()) and len(set(client_sha256.values())) == 7,
           "guest_broker_client_configuration_invalid")
@@ -113,12 +122,12 @@ def broker_config(*, cluster, release, plan_sha256, node, installation_id, syste
     }
     return {
         "schema_version": 1, "scope": "n100-approved", "profile": "enforced-vm-v1", "release": dict(release),
-        "installation_id": installation_id, "node": node, "generation": 1,
+        "installation_id": installation_id, "node": node, "generation": generation,
         "binding": {"cluster": cluster, "system_id": system_id, "source_commit": release["source_commit"],
                     "plan_sha256": plan_sha256, "broker_role": BROKER_ROLE, "broker_instance": broker_instance},
-        "postgres": {"primary": endpoints["A"], "peer": endpoints["B"]},
+        "postgres": {"primary": endpoints[primary_node], "peer": endpoints[partner]},
         "tls": {"ca": root + "/broker-ca.crt", "certificate": root + "/broker.crt", "key": root + "/broker.key"},
-        "clients": [{"sha256": client_sha256[service], "service": service, "node": node, "generation": 1}
+        "clients": [{"sha256": client_sha256[service], "service": service, "node": node, "generation": generation}
                     for service in sorted(SERVICES)],
         "providers": providers,
     }, passfile

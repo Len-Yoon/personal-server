@@ -5,6 +5,7 @@ Docker stop/inspect is the local test actuator. It is NOT a Windows fencing
 acceptance test. The native Windows bridge has a separate approval boundary.
 """
 from contextlib import contextmanager
+import argparse
 import importlib.util
 import json
 from pathlib import Path
@@ -46,12 +47,15 @@ class TransitionFixture(lab.Fixture):
             raise lab.FixtureError("transition_application_check_failed")
         return value
 
-    def check_apps(self, stage, objects="/fixture/objects"):
+    def check_apps(self, stage, objects="/fixture/objects", *, node="B"):
         results = {}
         for service in lab.SERVICES:
             group = "311" if service in lab.GROUPS["311"] else "312"
             self.phase = stage + "_" + service
-            results[service] = self.script(self.runners[group], "post_transition.py", ("--stage", stage, "--service", service), service=service, objects=objects)
+            results[service] = self.script(
+                self.runners[group], "post_transition.py", ("--stage", stage, "--service", service, "--node", node),
+                service=service, node=node, objects=objects,
+            )
         return results
 
     def restore_all(self):
@@ -117,9 +121,13 @@ class TransitionFixture(lab.Fixture):
 
 
 class LocalBackend:
-    def __init__(self, fixture):
+    def __init__(self, fixture, old="A", target="B", *, single_writer=False):
         self.f = fixture
-        self.old = fixture.a
+        self.old_node = old
+        self.target_node = target
+        self.old = getattr(fixture, old.lower())
+        self.target = getattr(fixture, target.lower())
+        self.single_writer = single_writer
         self.checked_at = None
 
     @contextmanager
@@ -135,29 +143,36 @@ class LocalBackend:
         value = json.loads(self.f.docker("container", "inspect", self.old))[0]
         return value["State"]["Running"] is False and value["HostConfig"]["RestartPolicy"]["Name"] in {"no", ""}
 
-    def fence(self, state):
+    def fence(self, state, *, record_source_wal=None):
         self.f.docker("stop", "--time", "5", self.old)
         self.f.docker("network", "disconnect", self.f.network, self.old)
 
     def promoted(self, state):
-        return self.f.psql_at(self.f.b, "SELECT NOT pg_is_in_recovery()") == "t"
+        return self.f.psql_at(self.target, "SELECT NOT pg_is_in_recovery()") == "t"
 
-    def promote(self, state):
+    def promote(self, state, *, record_replica_wal=None):
         if not self.fenced(state):
             raise TransitionBlocked("positive_fence_required")
-        if self.f.psql_at(self.f.b, "SELECT pg_promote(true,5)") != "t":
+        if self.f.psql_at(self.target, "SELECT pg_promote(true,5)") != "t":
             raise TransitionBlocked("promotion_unconfirmed")
-        self.f.primary = self.f.b
-        self.f.psql("ALTER SYSTEM SET synchronous_standby_names='FIRST 1 (ha_a)'")
+        self.f.primary = self.target
+        self.f.psql(f"ALTER SYSTEM SET synchronous_standby_names='FIRST 1 (ha_{self.old_node.lower()})'")
         self.f.psql("SELECT pg_reload_conf()")
-        self.f.psql("BEGIN; SET LOCAL synchronous_commit=local; UPDATE ha.control SET primary_node='B',partner='A',timeline=2,epoch=" + str(state["generation"]) + ",revision=revision+1,writes_open=false,history_safe=false; COMMIT")
+        self.f.psql(f"BEGIN; SET LOCAL synchronous_commit=local; UPDATE ha.control SET primary_node='{self.target_node}',"
+                    f"partner='{self.old_node}',timeline={state['timeline'] + 1},epoch={state['generation']},"
+                    "revision=revision+1,writes_open=false,history_safe=false; COMMIT")
+
+    def _peer_sync(self):
+        return self.f.psql("SELECT count(*) FROM pg_stat_replication "
+                           f"WHERE application_name='ha_{self.old_node.lower()}' AND sync_state='sync'") == "1"
 
     def rejoin(self, state):
-        self.f.a = self.f.start_pg("A", source="B")
-        self.f.wait(lambda: self.f.psql("SELECT count(*) FROM pg_stat_replication WHERE application_name='ha_a' AND sync_state='sync'") == "1")
+        replacement = self.f.start_pg(self.old_node, source=self.target_node)
+        setattr(self.f, self.old_node.lower(), replacement)
+        self.f.wait(self._peer_sync)
 
     def rejoined(self, state):
-        return self.f.a != self.old and self.f.psql("SELECT count(*) FROM pg_stat_replication WHERE application_name='ha_a' AND sync_state='sync'") == "1"
+        return getattr(self.f, self.old_node.lower()) != self.old and self._peer_sync()
 
     def validate(self, state):
         # A committed WAL-producing control check is covered by a following
@@ -165,7 +180,12 @@ class LocalBackend:
         self.f.psql("SET synchronous_commit=on; CREATE TABLE IF NOT EXISTS ha.transition_check(id integer PRIMARY KEY); INSERT INTO ha.transition_check VALUES(1) ON CONFLICT DO NOTHING")
         watermark = self.f.psql("SELECT pg_current_wal_insert_lsn()::text")
         self.f.psql("UPDATE ha.transition_check SET id=id WHERE id=1")
-        peer = self.f.psql_at(self.f.a, "SELECT pg_is_in_recovery() AND received_tli=2 AND pg_last_wal_receive_lsn()>='" + watermark + "'::pg_lsn AND pg_last_wal_replay_lsn()>='" + watermark + "'::pg_lsn FROM pg_stat_wal_receiver")
+        peer = self.f.psql_at(
+            getattr(self.f, self.old_node.lower()),
+            f"SELECT pg_is_in_recovery() AND received_tli={state['timeline'] + 1} AND "
+            f"pg_last_wal_receive_lsn()>='{watermark}'::pg_lsn AND pg_last_wal_replay_lsn()>='{watermark}'::pg_lsn "
+            "FROM pg_stat_wal_receiver",
+        )
         if peer != "t" or self.f.psql("SELECT system_identifier::text FROM pg_control_system()") != self.f.system_id:
             raise TransitionBlocked("fresh_peer_proof_unavailable")
         self.checked_at = time.monotonic()
@@ -173,38 +193,71 @@ class LocalBackend:
     def open(self, state):
         if self.checked_at is None or time.monotonic() - self.checked_at > 2 or not self.fenced(state):
             raise TransitionBlocked("fresh_peer_proof_unavailable")
-        self.f.psql("BEGIN; SELECT pg_advisory_xact_lock(7142026110601); UPDATE ha.control SET serving=ARRAY['A','B'],worker='B',mode='AA',writes_open=true,history_safe=true; COMMIT")
-        self.f.update_configs("B")
+        serving, mode = (f"'{self.target_node}'", "AS") if self.single_writer else ("'A','B'", "AA")
+        self.f.psql("BEGIN; SELECT pg_advisory_xact_lock(7142026110601); "
+                    f"UPDATE ha.control SET serving=ARRAY[{serving}],worker='{self.target_node}',mode='{mode}',"
+                    "writes_open=true,history_safe=true; COMMIT")
+        self.f.update_configs(self.target_node)
 
     def assert_ready(self, state):
-        if not self.fenced(state) or self.f.psql("SELECT primary_node='B' AND timeline=2 AND writes_open AND history_safe FROM ha.control") != "t":
+        if not self.fenced(state) or self.f.psql(
+            f"SELECT primary_node='{self.target_node}' AND timeline={state['timeline'] + 1} AND writes_open AND history_safe FROM ha.control"
+        ) != "t":
             raise TransitionBlocked("new_authority_unconfirmed")
 
 
+def roundtrip(fixture):
+    fixture.primary = fixture.a
+    fixture.report["before"] = fixture.check_apps("before", node="A")
+    for generation, timeline, old, target, stage in (
+        (3, 1, "A", "B", "failed_over"), (4, 2, "B", "A", "returned"),
+    ):
+        fixture.phase = "roundtrip_" + stage
+        control = Controller(fixture.directory / (stage + ".json"), LocalBackend(fixture, old, target, single_writer=True))
+        control.initialize(cluster=fixture.cluster, generation=generation, old=old, target=target, timeline=timeline)
+        state = control.advance()
+        if state["phase"] != "ready":
+            raise lab.FixtureError("roundtrip_transition_not_ready")
+        denied = fixture.check_apps("inactive", node=old)
+        fixture.report[stage] = {
+            "timeline": timeline + 1,
+            "owner": target,
+            "active_apps": fixture.check_apps(stage, node=target),
+            "inactive_apps": denied,
+        }
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--roundtrip", action="store_true", help="run the new A-to-B-to-A acceptance only")
+    parser.add_argument("--runtime-context", default="orbstack")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="n100-ha-transition-") as temporary:
-        fixture = TransitionFixture(Path(temporary).resolve())
+        fixture = TransitionFixture(Path(temporary).resolve(), runtime_context=args.runtime_context)
         error = None
         try:
             fixture.prepare()
             fixture.databases()
             fixture.build()
-            fixture.applications()
-            fixture.primary = fixture.a
-            fixture.phase = "fence_promote_rejoin"
-            control = Controller(fixture.directory / "controller.json", LocalBackend(fixture))
-            control.initialize(cluster=fixture.cluster, generation=3, old="A", target="B", timeline=1)
-            state = control.advance()
-            fixture.report["db_transition"] = {"phase": state["phase"], "timeline": 2,
-                                                "old_primary_fenced": True, "new_standby_rejoined": True,
-                                                "native_windows_test": False}
-            fixture.report["promoted_apps"] = fixture.check_apps("promoted")
-            fixture.phase = "native_pg_adapter"
-            fixture.report["native_pg_adapter"] = fixture.script(fixture.runners["311"], "native_pg_smoke.py")
-            # Restore the local fixture's longer synthetic authority for the
-            # independent full-backup/restore stage, after the native 5s test.
-            fixture.psql("BEGIN; SELECT pg_advisory_xact_lock(7142026110601); UPDATE ha.control SET writes_open=true,history_safe=true,expires_at=clock_timestamp()+interval '2 hours'; COMMIT")
-            fixture.restore_all()
+            if args.roundtrip:
+                fixture.seed_applications()
+                roundtrip(fixture)
+            else:
+                fixture.applications()
+                fixture.primary = fixture.a
+                fixture.phase = "fence_promote_rejoin"
+                control = Controller(fixture.directory / "controller.json", LocalBackend(fixture))
+                control.initialize(cluster=fixture.cluster, generation=3, old="A", target="B", timeline=1)
+                state = control.advance()
+                fixture.report["db_transition"] = {"phase": state["phase"], "timeline": 2,
+                                                    "old_primary_fenced": True, "new_standby_rejoined": True,
+                                                    "native_windows_test": False}
+                fixture.report["promoted_apps"] = fixture.check_apps("promoted")
+                fixture.phase = "native_pg_adapter"
+                fixture.report["native_pg_adapter"] = fixture.script(fixture.runners["311"], "native_pg_smoke.py")
+                # Restore synthetic authority after the native short-lease test.
+                fixture.psql("BEGIN; SELECT pg_advisory_xact_lock(7142026110601); UPDATE ha.control SET writes_open=true,history_safe=true,expires_at=clock_timestamp()+interval '2 hours'; COMMIT")
+                fixture.restore_all()
         except Exception as value:
             error = type(value).__name__ + ":" + (str(value) if isinstance(value, (lab.FixtureError, TransitionBlocked)) else fixture.phase)
         finally:

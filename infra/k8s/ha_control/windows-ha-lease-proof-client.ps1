@@ -1,7 +1,8 @@
 param(
     [string]$PipeName,
     [uint32]$ServerPid,
-    [string]$ServiceSid
+    [string]$ServiceSid,
+    [string]$ProofScope = 'n100ha-legacy-closure-v1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,9 +16,14 @@ function Remaining {
     return $left
 }
 try {
+    $allowedPipe = switch -CaseSensitive ($ProofScope) {
+        'n100ha-legacy-closure-v1' { '\An100ha-lease-proof-[a-f0-9]{32}\z' }
+        'n100ha-initial-recovery-v1' { '\An100ha-recovery-proof-[a-f0-9]{32}\z' }
+        default { throw 'lease_proof_context' }
+    }
     if ($PSVersionTable.PSEdition -cne 'Desktop' -or -not [Environment]::Is64BitProcess -or
         [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
-        $PipeName -cnotmatch '\An100ha-lease-proof-[a-f0-9]{32}\z' -or
+        $PipeName -cnotmatch $allowedPipe -or
         $ServerPid -eq 0) {
         throw 'lease_proof_context'
     }

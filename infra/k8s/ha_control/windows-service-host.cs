@@ -32,7 +32,7 @@ namespace EnforcedServiceV1 {
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string prefix=Keys[i]+"=";if(!lines[i].StartsWith(prefix,StringComparison.Ordinal))throw new InvalidOperationException();string v=lines[i].Substring(prefix.Length);if(v.Length==0)throw new InvalidOperationException();Values.Add(Keys[i],v);}
-   if(Values["format"]!="enforced-service-v1"||!Regex.IsMatch(Values["service_name"],"\\A[A-Za-z0-9_-]{1,80}\\z")||!Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")|| (Values["mode"]!="authenticate"&&Values["mode"]!="initialize"&&Values["mode"]!="advance"&&Values["mode"]!="serve"))throw new InvalidOperationException();
+   if(Values["format"]!="enforced-service-v1"||!Regex.IsMatch(Values["service_name"],"\\A[A-Za-z0-9_-]{1,80}\\z")||!Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")|| (Values["mode"]!="authenticate"&&Values["mode"]!="initialize"&&Values["mode"]!="advance"&&Values["mode"]!="serve"&&Values["mode"]!="transition-serve"&&Values["mode"]!="transition-rearm"&&Values["mode"]!="stage-rejoin"&&Values["mode"]!="observe-rejoin-stage"&&Values["mode"]!="check-rejoin"&&Values["mode"]!="check-lease-closed"))throw new InvalidOperationException();
    foreach(string k in new[]{"python_sha256","launcher_sha256","plan_sha256","approval_sha256","host_sha256"})if(!Regex.IsMatch(Values[k],"\\A[0-9a-f]{64}\\z"))throw new InvalidOperationException();
    foreach(string k in new[]{"python_path","launcher_path","plan_path","approval_path"})CheckPath(Values[k]);
   }
@@ -45,7 +45,28 @@ namespace EnforcedServiceV1 {
     ((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':'&&path[2]=='\\'&&
     String.Equals(path,osRoot,StringComparison.OrdinalIgnoreCase);
   }
-  public static int ServiceExitCode(string mode,uint childCode){return (mode=="authenticate"||mode=="initialize"||mode=="advance")&&childCode==0?0:1;}
+  public string ClosureLaunchRecord(uint childPid,int hostPid,long startedMs){
+   if(Values["mode"]!="check-lease-closed"||childPid==0||hostPid<=0||startedMs<=0)throw new InvalidOperationException();
+   return String.Format(System.Globalization.CultureInfo.InvariantCulture,
+    "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3}}}",
+    Values["plan_sha256"],childPid,hostPid,startedMs);
+  }
+  public bool IsRejoinProbe(){string mode=Values["mode"];return mode=="initialize"||mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin";}
+  public string RejoinLaunchRecord(string probe,uint childPid,int hostPid,long startedMs){
+   if(!IsRejoinProbe()||!Regex.IsMatch(probe??"",@"\A[a-f0-9]{32}\z")||childPid==0||hostPid<=0||startedMs<=0)throw new InvalidOperationException();
+   return String.Format(System.Globalization.CultureInfo.InvariantCulture,
+    "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3},\"probe\":\"{4}\",\"mode\":\"{5}\"}}",
+    Values["plan_sha256"],childPid,hostPid,startedMs,probe,Values["mode"]);
+  }
+  public static int ServiceExitCode(string mode,uint childCode){return (mode=="authenticate"||mode=="initialize"||mode=="advance"||mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin"||mode=="check-lease-closed")&&childCode==0?0:1;}
+  public bool IsInitialWriter(){
+   return Values["mode"]=="serve"&&Regex.IsMatch(Values["plan_path"],
+    @"\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z");
+  }
+  public static bool WriterReleased(string mode,bool stopRequested,uint childCode){
+   return mode=="serve"&&stopRequested&&childCode==17;
+  }
+  public const int ReleaseWriterControl=128;
  }
 #if !PORTABLE_FIXTURE
  public static class Protection {
@@ -103,7 +124,23 @@ namespace EnforcedServiceV1 {
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr source,IntPtr targetProcess,out IntPtr target,uint access,bool inherit,uint options);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
+  static void RecordOneShotLaunch(Settings settings,ProcessInfo child,string probe){
+   long created,exited,kernel,user;
+   if(!GetProcessTimes(child.Process,out created,out exited,out kernel,out user))throw new InvalidOperationException();
+   long startedMs=new DateTimeOffset(DateTime.FromFileTimeUtc(created)).ToUnixTimeMilliseconds();
+   string journal=Path.Combine(Path.GetDirectoryName(settings.Values["plan_path"]),"journal");
+   string plan=settings.Values["plan_sha256"];
+   string name=probe==null?"lease-closure-launch-"+plan:"rejoin-launch-"+plan+"-"+probe;
+   string leaf=Path.Combine(journal,name+".json");
+   using(var host=Process.GetCurrentProcess())
+   using(var stream=new FileStream(leaf,FileMode.CreateNew,FileAccess.Write,FileShare.None,4096,FileOptions.WriteThrough)){
+    byte[] bytes=Encoding.ASCII.GetBytes(probe==null?settings.ClosureLaunchRecord(child.Pid,host.Id,startedMs):settings.RejoinLaunchRecord(probe,child.Pid,host.Id,startedMs));
+    stream.Write(bytes,0,bytes.Length);stream.Flush(true);
+   }
+  }
   readonly object handles=new object();IntPtr job,process;
+  EventWaitHandle writerStop;
   public OwnedJob(Settings settings,Action<StartupPhase> mark){
    mark(StartupPhase.JobCreate);
    job=CreateJobObject(IntPtr.Zero,null);if(job==IntPtr.Zero)throw new InvalidOperationException();
@@ -112,24 +149,56 @@ namespace EnforcedServiceV1 {
     if(!SetInformationJobObject(job,9,ref limit,(uint)Marshal.SizeOf(typeof(Extended))))throw new InvalidOperationException();
     var si=new Startup();si.Size=Marshal.SizeOf(typeof(Startup));ProcessInfo pi;
     string system=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-    string block="PATH="+Path.Combine(system,"System32")+"\0SystemRoot="+system+"\0\0";IntPtr env=Marshal.StringToHGlobalUni(block);
+    string probe=settings.IsRejoinProbe()?Guid.NewGuid().ToString("N"):null;
+    string stopEntry="";
+    if(settings.IsInitialWriter()){
+     string name="Local\\N100HAWriterStop-"+Guid.NewGuid().ToString("N");
+     var serviceSid=new SecurityIdentifier(settings.Values["service_sid"]);
+     var security=new EventWaitHandleSecurity();
+     security.SetAccessRuleProtection(true,false);
+     security.SetOwner(serviceSid);
+     security.AddAccessRule(new EventWaitHandleAccessRule(serviceSid,EventWaitHandleRights.FullControl,AccessControlType.Allow));
+     security.AddAccessRule(new EventWaitHandleAccessRule(new SecurityIdentifier("S-1-5-18"),EventWaitHandleRights.FullControl,AccessControlType.Allow));
+     bool created;
+     writerStop=new EventWaitHandle(false,EventResetMode.ManualReset,name,out created,security);
+     if(!created)throw new InvalidOperationException();
+     stopEntry="N100HA_INITIAL_STOP_EVENT="+name+"\0";
+    }
+    string block=stopEntry+(probe==null?"":"N100HA_REJOIN_PROBE="+probe+"\0")+"PATH="+Path.Combine(system,"System32")+"\0SystemRoot="+system+"\0\0";IntPtr env=Marshal.StringToHGlobalUni(block);
     mark(StartupPhase.PythonCreate);
     try{if(!CreateProcess(settings.Values["python_path"],new StringBuilder(settings.CommandLine()),IntPtr.Zero,IntPtr.Zero,false,0x404,env,Path.GetDirectoryName(settings.Values["launcher_path"]),ref si,out pi))throw new InvalidOperationException();}finally{Marshal.FreeHGlobal(env);}
     process=pi.Process;
     try{
      mark(StartupPhase.JobAssign);
      if(!AssignProcessToJobObject(job,process)){TerminateProcess(process,1);throw new InvalidOperationException();}
+     if(probe!=null||settings.Values["mode"]=="check-lease-closed")RecordOneShotLaunch(settings,pi,probe);
      mark(StartupPhase.PythonResume);
      if(ResumeThread(pi.Thread)==0xffffffff){TerminateProcess(process,1);throw new InvalidOperationException();}
     }finally{CloseHandle(pi.Thread);}
    }catch{Dispose();throw;}
   }
   public uint Wait(){IntPtr copy;lock(handles){if(process==IntPtr.Zero||!DuplicateHandle(GetCurrentProcess(),process,GetCurrentProcess(),out copy,0,false,2))throw new InvalidOperationException();}try{uint code;if(WaitForSingleObject(copy,0xffffffff)!=0||!GetExitCodeProcess(copy,out code)||code==259)throw new InvalidOperationException();return code;}finally{CloseHandle(copy);}}
-  public void Dispose(){lock(handles){if(job!=IntPtr.Zero){TerminateJobObject(job,1);CloseHandle(job);job=IntPtr.Zero;}if(process!=IntPtr.Zero){if(WaitForSingleObject(process,5000)!=0){TerminateProcess(process,1);if(WaitForSingleObject(process,5000)!=0)Environment.FailFast("owned_child_cleanup_failed");}CloseHandle(process);process=IntPtr.Zero;}}}
+  public bool SupportsWriterRelease { get { return writerStop!=null; } }
+  public bool WriterStopRequested { get { return writerStop!=null&&writerStop.WaitOne(0); } }
+  public void RequestWriterRelease(){
+   lock(handles){
+    if(process==IntPtr.Zero||writerStop==null||!writerStop.Set())throw new InvalidOperationException();
+   }
+  }
+  public bool WaitForReleasedWriter(out uint code){
+   lock(handles){
+    code=1;
+    uint status=WaitForSingleObject(process,12000);
+    if(status==258)return false;
+    if(status!=0||!GetExitCodeProcess(process,out code))throw new InvalidOperationException();
+    return true;
+   }
+  }
+  public void Dispose(){lock(handles){if(job!=IntPtr.Zero){TerminateJobObject(job,1);CloseHandle(job);job=IntPtr.Zero;}if(process!=IntPtr.Zero){if(WaitForSingleObject(process,5000)!=0){TerminateProcess(process,1);if(WaitForSingleObject(process,5000)!=0)Environment.FailFast("owned_child_cleanup_failed");}CloseHandle(process);process=IntPtr.Zero;}if(writerStop!=null){writerStop.Dispose();writerStop=null;}}}
  }
  public sealed class Host : ServiceBase {
   readonly Settings settings;readonly string argsPath,argsHash,selfPath;readonly object gate=new object();OwnedJob child;bool stopping,successfulOneShot;
-  Host(Settings s,string args,string digest,string self){settings=s;argsPath=args;argsHash=digest;selfPath=self;ServiceName=s.Values["service_name"];AutoLog=false;CanStop=true;CanShutdown=true;}
+  Host(Settings s,string args,string digest,string self){settings=s;argsPath=args;argsHash=digest;selfPath=self;ServiceName=s.Values["service_name"];AutoLog=false;CanStop=!s.IsInitialWriter();CanShutdown=true;}
   void Validate(Action<StartupPhase> mark){
    mark(StartupPhase.ServiceIdentity);
    using(var identity=WindowsIdentity.GetCurrent()){if(identity.User==null||identity.User.Value!=settings.Values["service_sid"]||Process.GetCurrentProcess().SessionId!=0||((SecurityIdentifier)new NTAccount("NT SERVICE\\"+ServiceName).Translate(typeof(SecurityIdentifier))).Value!=identity.User.Value)throw new InvalidOperationException();}
@@ -166,7 +235,8 @@ namespace EnforcedServiceV1 {
       finally{
        lock(gate){
         if(!stopping&&Object.ReferenceEquals(child,owned)){
-         ExitCode=completed?Settings.ServiceExitCode(settings.Values["mode"],code):1;
+         ExitCode=completed&&(Settings.WriterReleased(settings.Values["mode"],owned.WriterStopRequested,code))?
+          0:(completed?Settings.ServiceExitCode(settings.Values["mode"],code):1);
          successfulOneShot=ExitCode==0;
          requestStop=true;
         }
@@ -182,6 +252,14 @@ namespace EnforcedServiceV1 {
     }
    }
   }
+  protected override void OnCustomCommand(int command){
+   if(command!=Settings.ReleaseWriterControl||!settings.IsInitialWriter()){
+    base.OnCustomCommand(command);return;
+   }
+   lock(gate){
+    if(!stopping&&child!=null)child.RequestWriterRelease();
+   }
+  }
   protected override void OnStop(){
    lock(gate){
     if(!successfulOneShot)ExitCode=startupFailureCode==0?1:startupFailureCode;
@@ -189,7 +267,19 @@ namespace EnforcedServiceV1 {
     if(child!=null){child.Dispose();child=null;}
    }
   }
-  protected override void OnShutdown(){OnStop();base.OnShutdown();}
+  protected override void OnShutdown(){
+   lock(gate){
+    if(child!=null&&child.SupportsWriterRelease){
+     uint code;
+     child.RequestWriterRelease();
+     if(!child.WaitForReleasedWriter(out code))throw new InvalidOperationException("writer_release_pending");
+     successfulOneShot=Settings.WriterReleased(settings.Values["mode"],child.WriterStopRequested,code);
+     ExitCode=successfulOneShot?0:1;
+    }
+    OnStop();
+   }
+   base.OnShutdown();
+  }
   public static int Main(string[] args){
    var phase=StartupPhase.ProcessContext;
    Host host=null;
@@ -219,7 +309,7 @@ namespace EnforcedServiceV1 {
     phase=StartupPhase.Dispatch;
     host=new Host(s,path,hash,self);
     ServiceBase.Run(host);
-    return host.startupFailureCode;
+    return host.startupFailureCode!=0?host.startupFailureCode:host.ExitCode;
    }catch{
     return host!=null&&host.startupFailureCode!=0?host.startupFailureCode:(int)phase;
    }
