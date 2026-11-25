@@ -35,9 +35,8 @@ from app.services.memo_service import (
     purge_deleted_memos,
     restore_memo,
     restore_memo_revision,
-    list_available_tags,
     list_export_records,
-    list_videos_page,
+    list_home,
     search_videos_and_memos,
     update_memo,
     update_memo_tags,
@@ -132,7 +131,7 @@ templates.env.globals["portal_home_url_for_request"] = _portal_home_url
 @app.get("/")
 def home(request: Request, page: int = Query(default=1, ge=1), tag: str = ""):
     selected_tag = tag.strip()
-    videos, total_videos, current_page = list_videos_page(page, tag=selected_tag)
+    videos, total_videos, current_page, available_tags = list_home(page, tag=selected_tag)
     return templates.TemplateResponse(
         request=request, name="home.html",
         context={
@@ -142,7 +141,7 @@ def home(request: Request, page: int = Query(default=1, ge=1), tag: str = ""):
             "total_videos": total_videos,
             "current_page": current_page,
             "total_pages": max(1, (total_videos + 23) // 24),
-            "available_tags": list_available_tags(),
+            "available_tags": available_tags,
             "selected_tag": selected_tag,
             "selected_tag_key": selected_tag.casefold(),
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),

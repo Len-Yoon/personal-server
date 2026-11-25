@@ -221,30 +221,44 @@ def list_videos() -> list[dict[str, Any]]:
 
 def list_videos_page(page: int, page_size: int = 24, tag: str = "") -> tuple[list[dict[str, Any]], int, int]:
     init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        return _list_videos_page(connection, page, page_size, tag)
+
+
+def list_home(page: int, tag: str = "") -> tuple[list[dict[str, Any]], int, int, list[dict[str, Any]]]:
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        videos, total, current_page = _list_videos_page(connection, page, 24, tag)
+        return videos, total, current_page, _list_available_tags(connection)
+
+
+def _list_videos_page(
+    connection: sqlite3.Connection, page: int, page_size: int, tag: str
+) -> tuple[list[dict[str, Any]], int, int]:
     tag_key = tag.strip().casefold()
     where = "WHERE EXISTS (SELECT 1 FROM memos JOIN memo_tags ON memo_tags.memo_id = memos.id WHERE memos.video_id = videos.id AND memo_tags.tag_key = ?)" if tag_key else ""
     parameters: tuple[Any, ...] = (tag_key,) if tag_key else ()
-    with _connect() as connection:
-        connection.execute("BEGIN")
-        count_query = f"SELECT COUNT(*) FROM videos {where}" if tag_key else "SELECT COUNT(*) FROM videos"
-        total = connection.execute(count_query, parameters).fetchone()[0]
-        last_page = max(1, (total + page_size - 1) // page_size)
-        page = min(max(1, page), last_page)
-        rows = connection.execute(
-            """
-            WITH selected AS (
-                SELECT * FROM videos
-                {where}
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ? OFFSET ?
-            )
-            SELECT selected.*,
-                (SELECT COUNT(*) FROM memos WHERE video_id = selected.id) AS memo_count
-            FROM selected
-            ORDER BY selected.updated_at DESC, selected.id DESC
-            """.replace("{where}", where),
-            (*parameters, page_size, (page - 1) * page_size),
-        ).fetchall()
+    count_query = f"SELECT COUNT(*) FROM videos {where}" if tag_key else "SELECT COUNT(*) FROM videos"
+    total = connection.execute(count_query, parameters).fetchone()[0]
+    last_page = max(1, (total + page_size - 1) // page_size)
+    page = min(max(1, page), last_page)
+    rows = connection.execute(
+        """
+        WITH selected AS (
+            SELECT * FROM videos
+            {where}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+        )
+        SELECT selected.*,
+            (SELECT COUNT(*) FROM memos WHERE video_id = selected.id) AS memo_count
+        FROM selected
+        ORDER BY selected.updated_at DESC, selected.id DESC
+        """.replace("{where}", where),
+        (*parameters, page_size, (page - 1) * page_size),
+    ).fetchall()
 
     return [_row_to_dict(row) for row in rows], total, page
 
@@ -252,11 +266,15 @@ def list_videos_page(page: int, page_size: int = 24, tag: str = "") -> tuple[lis
 def list_available_tags() -> list[dict[str, Any]]:
     init_db()
     with _connect() as connection:
-        rows = connection.execute(
-            """SELECT tag_key, MIN(tag) AS tag, COUNT(DISTINCT memos.video_id) AS video_count
-               FROM memo_tags JOIN memos ON memos.id = memo_tags.memo_id
-               GROUP BY tag_key ORDER BY tag_key"""
-        ).fetchall()
+        return _list_available_tags(connection)
+
+
+def _list_available_tags(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """SELECT tag_key, MIN(tag) AS tag, COUNT(DISTINCT memos.video_id) AS video_count
+           FROM memo_tags JOIN memos ON memos.id = memo_tags.memo_id
+           GROUP BY tag_key ORDER BY tag_key"""
+    ).fetchall()
     return [_row_to_dict(row) for row in rows]
 
 

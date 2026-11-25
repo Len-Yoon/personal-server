@@ -195,8 +195,10 @@ class BookReliabilityTests(unittest.TestCase):
             service.create_chapter(book['id'], '목차')
             chapter = service.list_chapters(book['id'])[0]
             newer = {**chapter, 'is_done': 1, 'version': 2}
-            with patch('app.main.list_chapters', side_effect=[[chapter], [newer]]):
+            with patch.object(service, '_list_chapters_by_book',
+                              side_effect=[{book['id']: [chapter]}, {book['id']: [newer]}]) as load_chapters:
                 html = TestClient(app).get('/').text
+            load_chapters.assert_called_once()
             import html as html_module
             versions = re.search(r'name="expected_versions" value="([^"]+)"', html)
             self.assertEqual(html_module.unescape(versions.group(1)), '{"1": 1}')
