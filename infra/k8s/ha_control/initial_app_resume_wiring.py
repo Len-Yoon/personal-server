@@ -56,7 +56,7 @@ def sample_pair(plan, plan_pin, terminal_raw, challenge, incarnation, *, connect
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import ExitStack
     from ha_control.initial_pg_lease import InitialPgLeaseRecovery
-    from ha_control.initial_postboot import scope, published_postboot
+    from ha_control import initial_postboot
     from ha_control.initial_unpublished import derive_predecessor
     from ha_runtime.effects import Binding, validate_catalog
 
@@ -67,8 +67,11 @@ def sample_pair(plan, plan_pin, terminal_raw, challenge, incarnation, *, connect
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
-    postboot = scope(plan)
-    require(published_postboot(postboot) and set(plan['pg_nodes']) == {'A', 'B'})
+    postboot = initial_postboot.scope(plan)
+    # The sampler runs inside the installed Windows package. Releases before
+    # saved reboot recognize the original same-boot plan and no other mode.
+    published = getattr(initial_postboot, 'published_postboot', initial_postboot.sameboot)
+    require(published(postboot) and set(plan['pg_nodes']) == {'A', 'B'})
     terminal_pin = postboot['predecessor_terminal_sha256']
     _, revision, _ = derive_predecessor(terminal_raw, terminal_pin, published=True)
     prior = json.loads(terminal_raw)

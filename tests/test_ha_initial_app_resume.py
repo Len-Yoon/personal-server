@@ -1076,6 +1076,8 @@ class SuccessorAppWiringTests(unittest.TestCase):
 
     def test_actual_pair_sampler_checks_both_read_only_nodes_and_exact_revision(self):
         from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from ha_control import initial_postboot
         from ha_control.initial_pg_lease import InitialPgLeaseRecovery
         from ha_runtime import effects
         app, stage, request = self.fixture()
@@ -1117,6 +1119,10 @@ class SuccessorAppWiringTests(unittest.TestCase):
             self.assertEqual(set(value['observations']),{'A','B'})
             self.assertEqual(sum(query=='close' for _,query in traces),2)
             self.assertFalse(any(query.startswith(('INSERT','UPDATE','DELETE','ALTER')) for _,query in traces))
+            legacy_postboot = SimpleNamespace(scope=initial_postboot.scope, sameboot=initial_postboot.sameboot)
+            with patch('ha_control.initial_postboot', legacy_postboot):
+                legacy = app.sample_pair(plan,stage.proof_inputs.plan_sha256,stage.terminal,'a'*64,'b'*64,connect=connect)
+                self.assertEqual(legacy['lease_sha256'], value['lease_sha256'])
             bad_revision=True
             with self.assertRaisesRegex(ValueError,'successor_pair_unverified'):
                 app.sample_pair(plan,stage.proof_inputs.plan_sha256,stage.terminal,'a'*64,'b'*64,connect=connect)
