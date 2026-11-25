@@ -1353,6 +1353,17 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         import time
         self.clock = time.monotonic
 
+    def saved_scope(self):
+        plan, files = SamebootPostbootSealTests().saved_reboot_fixture()
+        seal = json.loads(files[FILES[3]])
+        self.saved_vm_ids = {node: value['vm_id_sha256'] for node, value in seal['guests'].items()}
+        self.old_boot = seal['windows_boot_sha256']
+        self.new_boot = plan['windows_initial_observer']['windows_boot_sha256']
+        self.partial_save = False
+        self.driver.scope = self.module._scope(self.scope | {
+            'saved_reboot': True, 'previous_windows_boot_sha256': self.old_boot,
+            'saved_vm_pair_sha256': self.module._digest(self.saved_vm_ids)})
+
     def guard(self, request, _chain, _deadline, *, observe_only):
         stage = json.loads(request)['stage']
         self.calls.append(('guard-observe' if observe_only else 'guard', stage))
@@ -1362,8 +1373,25 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         import hashlib
         stage = json.loads(request)['stage']
         self.calls.append((kind, stage))
+        carryover = 'e3' * 32 if getattr(self, 'partial_save', False) else self.carryover
         if kind == 'apply' and stage == self.fail_apply:
             raise OSError('unconfirmed side effect')
+        if stage in (*self.module.SAVED_STAGES, 'restore_saved_guests'):
+            old = stage in {'save_guests','restore_saved_guests'}
+            running = stage in {'resume_guests','restore_saved_guests'}
+            snapshot = {'windows_boot_sha256':self.old_boot if old else self.new_boot,
+                        'vm_id_sha256':self.saved_vm_ids, 'states':dict.fromkeys(('A','B'), 'Running' if running else 'Saved'),
+                        'plan_sha256':self.scope['previous_plan_sha256'],
+                        'binding_sha256':self.scope['previous_instance_sha256'], 'terminal_sha256':self.terminal}
+            status = 'PASS'
+            if stage == 'save_guests' and self.partial_save and kind == 'observe':
+                snapshot['states']['B'] = 'Running'
+                status = 'REJECTED'
+            if running:
+                snapshot['closed_pair'] = {'closed_nodes':['A','B'], 'revision':15, 'synchronous':True,
+                     'same_expiry':True, 'replay_verified':True, 'effects_isolated':True,
+                     'terminal_sha256':self.terminal, 'closed_proof_sha256':'c3'*32}
+            return {'issued_sha256':hashlib.sha256(request).hexdigest(),'status':status,'evidence':snapshot}
         if stage == 'replace_provider' and self.reject_provider:
             return {'issued_sha256': hashlib.sha256(request).hexdigest(),
                     'status': 'REJECTED', 'evidence': {'replacement_failed': True}}
@@ -1386,10 +1414,12 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                                  'rollback_sha256': '6' * 64},
             'carryover': {'history_sha256': self.scope['history_sha256'], 'carryover_sha256': self.carryover,
                           'held_observation_sha256': self.carryover},
+            'fallback_carryover': {'history_sha256': self.scope['history_sha256'], 'carryover_sha256': carryover,
+                                   'held_observation_sha256': carryover},
             'stage_runtime': {'runtime_stage_sha256': 'e' * 64, 'old_runtime_preserved': True,
                               'authority_issued': False, 'manifest_sha256': self.scope['runtime_manifest_sha256']},
             'arm_host': {'successor_image_sha256': self.scope['successor_image_sha256'], 'plan_sha256': self.plan,
-                         'carryover_sha256': self.carryover, 'service_stopped': True},
+                         'carryover_sha256': carryover, 'service_stopped': True},
             'publish': {'plan_sha256': self.plan, 'instance_sha256': self.instance, 'publication_sha256': 'f' * 64,
                         'revision': 16, 'writers': ['A'], 'standby_node': 'B', 'synchronous': True,
                         'predecessor_instance_stopped': True},
@@ -1533,8 +1563,8 @@ class SamebootTransitionDriverTests(unittest.TestCase):
         driver = NativeSamebootDriver(release=release, platform=platform, windows=None, successor_options={},
                                       paired_publication=None, apps_factory=None)
         chain = encode({'close_pair': closed, 'arm_host': {'plan_sha256': self.plan}})
-        arm = encode({'stage': 'arm_host', 'plan_material_sha256': self.plan})
-        publish = encode({'stage': 'publish'})
+        arm = encode({'stage': 'arm_host', 'plan_material_sha256': self.plan, 'scope': self.scope})
+        publish = encode({'stage': 'publish', 'scope': self.scope})
         deadline = self.clock() + 10
         with patch.object(driver, '_host', return_value=host):
             self.assertTrue(driver.guard(arm, chain, deadline, observe_only=False))
@@ -1581,8 +1611,8 @@ class SamebootTransitionDriverTests(unittest.TestCase):
                 driver.guard(arm, chain, deadline, observe_only=False)
 
     def test_saved_reboot_journal_binds_archival_and_fresh_closed_proofs(self):
-        self.driver.scope = self.module._scope(self.scope | {'saved_reboot': True})
-        for _ in range(6):
+        self.saved_scope()
+        for _ in range(9):
             self.step()
         plan, files = SamebootPostbootSealTests().saved_reboot_fixture()
         plan['saved_reboot_runtime_manifest_sha256'] = self.scope['runtime_manifest_sha256']
@@ -1600,6 +1630,173 @@ class SamebootTransitionDriverTests(unittest.TestCase):
             self.step()
             self.assertIn(('apply','arm_host'), self.calls)
             self.assertTrue(bind.call_args.kwargs['allow_saved_reboot'])
+
+    def test_lost_reboot_response_only_observes_reconnect_then_resumes(self):
+        self.saved_scope()
+        for _ in range(7):
+            self.step()
+        self.assertEqual(self.driver.status()['stage'], 'reboot_windows')
+        self.fail_apply = 'reboot_windows'
+        with self.assertRaises(OSError):
+            self.step()
+        self.assertTrue(self.driver.status()['observe_only'])
+        with self.assertRaises(TransitionBlocked):
+            self.step()
+        self.step(observe_only=True)
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'arm_host')
+        self.assertEqual(self.calls.count(('apply','reboot_windows')), 1)
+        self.assertEqual(self.calls.count(('apply','resume_guests')), 1)
+
+    def test_partial_save_recovers_a_and_apps_in_old_boot_without_issuing_reboot(self):
+        self.saved_scope()
+        for _ in range(6):
+            self.step()
+        self.fail_apply = 'save_guests'
+        self.partial_save = True
+        now = self.clock()
+        portal = dict(landing_http=200, health_http=[200, 200, 200],
+                      health_started_monotonic=[now-21, now-11, now-1])
+        def fallback_material(_operation, _chain, _deadline):
+            plan, files = SamebootPostbootSealTests().transition_fixture()
+            plan['initial_recovery_postboot']['attempt_id'] = self.module._fallback_attempt(self.driver.scope)
+            plan['windows_initial_observer']['windows_boot_sha256'] = self.old_boot
+            return {'candidate': plan, 'plan_pin': self.plan, 'files': files, 'previous_raw': b''}
+
+        bound = self.arm_binding() | {'closed_proof_sha256': 'c3' * 32, 'carryover_sha256': 'e3' * 32}
+        with (patch.object(self.module.time, 'sleep'),
+              patch.object(self.module, 'observe_portal', return_value=portal),
+              patch.object(self, 'arm_material', side_effect=fallback_material),
+              patch.object(self.module, 'bind_successor_plan', return_value=bound) as bind):
+            result = self.driver.run_saved(self.clock() + 100)
+        self.assertEqual(result['status'], 'RECOVERED_WITHOUT_REBOOT')
+        self.assertFalse(bind.call_args.kwargs['allow_saved_reboot'])
+        self.assertIn(('observe','save_guests'), self.calls)
+        self.assertNotIn(('apply','reboot_windows'), self.calls)
+        self.assertEqual([stage for kind, stage in self.calls if kind == 'apply'][-5:],
+                         ['restore_saved_guests', 'fallback_carryover', 'arm_host', 'publish', 'start_apps'])
+
+    def test_only_an_authenticated_unissued_reboot_cancellation_opens_fallback(self):
+        self.saved_scope()
+        for _ in range(7):
+            self.step()
+        self.fail_apply = 'reboot_windows'
+        with self.assertRaises(OSError):
+            self.step()
+        self.assertEqual(self.driver.status()['stage'], 'reboot_windows')
+
+        def cancellation(request, chain, _deadline):
+            evidence = json.loads(chain)['save_guests']
+            return {'issued_sha256': self.module._digest(json.loads(request)), 'status': 'REJECTED',
+                    'evidence': evidence}
+
+        with patch.object(self, 'cancel_unissued_reboot', side_effect=OSError, create=True):
+            with self.assertRaises(OSError):
+                self.driver._cancel_unissued_reboot(self.clock() + 10)
+        self.assertEqual(self.driver.status()['stage'], 'reboot_windows')
+        with patch.object(self, 'cancel_unissued_reboot', side_effect=cancellation, create=True):
+            self.driver._cancel_unissued_reboot(self.clock() + 10)
+        self.assertEqual(self.driver.status()['stage'], 'restore_saved_guests')
+        self.step()
+        self.assertEqual(self.driver.status()['stage'], 'fallback_carryover')
+        self.assertEqual(self.calls.count(('apply','reboot_windows')), 1)
+
+    def test_lost_app_reply_uses_native_completion_without_starting(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from ha_control.native_sameboot_driver import NativeSamebootDriver
+
+        self.saved_scope()
+        platform, app, host = Mock(), Mock(), Mock()
+        app.reconcile.return_value = {'service_instance_sha256': self.instance, 'receipt_sha256': 'e' * 64}
+        driver = NativeSamebootDriver(release=None, platform=platform, windows=None, successor_options={},
+                                      paired_publication=None, apps_factory=lambda *_: app)
+        operation = {'scope': self.driver.scope, 'stage': 'start_apps', 'nonce': 'a' * 64}
+        publication = {'service_instance_sha256': self.instance, 'first_write_proof_sha256': 'f' * 64}
+        host.observe_publication.return_value = publication
+        chain = {'publish': {'instance_sha256': self.instance, 'publication_sha256': 'f' * 64}}
+        arguments = {'request': SimpleNamespace(nonce=operation['nonce']), 'authorization': {},
+                     'assert_guard': Mock(), 'prior_resume': None, 'expected_receipt_sha256': None}
+        platform.read_app_operation.return_value = arguments
+        deadline = self.clock() + 10
+        with patch.object(driver, '_host', return_value=host), \
+             patch.object(driver, '_publication', return_value=chain['publish']):
+            self.assertEqual(driver._apps(operation, chain, deadline, observe_only=True), {
+                'instance_sha256': self.instance, 'startup_sha256': 'e' * 64,
+                'ready': list(self.module.RECOVERY_START_ORDER)})
+            app.reconcile.assert_called_once_with(deadline=deadline, **arguments)
+            arguments['request'].nonce = 'b' * 64
+            with self.assertRaises(TransitionBlocked):
+                driver._apps(operation, chain, deadline, observe_only=True)
+        app.start.assert_not_called()
+        platform.app_operation.assert_not_called()
+
+    def test_native_saved_boundary_requires_closure_and_observes_new_boot(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from ha_control import native_saved_reboot as native
+        from ha_control.native_sameboot_driver import NativeSamebootDriver
+
+        self.saved_scope()
+        scope = self.driver.scope
+        previous_boot = scope['previous_windows_boot_sha256']
+        def evidence(stage):
+            return self.result(self.module._encoded({'stage': stage}), 'observe')['evidence']
+
+        closure = evidence('close_pair')
+        pair = object.__new__(native.WindowsPairClosure)
+        pair.config = {
+            'boot_sha256': previous_boot,
+            'revision': scope['previous_revision'],
+            'plan': r'C:\recovery\plan.json',
+            'plan_sha256': self.scope['previous_plan_sha256'],
+            'binding': r'C:\recovery\binding.json',
+            'binding_sha256': self.scope['previous_instance_sha256'],
+        }
+        pair.windows = Mock()
+        saved = evidence('save_guests')
+        adapter = native.WindowsSavedReboot(pair, script_sha256='1' * 64, boot_task_sha256='2' * 64,
+                                          boot_script_sha256='3' * 64, vm_ids=saved['vm_id_sha256'])
+        operation = {'scope': scope, 'stage': 'save_guests', 'nonce': 'b' * 64}
+        receipts = {'close_pair': closure}
+        deadline = self.clock() + 20
+        with patch.object(pair, '_command', return_value=('probe', 'a' * 64)), \
+             patch.object(adapter, '_boot_task_command', return_value='bootProbe'), \
+             patch.object(native, 'fixed_script', return_value='pinned') as script:
+            platform = Mock()
+            driver = NativeSamebootDriver(release=SimpleNamespace(pair=pair), platform=platform,
+                                          windows=None, successor_options={}, paired_publication=None,
+                                          apps_factory=None, saved_boot=adapter)
+            pair.windows.powershell.return_value = {'result': 'ready_to_register'}
+            preflight = self.module._encoded(operation | {'stage': 'preflight'})
+            with self.assertRaises(TransitionBlocked):
+                driver.guard(preflight, b'{}', deadline, observe_only=False)
+            platform.guard.assert_not_called()
+
+            with self.assertRaises(TransitionBlocked):
+                adapter.run(operation, {'close_pair': closure | {'closed_nodes': ['A']}},
+                            deadline, observe_only=False)
+            script.assert_not_called()
+            pair.windows.powershell.return_value = saved | {'mode': 'SavePair'}
+            self.assertEqual(adapter.run(operation, receipts, deadline, observe_only=False), saved)
+            self.assertIn('-ClosureProbe {probe}', pair.windows.powershell.call_args.args[0])
+            self.assertIn('-BootTaskProbe {bootProbe}', pair.windows.powershell.call_args.args[0])
+            operation['stage'] = 'reboot_windows'
+            with self.assertRaises(TransitionBlocked):
+                adapter.run(operation, receipts, deadline, observe_only=False)
+            script.assert_called_once()
+            receipts['save_guests'] = saved
+            pair.windows.powershell.side_effect = [saved | {'mode': 'Reboot'}, saved | {'mode': 'Observe'}]
+            with self.assertRaises(TransitionBlocked):
+                adapter.run(operation, receipts, deadline, observe_only=False)
+            recovered = evidence('reboot_windows')
+            pair.windows.powershell.side_effect = [recovered | {'mode': 'Observe'}]
+            self.assertEqual(adapter.run(operation, receipts, deadline, observe_only=True), recovered)
+            self.assertEqual([call.args[2]['Mode'] for call in script.call_args_list],
+                             ['SavePair', 'Reboot', 'Observe', 'Observe'])
+            self.assertEqual(script.call_args_list[1].args[2]['RebootNonce'], operation['nonce'])
 
     def test_native_successor_builder_preserves_validated_predecessor_material(self):
         from pathlib import PureWindowsPath

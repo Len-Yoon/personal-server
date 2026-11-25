@@ -12,17 +12,20 @@ import stat
 import time
 
 from .controller import TransitionBlocked, exclusive
-from .native_stdio_bridge import RECOVERY_START_ORDER
+from .native_stdio_bridge import BridgeRejected, RECOVERY_START_ORDER
 
 STAGES = (
     'preflight', 'retire_provider', 'close_pair', 'replace_provider',
     'carryover', 'stage_runtime', 'arm_host', 'publish', 'start_apps', 'portal',
 )
+SAVED_STAGES = ('save_guests', 'reboot_windows', 'resume_guests')
+RECOVERED_WITHOUT_REBOOT = 'RECOVERED_WITHOUT_REBOOT'
 READ_ONLY = {'preflight', 'close_pair', 'portal'}
 HASH = re.compile(r'[0-9a-f]{64}')
 SCOPE_FIELDS = {'attempt_sha256', 'previous_plan_sha256', 'previous_instance_sha256',
                 'history_sha256', 'successor_image_sha256', 'runtime_manifest_sha256',
                 'previous_revision', 'driver_sha256'}
+SAVED_SCOPE_FIELDS = {'saved_reboot', 'saved_vm_pair_sha256', 'previous_windows_boot_sha256'}
 ERROR = 'sameboot_transition_unconfirmed'
 
 
@@ -63,7 +66,8 @@ def _digest(value):
 def _scope(value):
     _need(type(value) is dict and
           (set(value) == SCOPE_FIELDS or
-           (set(value) == SCOPE_FIELDS | {'saved_reboot'} and value['saved_reboot'] is True)))
+           (set(value) == SCOPE_FIELDS | SAVED_SCOPE_FIELDS and value['saved_reboot'] is True
+            and _pin(value['saved_vm_pair_sha256']) and _pin(value['previous_windows_boot_sha256']))))
     _need(all(_pin(value[key]) for key in SCOPE_FIELDS - {'previous_revision'}))
     revision = value['previous_revision']
     _need(type(revision) is int and 0 < revision < 2**63 - 3 and revision % 2 == 0)
@@ -71,7 +75,7 @@ def _scope(value):
 
 
 def _closed(value, revision, terminal):
-    return (value.get('closed_nodes') == ['A', 'B']
+    return (type(value) is dict and value.get('closed_nodes') == ['A', 'B']
             and value.get('synchronous') is True
             and value.get('same_expiry') is True
             and value.get('replay_verified') is True
@@ -79,6 +83,38 @@ def _closed(value, revision, terminal):
             and type(value.get('revision')) is int and value['revision'] == revision
             and value.get('terminal_sha256') == terminal
             and _pin(value.get('closed_proof_sha256')))
+
+
+def _saved_snapshot(value, scope, receipts, *, has_closed_pair=False):
+    expected = {'windows_boot_sha256', 'vm_id_sha256', 'states', 'plan_sha256',
+                'binding_sha256', 'terminal_sha256'}
+    if has_closed_pair:
+        expected.add('closed_pair')
+    _need(type(value) is dict and set(value) == expected and scope.get('saved_reboot') is True
+          and _pin(value['windows_boot_sha256'])
+          and type(value['vm_id_sha256']) is dict and set(value['vm_id_sha256']) == {'A', 'B'}
+          and all(_pin(pin) for pin in value['vm_id_sha256'].values())
+          and value['vm_id_sha256']['A'] != value['vm_id_sha256']['B']
+          and _digest(value['vm_id_sha256']) == scope['saved_vm_pair_sha256']
+          and value['plan_sha256'] == scope['previous_plan_sha256']
+          and value['binding_sha256'] == scope['previous_instance_sha256']
+          and value['terminal_sha256'] == receipts['close_pair']['terminal_sha256'])
+
+
+def _save_rejected(value, scope, receipts):
+    _saved_snapshot(value, scope, receipts)
+    _need(value['windows_boot_sha256'] == scope['previous_windows_boot_sha256']
+          and value['states'] in ({'A': 'Running', 'B': 'Running'}, {'A': 'Saved', 'B': 'Running'}))
+
+
+def _expects_reboot(scope, receipts):
+    return scope.get('saved_reboot') is True and 'restore_saved_guests' not in receipts
+
+
+def _fallback_attempt(scope):
+    return _digest({'purpose': 'recover_partial_vm_save', 'attempt_sha256': scope['attempt_sha256'],
+                    'previous_plan_sha256': scope['previous_plan_sha256'],
+                    'history_sha256': scope['history_sha256']})
 
 
 def bind_successor_plan(candidate, previous_raw, plan_pin, files, *, allow_saved_reboot=False):
@@ -164,19 +200,38 @@ def _validate(stage, value, scope, receipts):
         _need(set(value) == {'old_port_owner_verified', 'old_provider_proof_sha256', 'rollback_sha256'})
         _need(value['old_port_owner_verified'] is True and _pin(value['old_provider_proof_sha256'])
               and value['rollback_sha256'] == receipts['preflight']['rollback_sha256'])
-    elif stage == 'carryover':
+    elif stage in {'carryover', 'fallback_carryover'}:
         _need(set(value) == {'history_sha256', 'carryover_sha256', 'held_observation_sha256'})
         _need(value['history_sha256'] == scope['history_sha256'] and _pin(value['carryover_sha256'])
               and value['held_observation_sha256'] == value['carryover_sha256'])
+        if stage == 'fallback_carryover':
+            _need(value['carryover_sha256'] != receipts['carryover']['carryover_sha256'])
     elif stage == 'stage_runtime':
         _need(set(value) == {'runtime_stage_sha256', 'manifest_sha256', 'old_runtime_preserved', 'authority_issued'})
         _need(_pin(value['runtime_stage_sha256']) and value['manifest_sha256'] == scope['runtime_manifest_sha256']
               and value['old_runtime_preserved'] is True
               and value['authority_issued'] is False)
+    elif stage == 'save_guests':
+        _saved_snapshot(value, scope, receipts)
+        _need(value['windows_boot_sha256'] == scope['previous_windows_boot_sha256']
+              and value['states'] == {'A': 'Saved', 'B': 'Saved'})
+    elif stage == 'reboot_windows':
+        _saved_snapshot(value, scope, receipts)
+        _need(value['windows_boot_sha256'] != receipts['save_guests']['windows_boot_sha256']
+              and value['states'] in ({'A':'Saved','B':'Saved'}, {'A':'Saved','B':'Running'},
+                                      {'A':'Running','B':'Running'}))
+    elif stage in {'resume_guests', 'restore_saved_guests'}:
+        _saved_snapshot(value, scope, receipts, has_closed_pair=True)
+        boot = (scope['previous_windows_boot_sha256'] if stage == 'restore_saved_guests' else
+                receipts['reboot_windows']['windows_boot_sha256'])
+        _need(value['windows_boot_sha256'] == boot and value['states'] == {'A':'Running','B':'Running'}
+              and type(value['closed_pair']) is dict
+              and _closed(value['closed_pair'], revision + 1, value['terminal_sha256']))
     elif stage == 'arm_host':
         _need(set(value) == {'successor_image_sha256', 'plan_sha256', 'carryover_sha256', 'service_stopped'})
+        carryover = receipts.get('fallback_carryover', receipts['carryover'])
         _need(value['successor_image_sha256'] == scope['successor_image_sha256'] and _pin(value['plan_sha256'])
-              and value['carryover_sha256'] == receipts['carryover']['carryover_sha256']
+              and value['carryover_sha256'] == carryover['carryover_sha256']
               and value['service_stopped'] is True)
     elif stage == 'publish':
         _need(set(value) == {'plan_sha256', 'instance_sha256', 'publication_sha256', 'revision',
@@ -255,7 +310,11 @@ class SamebootTransition:
         allowed = {'lock'}
         receipts = {}
         previous = None
-        for stage in STAGES:
+        boundary = STAGES.index('arm_host')
+        stages = list(STAGES)
+        if self.scope.get('saved_reboot'):
+            stages[boundary:boundary] = SAVED_STAGES
+        for index, stage in enumerate(stages):
             allowed.update({stage + '.issued.json', stage + '.observed.json'})
             issued = self._read(stage + '.issued.json')
             result = self._read(stage + '.observed.json')
@@ -270,9 +329,26 @@ class SamebootTransition:
             _need(set(result) == {'issued_sha256', 'status', 'evidence'}
                   and result['issued_sha256'] == _digest(issued))
             if result['status'] == 'REJECTED':
-                _need(stage == 'replace_provider' and result['evidence'] == {'replacement_failed': True})
-                self._check_entries(allowed | {'restore_provider.issued.json', 'restore_provider.observed.json'})
-                return 'restore_provider', _digest(result), receipts, self._read('restore_provider.issued.json')
+                if stage == 'save_guests':
+                    _save_rejected(result['evidence'], self.scope, receipts)
+                    receipts['save_rejected'] = result['evidence']
+                    # Keep the pre-save attestation intact. The same-boot
+                    # plan pins a different carryover for a new attempt.
+                    stages[index + 1:index + 3] = ['restore_saved_guests', 'fallback_carryover']
+                    previous = _digest(result)
+                    continue
+                elif stage == 'reboot_windows':
+                    _validate('save_guests', result['evidence'], self.scope, receipts)
+                    _need(result['evidence'] == receipts['save_guests'])
+                    receipts['reboot_cancelled'] = {'saved': result['evidence'], 'nonce': issued['nonce']}
+                    stages[index + 1:index + 2] = ['restore_saved_guests', 'fallback_carryover']
+                    previous = _digest(result)
+                    continue
+                else:
+                    _need(stage == 'replace_provider' and result['evidence'] == {'replacement_failed': True})
+                    restore = 'restore_provider'
+                self._check_entries(allowed | {restore + '.issued.json', restore + '.observed.json'})
+                return restore, _digest(result), receipts, self._read(restore + '.issued.json')
             _need(result['status'] == 'PASS')
             _validate(stage, result['evidence'], self.scope, receipts)
             if stage == 'arm_host':
@@ -290,10 +366,11 @@ class SamebootTransition:
         with exclusive(self.directory / 'lock'):
             stage, previous, receipts, issued = self._position()
             if stage == 'restore_provider':
-                record = self._restored(previous, receipts, issued)
+                record = self._restored(stage, previous, receipts, issued)
                 if record:
                     return record
-            return {'status': 'COMPLETE' if stage is None else 'PENDING', 'stage': stage,
+            complete = RECOVERED_WITHOUT_REBOOT if 'restore_saved_guests' in receipts else 'COMPLETE'
+            return {'status': complete if stage is None else 'PENDING', 'stage': stage,
                     'observe_only': issued is not None, 'previous_sha256': previous}
 
     def _check_issued(self, issued, stage, previous):
@@ -304,25 +381,28 @@ class SamebootTransition:
               and (_pin(issued['plan_material_sha256']) if stage == 'arm_host'
                    else issued['plan_material_sha256'] is None))
 
-    def _restored(self, previous, receipts, issued):
-        record = self._read('restore_provider.observed.json')
+    def _restored(self, stage, previous, receipts, issued):
+        record = self._read(stage + '.observed.json')
         if record is None:
             return None
-        self._check_issued(issued, 'restore_provider', previous)
+        self._check_issued(issued, stage, previous)
         _need(set(record) == {'issued_sha256', 'status', 'evidence'}
               and record['issued_sha256'] == _digest(issued) and record['status'] == 'PASS')
-        _validate('restore_provider', record['evidence'], self.scope, receipts)
+        _validate(stage, record['evidence'], self.scope, receipts)
         return {'status': 'PROVIDER_RESTORED', 'receipt_sha256': _digest(record)}
 
-    def step(self, deadline, *, observe_only=False):
+    def step(self, deadline, *, observe_only=False, expected_stage=None):
         """Run the next phase once, or reconcile its prior request without reissuing it."""
         self._private()
         with exclusive(self.directory / 'lock'):
             stage, previous, receipts, issued = self._position()
+            _need(expected_stage is None or stage == expected_stage,
+                  'sameboot_transition_stage_changed')
             if stage is None:
-                return {'status': 'COMPLETE', 'receipt_sha256': previous}
+                complete = RECOVERED_WITHOUT_REBOOT if 'restore_saved_guests' in receipts else 'COMPLETE'
+                return {'status': complete, 'receipt_sha256': previous}
             if stage == 'restore_provider':
-                record = self._restored(previous, receipts, issued)
+                record = self._restored(stage, previous, receipts, issued)
                 if record:
                     return record
             if issued is not None:
@@ -337,19 +417,32 @@ class SamebootTransition:
                 material = self.driver.arm_material(_encoded(issued), _encoded(receipts), deadline)
                 _need(type(material) is dict and set(material) == {'candidate', 'previous_raw', 'plan_pin', 'files'})
                 from .initial_postboot import FILES, saved_reboot, scope as postboot_scope
-                expects_reboot = self.scope.get('saved_reboot', False)
+                expects_reboot = _expects_reboot(self.scope, receipts)
                 arm = bind_successor_plan(**material, allow_saved_reboot=expects_reboot)
                 if expects_reboot:
                     _need(saved_reboot(postboot_scope(material['candidate'])))
                     pre = json.loads(material['files'][FILES[3]])
+                    resumed = receipts['resume_guests']
                     _need(pre['closed_pair_sha256'] == receipts['close_pair']['closed_proof_sha256']
                           and material['candidate']['saved_reboot_runtime_manifest_sha256']
-                          == self.scope['runtime_manifest_sha256'])
+                          == self.scope['runtime_manifest_sha256']
+                          and {node: data['vm_id_sha256'] for node, data in pre['guests'].items()}
+                          == resumed['vm_id_sha256']
+                          and material['candidate']['windows_initial_observer']['windows_boot_sha256']
+                          == resumed['windows_boot_sha256'])
                     fresh = json.loads(material['files'][FILES[4]])['closed_pair_sha256']
+                    _need(fresh == resumed['closed_pair']['closed_proof_sha256'])
+                elif 'restore_saved_guests' in receipts:
+                    restored = receipts['restore_saved_guests']
+                    _need(material['candidate']['windows_initial_observer']['windows_boot_sha256']
+                          == restored['windows_boot_sha256']
+                          and postboot_scope(material['candidate'])['attempt_id'] == _fallback_attempt(self.scope))
+                    fresh = restored['closed_pair']['closed_proof_sha256']
                 else:
                     fresh = receipts['close_pair']['closed_proof_sha256']
+                carryover = receipts.get('fallback_carryover', receipts['carryover'])
                 _need(arm == {'plan_sha256': material['plan_pin'],
-                              'carryover_sha256': receipts['carryover']['carryover_sha256'],
+                              'carryover_sha256': carryover['carryover_sha256'],
                               'successor_image_sha256': self.scope['successor_image_sha256'],
                               'terminal_sha256': receipts['retire_provider']['terminal_sha256'],
                               'closed_proof_sha256': fresh,
@@ -374,7 +467,11 @@ class SamebootTransition:
             _need(type(reply) is dict and set(reply) == {'issued_sha256', 'status', 'evidence'}
                   and reply['issued_sha256'] == _digest(issued))
             if reply['status'] == 'REJECTED':
-                _need(stage == 'replace_provider' and reply['evidence'] == {'replacement_failed': True})
+                if stage == 'save_guests':
+                    _need(observe_only)
+                    _save_rejected(reply['evidence'], self.scope, receipts)
+                else:
+                    _need(stage == 'replace_provider' and reply['evidence'] == {'replacement_failed': True})
             else:
                 _need(reply['status'] == 'PASS')
                 _validate(stage, reply['evidence'], self.scope, receipts)
@@ -384,10 +481,52 @@ class SamebootTransition:
                 return {'status': 'PROVIDER_RESTORED', 'receipt_sha256': _digest(reply)}
             return {'status': reply['status'], 'stage': stage, 'receipt_sha256': _digest(reply)}
 
+    def run_saved(self, deadline):
+        """Continue one protected saved-VM journal across a host disconnect."""
+        _need(self.scope.get('saved_reboot') is True)
+        reconcile = {*SAVED_STAGES, 'restore_saved_guests', 'fallback_carryover', 'arm_host', 'publish', 'start_apps'}
+        while time.monotonic() < deadline:
+            before = self.status()
+            if before['status'] != 'PENDING':
+                return before
+            try:
+                self.step(deadline, observe_only=before['observe_only'], expected_stage=before['stage'])
+            except (BridgeRejected, OSError, TransitionBlocked):
+                # The write-ahead record is the authority for whether an
+                # operation can be retried. After disconnect, poll readback
+                # only, including when shutdown gave a successful exit code.
+                pending = self.status()
+                if (pending['status'] != 'PENDING' or pending['stage'] != before['stage']
+                        or not pending['observe_only'] or pending['stage'] not in reconcile):
+                    raise
+                if before['stage'] == 'reboot_windows' and before['observe_only']:
+                    try:
+                        self._cancel_unissued_reboot(deadline)
+                        continue
+                    except (BridgeRejected, OSError, TransitionBlocked):
+                        # A prior dispatch fence, a changed boot, or unavailable
+                        # SSH leaves reboot pending. Never restore on uncertainty.
+                        pass
+                delay = min(5, deadline - time.monotonic())
+                if delay > 0:
+                    time.sleep(delay)
+        raise TransitionBlocked('saved_reboot_reconciliation_pending')
+
+    def _cancel_unissued_reboot(self, deadline):
+        self._private()
+        with exclusive(self.directory / 'lock'):
+            stage, previous, receipts, issued = self._position()
+            _need(stage == 'reboot_windows' and issued is not None and time.monotonic() < deadline)
+            self._check_issued(issued, stage, previous)
+            reply = self.driver.cancel_unissued_reboot(_encoded(issued), _encoded(receipts), deadline)
+            _need(reply == {'issued_sha256': _digest(issued), 'status': 'REJECTED',
+                            'evidence': receipts['save_guests']})
+            self._write(stage + '.observed.json', reply)
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('status', 'step', 'observe'))
+    parser.add_argument('mode', choices=('status', 'step', 'observe', 'run-saved'))
     parser.add_argument('--journal', type=Path, required=True)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--scope-sha256', required=True)
@@ -409,18 +548,23 @@ def main(argv=None):
             exec(compile(source, str(args.driver), 'exec'), namespace)
             driver = namespace['DRIVER']
         transition = SamebootTransition(args.journal, scope, driver)
-        result = (transition.status() if args.mode == 'status'
-                  else transition.step(time.monotonic() + args.seconds, observe_only=args.mode == 'observe'))
+        if args.mode == 'status':
+            result = transition.status()
+        elif args.mode == 'run-saved':
+            result = transition.run_saved(time.monotonic() + args.seconds)
+        else:
+            result = transition.step(time.monotonic() + args.seconds, observe_only=args.mode == 'observe')
     except TransitionBlocked as error:
         reason = str(error)
         if reason not in {ERROR, 'sameboot_transition_journal_untrusted',
-                          'sameboot_transition_reconciliation_required', 'sameboot_transition_no_action_to_observe'}:
+                          'sameboot_transition_reconciliation_required', 'sameboot_transition_no_action_to_observe',
+                          'saved_reboot_reconciliation_pending'}:
             reason = ERROR
         result = {'status': 'BLOCKED', 'reason': reason}
     except Exception:
         result = {'status': 'BLOCKED', 'reason': ERROR}
     print(json.dumps(result, sort_keys=True))
-    return 1 if result['status'] in {'BLOCKED', 'REJECTED'} else 0
+    return 1 if result['status'] in {'BLOCKED', 'REJECTED', RECOVERED_WITHOUT_REBOOT} else 0
 
 
 if __name__ == '__main__':

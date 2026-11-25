@@ -14,7 +14,7 @@ import time
 
 from . import native_guest_runtime as runtime, native_stdio_bridge as wire
 from .controller import TransitionBlocked
-from .sameboot_transition import _digest, _encoded, _scope
+from .sameboot_transition import _digest, _encoded, _scope, _validate
 
 ERROR = "sameboot_release_unconfirmed"
 
@@ -111,10 +111,9 @@ class WindowsPairClosure:
         self.config = config.copy()
         self.files = files
 
-    def _call(self, mode, deadline, terminal_sha256=None, *, successor=None, verify_runtime=False,
-              resumed_windows_boot=None):
-        _need(mode in {"snapshot", "disable", "closed", "closed_after_arm", "closed_before_disable"}
-              and time.monotonic() < deadline)
+    def _command(self, mode, terminal_sha256=None, *, successor=None, verify_runtime=False,
+                 resumed_windows_boot=None):
+        _need(mode in {"snapshot", "disable", "closed", "closed_after_arm", "closed_before_disable"})
         if mode != "snapshot":
             _need(wire._hash(terminal_sha256))
         if mode == "closed_after_arm":
@@ -139,9 +138,14 @@ class WindowsPairClosure:
             "$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);"
             "$r=[IO.StreamReader]::new($z,$enc);try{$cfg=ConvertFrom-Json ($r.ReadToEnd())}finally{$r.Dispose()}")
         header = WINDOWS_GUARD.replace("$cfg=ConvertFrom-Json ($enc.GetString([Convert]::FromBase64String('CFG')))", loader)
-        script = "try{\n" + header + WINDOWS_BODY + "\n}catch{exit 1}"
+        return header + WINDOWS_BODY, challenge
+
+    def _call(self, mode, deadline, terminal_sha256=None, **options):
+        _need(time.monotonic() < deadline)
+        source, challenge = self._command(mode, terminal_sha256, **options)
+        script = "try{\n" + source + "\n}catch{exit 1}"
         result = self.windows.powershell(script, deadline)
-        _need(type(result) is dict and result.get("challenge") == config["challenge"])
+        _need(type(result) is dict and result.get("challenge") == challenge)
         if mode == "snapshot":
             _need(set(result) == {"challenge", "status", "terminal_base64", "terminal_sha256", "disabled"}
                   and result["status"] in {"RUNNING", "STOPPED"} and type(result["disabled"]) is bool)
@@ -158,7 +162,7 @@ class WindowsPairClosure:
             result.pop("terminal_base64")
             return result
         if mode == "disable":
-            _need(result == {"challenge": config["challenge"], "status": "STOPPED_DISABLED",
+            _need(result == {"challenge": challenge, "status": "STOPPED_DISABLED",
                              "terminal_sha256": terminal_sha256})
             return result
         _need(set(result) == {"challenge", "status", "terminal_sha256", "proof_sha256", "closed_revision"}
@@ -310,10 +314,14 @@ class NativeSamebootRelease:
         # owner. Recheck the original Windows terminal and exact closed A/B
         # facts, while the enclosing custody guard verifies that new owner.
         _need(type(request) is dict and request.get("scope") == self.scope
-              and request.get("stage") in {"replace_provider", "restore_provider", "carryover", "stage_runtime", "arm_host"}
+              and request.get("stage") in {"replace_provider", "restore_provider", "carryover",
+                                           "fallback_carryover", "stage_runtime", "arm_host"}
               and wire._hash(request.get("nonce")) and wire._hash(request.get("previous_sha256"))
               and type(receipts) is dict and type(receipts.get("retire_provider")) is dict
               and type(receipts.get("close_pair")) is dict)
+        if request["stage"] == "fallback_carryover":
+            _need("reboot_windows" not in receipts and "resume_guests" not in receipts)
+            _validate("restore_saved_guests", receipts.get("restore_saved_guests"), self.scope, receipts)
         terminal = receipts["retire_provider"].get("terminal_sha256")
         _need(wire._hash(terminal) and receipts["close_pair"].get("terminal_sha256") == terminal)
         raw, chain = _encoded(request), _encoded(receipts)

@@ -157,7 +157,8 @@ def fixed_script(name, digest, parameters):
     """Load an approved colocated script and pass only scalar, shell-quoted values."""
     bridge._need(name in {'windows-ha-cutover-live-authority.ps1', 'windows-ha-start-initial-service.ps1',
                          'windows-ha-start-lease-observer.ps1', 'windows-ha-stage-initial-activation.ps1',
-                         'windows-ha-replacement-network.ps1', 'windows-guest-network.ps1'},
+                         'windows-ha-replacement-network.ps1', 'windows-guest-network.ps1',
+                         'windows-saved-reboot.ps1', 'windows-vm-boot-task.ps1'},
                  'native_windows_ssh_script_unapproved')
     if name == 'windows-guest-network.ps1':
         bridge._need(set(parameters) == {'Manifest', 'ManifestSha256', 'Go'} and parameters['Go'] is True
@@ -174,6 +175,8 @@ def fixed_script(name, digest, parameters):
             limit = {'IntentBase64': 5464, 'TransitionBundleBase64': 65536}.get(key, limit)
         if name == 'windows-guest-network.ps1' and key == 'Manifest':
             limit = 32768
+        if name == 'windows-vm-boot-task.ps1' and key == 'ScriptBase64':
+            limit = 16384
         bridge._need(re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', key) is not None
                      and (value is True or type(value) is str and 0 < len(value) <= limit and value.isascii()
                           and not any(character in value for character in '\x00\r\n')), 'native_windows_ssh_argument_invalid')

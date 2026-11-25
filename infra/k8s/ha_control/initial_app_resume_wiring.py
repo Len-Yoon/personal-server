@@ -386,6 +386,137 @@ print(json.dumps(result,sort_keys=True,separators=(',',':')))
     return result
 
 
+_COMPLETION_READ = r'''
+import os,time
+from ha_control import native_guest_worker as w,initial_app_resume as resume,native_stdio_bridge as wire
+deadline=time.monotonic()+CFG['budget']
+request=wire.Request(wire.Binding(**CFG['binding']),CFG['node'],CFG['verb'],CFG['sequence'],CFG['nonce'],CFG['args'])
+def require(value):
+    if not value:raise ValueError('successor_app_completion_unverified')
+require(os.geteuid()==0 and request.node=='A' and request.verb==wire.GUEST_START_INITIAL_POSTBOOT)
+wire._args(request.verb,request.node,request.args)
+require(wire._digest(w.runtime.BOOT_ID.read_bytes())==request.binding.boot('A'))
+with w._guest_mutation_descriptor(wait=2):
+    raw,hold,prepared,active=w._read_initial_recovery_hold(request)
+    stage=w.ROOT/request.binding.attempt_id
+    numbered=resume.latest_attempt(request)
+    continuation=bool(numbered) or resume.path(request,partial=True,prestart=True,continuation=True).exists()
+    prestart=continuation or resume.path(request,partial=True,prestart=True).exists()
+    partial=prestart or resume.path(request,partial=True).exists()
+    target=resume.path(request,partial=partial,prestart=prestart,continuation=continuation,numbered_attempt=numbered)
+    authorization_raw=w.runtime._read(target,0,{0o400},limit=131072)
+    authorization=resume.decode(authorization_raw)
+    require(wire._digest(authorization_raw)==CFG['authorization']['authorization_sha256'])
+    require(authorization['request']==w._scope(request) and authorization['args']==request.args
+        and authorization['service_instance_sha256']==CFG['instance']
+        and authorization['prior_intent_sha256']==CFG['authorization']['prior_intent_sha256']
+        and authorization['prior_progress_sha256']==CFG['authorization']['prior_progress_sha256']
+        and authorization.get('prior_resume')==CFG['prior_resume'])
+    base=resume.prefix(request)
+    stem=(resume._numbered_stem(base,numbered) if numbered else base+'resume-'+
+          ('partial-' if partial else '')+('prestart-' if prestart else '')+('continuation-' if continuation else ''))
+    order=w.RECOVERY_START_ORDER
+    names=['intent.json','done.json']+['progress-'+role+'.json' for role in order]
+    journals={name:w.runtime._read(stage/(stem+name),0,{0o600},limit=131072) for name in names}
+    history={'authorization_sha256':wire._digest(authorization_raw),
+             'intent_sha256':wire._digest(journals['intent.json']),'done_sha256':wire._digest(journals['done.json']),
+             'progress_sha256':{name:wire._digest(journals[name]) for name in names if name.startswith('progress-')}}
+    require(CFG['expected'] is None or history['done_sha256']==CFG['expected'])
+    require(resume._latest_history(request,raw,hold,active,history)==authorization)
+    worker=w.GuestWorker(request)
+    postgres,pins,_=worker._prepared_pins(prepared['manifest_sha256'])
+    require(pins.installation_id==request.args['installation_id'] and pins.node=='A'
+        and pins.attempt_id==request.binding.attempt_id)
+    authorities={w.runtime.ROOT/name:pin for name,pin in active['authority_files'].items()}
+    require(set(authorities)==set(w.live._authority_paths().values()))
+    def inventory():
+        require(time.monotonic()<deadline)
+        objects=w.restore._observer_inventory(deadline)
+        contracts,protected=w._initial_recovery_inventory(request.binding,hold['containers'],
+            request.args['protected_inventory_sha256'],None,
+            (authorization['container_contracts'],authorization['protected_inventory_sha256']),inventory=lambda:objects)
+        require(protected==authorization['protected_inventory_sha256']
+            and all(row['running'] is True and row['started_at']!=authorization['container_contracts'][role]['started_at']
+                    for role,row in contracts.items()))
+        instances={}
+        for role,pin in hold['containers'].items():
+            item=objects[pin['container_id']];state=item['State']
+            require(item['Id']==pin['container_id'] and item['Image']==pin['image_id']
+                and type(state['Pid']) is int and state['Pid']>0)
+            instances[role]=[pin['container_id'],pin['image_id'],state['Pid'],state['StartedAt']]
+        w._assert_car_route_blocked(request,raw,prepared,active)
+        require(all(wire._digest(w.runtime._read(path,0,{0o444}))==pin for path,pin in authorities.items()))
+        return contracts,instances
+    def lease(boundary):
+        challenge=wire._digest(wire._bytes({'request':w._scope(request),'history':history,'boundary':boundary}))
+        proof=w.live.observe_postboot_a_lease(pins,postgres,recovery_attempt_id=request.args['recovery_attempt_id'],
+            postboot=request.args['postboot'],postboot_plan_sha256=request.args['postboot_plan_sha256'],
+            challenge_sha256=challenge,deadline=min(deadline,time.monotonic()+.5),minimum_remaining_seconds=1)
+        require(wire._hash(proof) and time.monotonic()<deadline)
+        return proof
+    before=inventory();lease('completion_before')
+    context,leaf=w.activation._tls(prepared)
+    spec_raw=w.runtime._read(stage/'guest-spec.json',0,{0o400,0o600})
+    require(wire._digest(spec_raw)==pins.spec_sha256)
+    spec=resume.decode(spec_raw)
+    require(spec['node']=='A' and spec['guest_ip']==spec['pg_a'])
+    readiness={role:w.activation._probe(context,leaf,spec['guest_ip'],role,deadline,expected_node='A')
+               for role in order if role!='ha-broker'}
+    require(len(readiness)==7 and all(wire._hash(pin) for pin in readiness.values()))
+    require(w.activation._tls(prepared)[1]==leaf)
+    require(inventory()==before)
+    require(w._read_initial_recovery_hold(request)==(raw,hold,prepared,active)
+        and w.runtime._read(stage/'guest-spec.json',0,{0o400,0o600})==spec_raw
+        and w.runtime._read(target,0,{0o400},limit=131072)==authorization_raw
+        and all(w.runtime._read(stage/(stem+name),0,{0o600},limit=131072)==body for name,body in journals.items()))
+    require(resume._latest_history(request,raw,hold,active,history)==authorization)
+    final_lease=lease('completion_after')
+    require(time.monotonic()<deadline)
+    result={'status':'STARTED_VERIFIED','receipt_sha256':history['done_sha256'],
+        'authorization_sha256':history['authorization_sha256'],'history':history,
+        'request_sha256':wire._digest(wire._bytes(w._scope(request)|{'args':request.args})),
+        'service_instance_sha256':CFG['instance'],'instances_sha256':wire._digest(wire._bytes(before[1])),
+        'readiness':readiness,'guest_lease_sha256':final_lease,'container_count':len(order),'mutations':False}
+print(json.dumps(result,sort_keys=True,separators=(',',':')))
+'''
+
+
+def guest_completion(dispatcher, request, launcher, manifest_sha256, authorization, deadline, *,
+                     assert_guard, prior_resume=None, expected_receipt_sha256=None):
+    """Observe immutable completion and native mTLS readiness; never dispatch a verb."""
+    need(type(dispatcher) is ssh.GuestSshDispatcher and dispatcher.binding == request.binding
+         and type(launcher) is bytes and wire._digest(launcher) == dispatcher.launcher_sha256
+         and wire._hash(manifest_sha256) and callable(assert_guard))
+    marker = b'from ha_control.native_guest_worker import main\nraise SystemExit(main())'
+    need(launcher.count(marker) == 1 and manifest_sha256.encode() in launcher)
+    data = {'binding': request.binding.fields(), 'node': request.node, 'verb': request.verb,
+            'sequence': request.sequence, 'nonce': request.nonce, 'args': request.args,
+            'instance': authorization['service_instance_sha256'], 'authorization': authorization,
+            'prior_resume': prior_resume, 'expected': expected_receipt_sha256,
+            'budget': min(120, wire._remaining(deadline))}
+    code = 'import json\nCFG=' + repr(data) + '\n' + launcher.split(marker)[0].decode() + _COMPLETION_READ
+    need(len(code.encode()) <= 131072)
+    compile(code, '<successor-app-completion>', 'exec')
+    assert_guard()
+    stamps, records = {}, {}
+    for role, endpoint in (('jump', dispatcher.jump), ('A', dispatcher.guests['A'])):
+        stamps.update(ssh._identity(endpoint, deadline))
+        path = dispatcher.known_hosts[role]
+        raw, stamps[path] = ssh._checked_file(path, private=False, maximum=1048576)
+        records[endpoint.alias] = ssh._host_record(raw, endpoint, guest=role == 'A')
+    root = '/private/tmp' if sys.platform == 'darwin' else '/tmp'
+    with tempfile.TemporaryDirectory(prefix='ha-successor-completion-', dir=root) as directory:
+        config = ssh._ssh_config(Path(directory), dispatcher.jump, dispatcher.guests['A'], records)
+        command = (ssh.SSH, '-F', str(config), '-T', dispatcher.guests['A'].alias,
+                   shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', code)))
+        need(ssh._same_files(stamps))
+        result = json.loads(ssh._exchange(command, b'', deadline), object_pairs_hook=wire._pairs)
+        need(ssh._same_files(stamps))
+    assert_guard()
+    wire._remaining(deadline)
+    return result
+
+
 class SuccessorAppStage:
     """Coordinator adapter. Every issued request consumes this instance once."""
 
@@ -563,3 +694,71 @@ if((Digest ([IO.File]::ReadAllText($cfg.binding_path,$utf))) -cne $cfg.instance)
                            'authorization_sha256': authorization['authorization_sha256'],
                            'closed_revision': self.closed_revision, 'open_revision': self.open_revision})
         return receipt.receipt_sha256
+
+    def reconcile(self, request, authorization, deadline, *, assert_guard, prior_resume=None,
+                  expected_receipt_sha256=None):
+        """Read completion of an already issued request, including after lost replies.
+
+        The caller supplies its durable issued request and authorization receipt.
+        Both consumed and reconstructed stage instances are accepted. Missing or
+        partial completion raises instead of starting, attesting, or retrying.
+        Only local dispatch eligibility is consumed; no guest record is written.
+        """
+        need(type(request) is wire.Request and request.binding == self.dispatcher.binding
+             and request.node == 'A' and request.verb == wire.GUEST_START_INITIAL_POSTBOOT
+             and callable(assert_guard))
+        wire._args(request.verb, request.node, request.args)
+        need(request.args['postboot'] == self.postboot
+             and request.args['postboot_plan_sha256'] == self.proof_inputs.plan_sha256
+             and request.args['postboot_stopped_receipt_sha256'] == self.postboot['stopped_receipt_sha256']
+             and request.args['recovery_attempt_id'] == self.plan['initial_cutover_recovery']['attempt_id']
+             and request.args['installation_id'] == self.plan['installation_id']
+             and request.args['hold_sha256'] == self.plan['windows_recovery_observers']['hold_sha256']
+             and type(request.sequence) is int and 0 < request.sequence <= wire.MAX_REQUESTS
+             and wire._hash(request.nonce)
+             and type(authorization) is dict and authorization.get('request_nonce') == request.nonce
+             and authorization.get('service_instance_sha256') == self.lease.service_instance_sha256
+             and authorization.get('prior_intent_sha256') == self.prior_intent
+             and authorization.get('prior_progress_sha256') == self.prior_progress
+             and wire._hash(authorization.get('authorization_sha256'))
+             and (expected_receipt_sha256 is None or wire._hash(expected_receipt_sha256)))
+        request = wire.Request(request.binding, request.node, request.verb, request.sequence, request.nonce,
+                               json.loads(wire._bytes(request.args)))
+        authorization = json.loads(wire._bytes(authorization))
+        prior_resume = _snapshot_prior_resume(prior_resume)
+        self.consumed = True
+        assert_guard()
+        before = self._proof(min(deadline, time.monotonic() + wire.ACTIVATION_BOUNDARY_SECONDS), assert_guard)
+        result = guest_completion(self.dispatcher, request, self.launcher, self.manifest, authorization, deadline,
+                                  assert_guard=assert_guard, prior_resume=prior_resume,
+                                  expected_receipt_sha256=expected_receipt_sha256)
+        assert_guard()
+        after = self._proof(min(deadline, time.monotonic() + wire.ACTIVATION_BOUNDARY_SECONDS), assert_guard)
+        request_pin = wire._digest(wire._bytes({'version': wire.VERSION, 'binding': request.binding.fields(),
+            'node': request.node, 'boot_sha256': request.binding.boot(request.node), 'verb': request.verb,
+            'sequence': request.sequence, 'nonce': request.nonce, 'args': request.args}))
+        fields = {'status', 'receipt_sha256', 'authorization_sha256', 'history', 'request_sha256',
+                  'service_instance_sha256', 'instances_sha256', 'readiness', 'guest_lease_sha256',
+                  'container_count', 'mutations'}
+        need(type(result) is dict and set(result) == fields and result['status'] == 'STARTED_VERIFIED'
+             and result['request_sha256'] == request_pin
+             and result['authorization_sha256'] == authorization['authorization_sha256']
+             and result['service_instance_sha256'] == self.lease.service_instance_sha256
+             and type(result['container_count']) is int and result['container_count'] == 8
+             and result['mutations'] is False and wire._hash(result['receipt_sha256'])
+             and wire._hash(result['instances_sha256']) and wire._hash(result['guest_lease_sha256'])
+             and type(result['readiness']) is dict
+             and set(result['readiness']) == set(wire.RECOVERY_START_ORDER) - {'ha-broker'}
+             and all(wire._hash(pin) for pin in result['readiness'].values())
+             and type(result['history']) is dict
+             and set(result['history']) == {'authorization_sha256', 'intent_sha256', 'progress_sha256', 'done_sha256'}
+             and result['history']['authorization_sha256'] == authorization['authorization_sha256']
+             and result['history']['done_sha256'] == result['receipt_sha256']
+             and wire._hash(result['history']['intent_sha256'])
+             and type(result['history']['progress_sha256']) is dict
+             and set(result['history']['progress_sha256']) == {'progress-' + role + '.json' for role in wire.RECOVERY_START_ORDER}
+             and all(wire._hash(pin) for pin in result['history']['progress_sha256'].values())
+             and (expected_receipt_sha256 is None or result['receipt_sha256'] == expected_receipt_sha256)
+             and wire._hash(before) and wire._hash(after))
+        return result | {'closed_revision': self.closed_revision, 'open_revision': self.open_revision,
+                         'windows_proof_before_sha256': before, 'windows_proof_after_sha256': after}

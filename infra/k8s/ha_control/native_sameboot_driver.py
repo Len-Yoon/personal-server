@@ -7,11 +7,13 @@ import time
 from .controller import TransitionBlocked
 from .initial_postboot import saved_reboot, scope as postboot_scope
 from .initial_unpublished import derive_predecessor
+from .native_saved_reboot import WindowsSavedReboot
 from .native_sameboot_successor import WindowsSamebootHost
 from .native_stdio_bridge import RECOVERY_START_ORDER
+from .sameboot_transition import SAVED_STAGES, _expects_reboot
 
 ERROR = 'sameboot_native_driver_unconfirmed'
-PRE_PUBLISH_CLOSED = {'replace_provider', 'restore_provider', 'carryover', 'stage_runtime',
+PRE_PUBLISH_CLOSED = {'replace_provider', 'restore_provider', 'carryover', 'fallback_carryover', 'stage_runtime',
                       'arm_host', 'publish'}
 
 
@@ -38,23 +40,35 @@ class NativeSamebootDriver:
     databases after either initial publication or a lost publication reply.
     """
 
-    def __init__(self, *, release, platform, windows, successor_options, paired_publication, apps_factory):
+    def __init__(self, *, release, platform, windows, successor_options, paired_publication, apps_factory,
+                 saved_boot=None):
         self.release = release
         self.platform = platform
         self.windows = windows
         self.successor_options = dict(successor_options)
         self.paired_publication = paired_publication
         self.apps_factory = apps_factory
+        _need(saved_boot is None or (type(saved_boot) is WindowsSavedReboot and saved_boot.pair is release.pair))
+        self.saved_boot = saved_boot
 
     def guard(self, request, receipts, deadline, *, observe_only):
         operation, chain = _decoded(request, receipts)
         phase = operation['stage']
+        if phase == 'preflight' and operation['scope'].get('saved_reboot') is True:
+            _need(type(self.saved_boot) is WindowsSavedReboot)
+            self.saved_boot.verify_boot_task(deadline)
+        if phase in (*SAVED_STAGES, 'restore_saved_guests'):
+            _need(type(self.saved_boot) is WindowsSavedReboot and operation['scope'].get('saved_reboot') is True)
+            # A suspended VM cannot answer app or DB queries. The native
+            # boundary has an exact stopped Windows witness for those phases.
+            if phase != 'save_guests' or observe_only:
+                return time.monotonic() < deadline
         _need(time.monotonic() < deadline and self.platform.guard(
             operation, chain, deadline, observe_only=observe_only) is True)
         if phase in PRE_PUBLISH_CLOSED and not (observe_only and phase == 'publish'):
             original = chain['close_pair']
             after_arm = phase == 'publish' or (observe_only and phase == 'arm_host')
-            reboot = operation.get('scope', {}).get('saved_reboot', False)
+            reboot = _expects_reboot(operation['scope'], chain)
             if after_arm or (reboot and phase == 'arm_host'):
                 host = self._host(operation, chain, deadline)
                 expected = (chain['arm_host']['plan_sha256'] if phase == 'publish'
@@ -86,7 +100,10 @@ class NativeSamebootDriver:
     def _host(self, operation, chain, deadline):
         material = self.platform.read_arm_material(operation, chain, deadline)
         reboot = saved_reboot(postboot_scope(material['candidate']))
-        _need(reboot == operation['scope'].get('saved_reboot', False))
+        _need(reboot == _expects_reboot(operation['scope'], chain))
+        if 'restore_saved_guests' in chain:
+            _need(material['candidate']['windows_initial_observer']['windows_boot_sha256']
+                  == chain['restore_saved_guests']['windows_boot_sha256'])
         bridge = {'reboot_pair': self.release.pair} if reboot else {}
         return WindowsSamebootHost(self.windows, material=material, **self.successor_options, **bridge)
 
@@ -111,7 +128,16 @@ class NativeSamebootDriver:
         _need(published['service_instance_sha256'] == previous['instance_sha256'] and
               published['first_write_proof_sha256'] == previous['publication_sha256'])
         _need(self._publication(host, published, operation, chain, deadline) == previous)
-        if observe_only:
+        if observe_only and operation['scope'].get('saved_reboot') is True:
+            app = self.apps_factory(operation, chain, published, deadline)
+            arguments = self.platform.read_app_operation(operation, chain, deadline)
+            _need(type(arguments) is dict and set(arguments) == {
+                'request', 'authorization', 'assert_guard', 'prior_resume', 'expected_receipt_sha256'}
+                and arguments['request'].nonce == operation['nonce'])
+            verified = app.reconcile(deadline=deadline, **arguments)
+            receipt = {'instance_sha256': verified['service_instance_sha256'],
+                       'startup_sha256': verified['receipt_sha256'], 'ready': list(RECOVERY_START_ORDER)}
+        elif observe_only:
             # The platform watches the already-issued guest nonce and mTLS
             # readiness. Another dispatcher never receives the same start.
             receipt = self.platform.observe_apps(operation, chain, deadline)
@@ -137,6 +163,11 @@ class NativeSamebootDriver:
                 operation, chain, deadline)
         elif phase == 'close_pair':
             evidence = self.release.observe_closed(operation, chain, deadline)
+        elif phase in (*SAVED_STAGES, 'restore_saved_guests'):
+            _need(type(self.saved_boot) is WindowsSavedReboot)
+            evidence = self.saved_boot.run(operation, chain, deadline, observe_only=observe_only)
+            if phase == 'save_guests' and observe_only and evidence['states'] != {'A':'Saved','B':'Saved'}:
+                return _reply(request, evidence, status='REJECTED')
         elif phase == 'arm_host':
             host = self._host(operation, chain, deadline)
             _need(host.checked['plan_sha256'] == operation['plan_material_sha256'])
@@ -149,7 +180,8 @@ class NativeSamebootDriver:
         elif phase == 'start_apps':
             evidence = self._apps(operation, chain, deadline, observe_only=observe_only)
         else:
-            _need(phase in {'preflight', 'replace_provider', 'restore_provider', 'carryover', 'stage_runtime'})
+            _need(phase in {'preflight', 'replace_provider', 'restore_provider', 'carryover',
+                            'fallback_carryover', 'stage_runtime'})
             result = (self.platform.observe if observe_only else self.platform.apply)(operation, chain, deadline)
             _need(type(result) is dict and set(result) == {'status', 'evidence'})
             return _reply(request, result['evidence'], status=result['status'])
@@ -157,6 +189,12 @@ class NativeSamebootDriver:
 
     def apply(self, request, receipts, deadline):
         return self._dispatch(request, receipts, deadline, observe_only=False)
+
+    def cancel_unissued_reboot(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(type(self.saved_boot) is WindowsSavedReboot)
+        evidence = self.saved_boot.cancel_unissued(operation, chain, deadline)
+        return _reply(request, evidence, status='REJECTED')
 
     def observe(self, request, receipts, deadline):
         return self._dispatch(request, receipts, deadline, observe_only=True)
