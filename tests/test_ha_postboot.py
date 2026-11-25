@@ -1305,6 +1305,30 @@ class SamebootPostbootPgTests(PostbootPgTests):
 class SamebootTransitionDriverTests(unittest.TestCase):
     """Production boundaries as typed fake driver responses, without native I/O."""
 
+    def test_private_journal_read_accepts_atime_only_and_rejects_metadata_drift(self):
+        import os
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+        from ha_control import sameboot_transition as transition
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'journal.json'
+            path.write_bytes(b'{}')
+            path.chmod(0o600)
+            stat = path.stat()
+            fields = {key: getattr(stat, key) for key in (
+                'st_dev','st_ino','st_mode','st_nlink','st_uid','st_gid','st_size',
+                'st_atime_ns','st_mtime_ns','st_ctime_ns')}
+            before = SimpleNamespace(**fields)
+            after = SimpleNamespace(**(fields | {'st_atime_ns':fields['st_atime_ns'] + 1}))
+            with patch.object(os, 'fstat', side_effect=(before, after)):
+                self.assertEqual(transition._private_file(path, 8192), b'{}')
+            for name in ('st_size','st_mode','st_ino','st_mtime_ns','st_ctime_ns'):
+                changed = SimpleNamespace(**(fields | {name:fields[name] + 1}))
+                with self.subTest(name=name), patch.object(os, 'fstat', side_effect=(before, changed)):
+                    with self.assertRaises(TransitionBlocked):
+                        transition._private_file(path, 8192)
+
     def setUp(self):
         import tempfile
         from ha_control import sameboot_transition as transition

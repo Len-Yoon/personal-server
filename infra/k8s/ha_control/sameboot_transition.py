@@ -42,7 +42,13 @@ def _private_file(path, limit):
         _need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
               and before.st_uid == os.geteuid() and stat.S_IMODE(before.st_mode) == 0o600)
         raw = stream.read(limit + 1)
-        _need(0 < len(raw) <= limit and os.fstat(stream.fileno()) == before)
+        after = os.fstat(stream.fileno())
+        # A successful read can advance atime, including on CI's Linux disk.
+        # Keep identity, permissions and nanosecond mutation checks unchanged.
+        stable = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+                  'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        _need(0 < len(raw) <= limit and len(raw) == before.st_size
+              and all(getattr(before, key) == getattr(after, key) for key in stable))
     return raw
 
 
