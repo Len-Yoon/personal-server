@@ -18,12 +18,14 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import time
 
 from . import native_guest_runtime as runtime, native_stdio_bridge as wire
 from .legacy_writers import TransitionBlocked, _need
 
 ERROR = "legacy_provider_unconfirmed"
 UNSETTLED = "legacy_provider_reconciliation_required"
+RESTORE_LISTENER_TIMEOUT = 5.0
 UNIT = re.compile(r"n100ha-(recovery|postboot)-observer-[a-zA-Z0-9_-]{1,128}\.service\Z")
 TRANSIENT = Path("/run/systemd/transient")
 GUEST_ROOT = Path("/var/lib/n100-ha/cutover")
@@ -38,8 +40,8 @@ EMPTY = ("DropInPaths", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPo
 EXEC_HOOKS = frozenset({"ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost"})
 
 
-def _command(argv):
-    completed = subprocess.run(argv, capture_output=True, timeout=8, check=False,
+def _command(argv, *, timeout=8):
+    completed = subprocess.run(argv, capture_output=True, timeout=timeout, check=False,
                                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     _need(completed.returncode == 0, ERROR)
     return completed.stdout
@@ -61,8 +63,8 @@ def _properties(unit):
     return result
 
 
-def _listeners():
-    raw = _command(("/usr/bin/ss", "-l", "-H", "-n", "-A", "vsock", "-p"))
+def _listeners(*, timeout=8):
+    raw = _command(("/usr/bin/ss", "-l", "-H", "-n", "-A", "vsock", "-p"), timeout=timeout)
     result = {}
     for line in raw.decode("utf-8").splitlines():
         fields = line.split()
@@ -172,7 +174,23 @@ class ProviderRetirement:
                   hold_sha256=self.hold, boot_sha256=self.binding.boot_a_sha256)
         return document["units"]
 
-    def _live(self, entry, role, *, original=True):
+    def _live(self, entry, role, *, original=True, wait_for_listener=False):
+        if wait_for_listener:
+            # A simple transient unit can be started before Python binds its
+            # socket. Observe readiness without issuing another start command.
+            deadline = time.monotonic() + RESTORE_LISTENER_TIMEOUT
+            while True:
+                remaining = deadline - time.monotonic()
+                _need(remaining > 0, UNSETTLED)
+                try:
+                    ready = self.ports[role] in _listeners(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    raise TransitionBlocked(UNSETTLED) from None
+                remaining = deadline - time.monotonic()
+                _need(remaining > 0, UNSETTLED)
+                if ready:
+                    break
+                time.sleep(min(0.1, remaining))
         properties = _properties(entry["unit"])
         _need(properties["Id"] == entry["unit"] and properties["ActiveState"] == "active"
               and properties["SubState"] == "running" and properties["Transient"] == "yes"
@@ -307,7 +325,7 @@ class ProviderRetirement:
             self._absent(provider)
             observed = None
         else:
-            observed = self._live(provider, "provider", original=False)
+            observed = self._live(provider, "provider", original=False, wait_for_listener=True)
         final = self._gate(operation, "after", assert_safe)
         _need(self._live(held, "held") == held_before, ERROR)
         document = final | {"intent_sha256": wire._digest(runtime._read(intent, 0, {0o400}, limit=131072)),

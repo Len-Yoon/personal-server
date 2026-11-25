@@ -69,7 +69,7 @@ class LegacyProviderTest(unittest.TestCase):
         units = {role: entry(role) for role in ("provider", "held")}
         state = {"provider": True, "held": True, "uncertain": False, "held_pid": 42, "provider_pid": 41}
 
-        def live(_entry, role, *, original=True):
+        def live(_entry, role, *, original=True, wait_for_listener=False):
             if not state[role]:
                 raise TransitionBlocked(module.ERROR)
             return {"pid": state[role + "_pid"], "fragment_sha256": _entry["fragment_sha256"],
@@ -79,7 +79,7 @@ class LegacyProviderTest(unittest.TestCase):
             if state["provider"]:
                 raise TransitionBlocked(module.UNSETTLED)
 
-        def command(argv):
+        def command(argv, *, timeout=8):
             if state["uncertain"]:
                 raise subprocess.TimeoutExpired("observer-command", 8)
             if argv[0] == "/usr/bin/systemctl":
@@ -279,6 +279,18 @@ class LegacyProviderTest(unittest.TestCase):
                   patch.object(module.runtime, "_read", return_value=FRAGMENT),
                   patch.object(module, "_listeners", return_value={850: ['LISTEN 0 128 *:850 *:* users:(("python3",pid=41,fd=3))']}) as listeners):
                 self.assertEqual(adapter._live(record, "provider")["pid"], 41)
+                ready = listeners.return_value
+                listeners.side_effect = [{}, ready, ready]
+                with patch.object(module.time, "sleep") as sleep:
+                    restored = adapter._live(record, "provider", original=False, wait_for_listener=True)
+                    sleep.assert_called_once()
+                self.assertEqual(restored["pid"], 41)
+                listeners.side_effect = None
+                listeners.return_value = {}
+                with patch.object(module.time, "monotonic", side_effect=[0, 0, module.RESTORE_LISTENER_TIMEOUT]):
+                    with self.assertRaisesRegex(TransitionBlocked, module.UNSETTLED):
+                        adapter._live(record, "provider", original=False, wait_for_listener=True)
+                listeners.return_value = ready
                 properties["BoundBy"] = "protected.service"
                 with self.assertRaises(TransitionBlocked):
                     adapter._live(record, "provider")
