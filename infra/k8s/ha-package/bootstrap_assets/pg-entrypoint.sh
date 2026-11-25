@@ -24,12 +24,19 @@ done
 # Secrets are mounted read-only, owned by postgres, inaccessible to applications.
 test "$(stat -c '%u:%a' /run/ha-pg/server.key)" = "$HA_PG_UID:600" || exit 65
 test "$(stat -c '%u:%a' /run/ha-pg/repl.pgpass)" = "$HA_PG_UID:600" || exit 65
-if [ "$HA_PG_SOURCE_NODE" != none ] && [ ! -e "$PGDATA/PG_VERSION" ]; then
-  test -z "$(find "$PGDATA" -mindepth 1 -maxdepth 1 -print -quit)" || exit 66
-  # Both directions are fixed enum values; no caller-supplied DSN is accepted.
-  source_host=ha-$(printf '%s' "$HA_PG_SOURCE_NODE" | tr AB ab)
-  application_name=ha_$(printf '%s' "$HA_PG_NODE" | tr AB ab)
-  pg_basebackup --dbname="host=$source_host port=5432 user=ha_repl sslmode=verify-full sslrootcert=/run/ha-pg/ca.crt passfile=/run/ha-pg/repl.pgpass application_name=$application_name" --pgdata="$PGDATA" --write-recovery-conf --no-slot --wal-method=stream --checkpoint=fast
+if [ "$HA_PG_SOURCE_NODE" != none ]; then
+  if [ ! -e "$PGDATA/PG_VERSION" ]; then
+    test -z "$(find "$PGDATA" -mindepth 1 -maxdepth 1 -print -quit)" || exit 66
+    # Both directions are fixed enum values; no caller-supplied DSN is accepted.
+    source_host=ha-$(printf '%s' "$HA_PG_SOURCE_NODE" | tr AB ab)
+    application_name=ha_$(printf '%s' "$HA_PG_NODE" | tr AB ab)
+    pg_basebackup --dbname="host=$source_host port=5432 user=ha_repl sslmode=verify-full sslrootcert=/run/ha-pg/ca.crt passfile=/run/ha-pg/repl.pgpass application_name=$application_name" --pgdata="$PGDATA" --write-recovery-conf --no-slot --wal-method=stream --checkpoint=fast
+  fi
+  # PostgreSQL removes standby.signal on promotion. A former primary's old
+  # data directory cannot be started by assigning it the standby role.
+  test -f "$PGDATA/PG_VERSION" && test ! -L "$PGDATA/PG_VERSION" || exit 66
+  test -f "$PGDATA/standby.signal" && test ! -L "$PGDATA/standby.signal" || exit 66
+  test ! -e "$PGDATA/recovery.signal" && test ! -L "$PGDATA/recovery.signal" || exit 66
   exec postgres -D "$PGDATA" -c config_file=/bootstrap/postgresql.conf
 fi
 if [ ! -e "$PGDATA/PG_VERSION" ]; then

@@ -1,6 +1,9 @@
 # Prepare the initial Windows observer and one installed controller approval.
 param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
-      [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go)
+      [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig,
+      [switch]$ObserveTransitionObserverConfig, [switch]$StartTransitionObserver,
+      [switch]$PublishTransitionObserverLaunch, [switch]$PublishTransitionAuthority,
+      [switch]$PublishTransitionPlan, [string]$TransitionBundleBase64)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -202,6 +205,86 @@ function Assert-ManualHost($Scope, $Start) {
     if ($existing.Count -ne 1 -or $existing[0].Name -cne 'windows-service-host.exe') { throw 'initial_stage_service' }
 }
 
+function Invoke-TransitionObserverLaunch([string]$Root, [bool]$Publish) {
+    if (-not $Go -or $Preflight -or $RuntimeSha256 -cnotmatch $hashPattern) { throw 'initial_stage_observer' }
+    if ($Publish) {
+        if ($IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) { throw 'initial_stage_observer' }
+        $launchRaw = [Convert]::FromBase64String($IntentBase64)
+        if ($launchRaw.Length -gt 4096 -or (Digest $launchRaw) -cne $InputSha256) { throw 'initial_stage_observer' }
+    } else {
+        if ($IntentBase64 -cne '') { throw 'initial_stage_observer' }
+        $launchRaw = Read-Protected $InputPath $InputSha256 4096
+    }
+    $launch = ConvertFrom-Json -InputObject ($encoding.GetString($launchRaw))
+    Assert-Fields $launch @('callback_config_sha256','launcher_sha256','server_sha256','callback_sha256','service_name',
+        'legacy_plan_sha256','legacy_attempt_id','windows_boot_sha256','wsl_boot_sha256','collector_sha256',
+        'reactivation_plan_sha256','marker_sha256')
+    foreach ($field in @($launch.PSObject.Properties | Where-Object { $_.Name -cne 'service_name' })) {
+        Assert-Pin $field.Value
+    }
+    $pin = $launch.callback_config_sha256
+    Assert-ReservedLeaf $InputPath $Root ('transition-observer-launch-' + $pin + '.json')
+    $configPath = Join-Path $Root ('transition-observer-config-' + $pin + '.json')
+    $config = ConvertFrom-Json -InputObject ($encoding.GetString((Read-Protected $configPath $pin 4096)))
+    Assert-Pin $config.vm_b_installation_id
+    if ($config.runtime_sha256 -cne $RuntimeSha256 -or $config.source_manifest_sha256 -cne $ExpectedSourceManifestSha256) {
+        throw 'initial_stage_observer'
+    }
+    if ($launch.service_name -isnot [string] -or $launch.service_name -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z') {
+        throw 'initial_stage_observer'
+    }
+    $serviceSid = ([Security.Principal.NTAccount]::new('NT SERVICE',$launch.service_name)).
+        Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($serviceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z') { throw 'initial_stage_observer' }
+    $launcher = Read-Protected (Join-Path $Root 'windows-ha-start-lease-observer.ps1') $launch.launcher_sha256 65536
+    $serverPath = Join-Path $Root 'windows-ha-lease-proof-server.ps1'
+    $callbackPath = Join-Path $Root 'windows-ha-wsl-lease-observer.ps1'
+    $null = Read-Protected $serverPath $launch.server_sha256 65536
+    $null = Read-Protected $callbackPath $launch.callback_sha256 65536
+    Assert-ReservedLeaf $config.vm_observer_path $Root
+    $null = Read-Protected $config.vm_observer_path $config.vm_observer_sha256 65536
+    if ($Publish) {
+        Assert-Absent $InputPath
+        [ordered]@{transition_observer_launch_sha256=(Write-New $InputPath $launchRaw)} | ConvertTo-Json -Compress
+        return
+    }
+    $keyPath = Join-Path $Root ('transition-observer-key-' + $pin + '.key')
+    $readyPath = Join-Path $Root ('lease-observer-transition-ready-' + $pin + '.json')
+    $taskInput = Join-Path $Root ('transition-observer-task-' + $pin + '.json')
+    foreach ($path in @($keyPath,$readyPath,$taskInput)) { Assert-Absent $path }
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $key = [byte[]]::new(32)
+    $pipeBytes = [byte[]]::new(16)
+    try {
+        $random.GetBytes($key)
+        $random.GetBytes($pipeBytes)
+        $pipe = 'n100ha-lease-proof-' + [BitConverter]::ToString($pipeBytes).Replace('-','').ToLowerInvariant()
+        $keySha = Write-New $keyPath $key $serviceSid
+    } finally {
+        [Array]::Clear($key,0,$key.Length)
+        [Array]::Clear($pipeBytes,0,$pipeBytes.Length)
+        $random.Dispose()
+    }
+    $arguments = [ordered]@{PipeName=$pipe;OperatorSid=$operatorSid;ServiceSid=$serviceSid;PlanSha256=$launch.legacy_plan_sha256;
+        AttemptId=$launch.legacy_attempt_id;Generation=1;WindowsBootSha256=$launch.windows_boot_sha256;
+        WslBootSha256=$launch.wsl_boot_sha256;CollectorSha256=$launch.collector_sha256;
+        ReactivationPlanSha256=$launch.reactivation_plan_sha256;MarkerSha256=$launch.marker_sha256;
+        CallbackPath=$callbackPath;CallbackSha256=$launch.callback_sha256;CallbackConfigPath=$configPath;
+        CallbackConfigSha256=$pin;KeyPath=$keyPath;KeySha256=$keySha;ReadyPath=$readyPath}
+    $taskConfig = [ordered]@{server_path=$serverPath;server_sha256=$launch.server_sha256;arguments=$arguments;instance_sha256=$pin}
+    $inputSha = Write-New $taskInput (Json-Bytes $taskConfig)
+    $result = @(& ([ScriptBlock]::Create($encoding.GetString($launcher))) -InputPath $taskInput -InputSha256 $inputSha -Go)
+    if ($result.Count -ne 1 -or $result[0] -isnot [string]) { throw 'initial_stage_observer' }
+    $started = ConvertFrom-Json -InputObject $result[0]
+    Assert-Fields $started @('observer_ready','observer_pid')
+    if ($started.observer_ready -isnot [bool] -or -not $started.observer_ready -or
+        ($started.observer_pid -isnot [int] -and $started.observer_pid -isnot [long]) -or
+        $started.observer_pid -lt 1 -or $started.observer_pid -gt [int]::MaxValue) { throw 'initial_stage_observer' }
+    [ordered]@{callback_config_sha256=$pin;observer_pid=$started.observer_pid;pipe_name=$pipe;
+               key_sha256=$keySha;windows_boot_sha256=$launch.windows_boot_sha256;
+               wsl_boot_sha256=$launch.wsl_boot_sha256;collector_sha256=$launch.collector_sha256} | ConvertTo-Json -Compress
+}
+
 try {
     if ($Go.IsPresent -eq $Preflight.IsPresent -or $PSVersionTable.PSEdition -cne 'Desktop' -or
         -not [Environment]::Is64BitProcess -or [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -221,6 +304,152 @@ try {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)
+    if ($PublishTransitionPlan) {
+        if (-not $Go -or $Preflight -or $PublishTransitionAuthority -or $StartTransitionObserver -or
+            $PublishTransitionObserverLaunch -or $PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
+            $IntentBase64 -cne '' -or $RuntimeSha256 -cne '' -or $TransitionBundleBase64.Length -gt 65536) {
+            throw 'initial_stage_transition_plan'
+        }
+        Assert-ReservedLeaf $InputPath $root 'plan.json'
+        $bundle = [Convert]::FromBase64String($TransitionBundleBase64)
+        if ($bundle.Length -lt 1 -or (Digest $bundle) -cne $InputSha256) { throw 'initial_stage_transition_plan' }
+        $records = ConvertFrom-Json -InputObject $encoding.GetString($bundle)
+        Assert-Fields $records @('plan','approval')
+        if ($records.plan -isnot [string] -or $records.approval -isnot [string]) { throw 'initial_stage_transition_plan' }
+        $planBytes = [Convert]::FromBase64String($records.plan)
+        $approvalBytes = [Convert]::FromBase64String($records.approval)
+        if ($planBytes.Length -lt 1 -or $approvalBytes.Length -lt 1 -or $approvalBytes.Length -gt 4096) {
+            throw 'initial_stage_transition_plan'
+        }
+        $planPin = Digest $planBytes
+        $approvalPin = Digest $approvalBytes
+        $plan = ConvertFrom-Json -InputObject $encoding.GetString($planBytes)
+        $approval = ConvertFrom-Json -InputObject $encoding.GetString($approvalBytes)
+        Assert-Fields $approval @('schema_version','action','authority_kind','profile','installation_id',
+                                  'installed_at','plan_sha256','source_commit','policy_sha256')
+        Assert-Pin $approval.installation_id
+        Assert-Pin $approval.policy_sha256
+        if ($plan.profile -isnot [string] -or $plan.profile -cne 'enforced-vm-v1' -or
+            $plan.generation -isnot [int] -or $plan.generation -lt 2 -or
+            $approval.schema_version -isnot [int] -or $approval.schema_version -ne 3 -or
+            $approval.action -cne 'ha-transition' -or $approval.authority_kind -cne 'installed-runtime' -or
+            $approval.profile -cne $plan.profile -or $approval.plan_sha256 -cne $planPin -or
+            $approval.installation_id -cne $plan.installation_id -or $approval.source_commit -cne $plan.source_commit -or
+            $approval.policy_sha256 -cne $plan.windows_enforced.policy_sha256) { throw 'initial_stage_transition_plan' }
+        foreach ($field in @('action','authority_kind','profile','installed_at','plan_sha256','source_commit')) {
+            if ($approval.$field -isnot [string]) { throw 'initial_stage_transition_plan' }
+        }
+        if ($approval.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+            $approval.installed_at -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\z') {
+            throw 'initial_stage_transition_plan'
+        }
+        $sid = $plan.windows_enforced.service_sid
+        $name = $plan.windows_enforced.service_name
+        if ($sid -isnot [string] -or $sid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
+            $name -isnot [string] -or $name -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z' -or
+            ([Security.Principal.NTAccount]::new('NT SERVICE',$name)).Translate(
+                [Security.Principal.SecurityIdentifier]).Value -cne $sid) { throw 'initial_stage_transition_plan' }
+        $directory = Get-Item -LiteralPath $root -Force
+        if ($directory -isnot [IO.DirectoryInfo]) { throw 'initial_stage_transition_plan' }
+        Assert-ProtectedPath $directory $sid
+        $callbackPin = $plan.windows_transition_observer.callback_config_sha256
+        Assert-Pin $callbackPin
+        $callbackPath = Join-Path $root ('transition-observer-config-' + $callbackPin + '.json')
+        $callback = ConvertFrom-Json -InputObject $encoding.GetString((Read-Protected $callbackPath $callbackPin 8192 $sid))
+        if ($callback.source_manifest_sha256 -isnot [string] -or
+            $callback.source_manifest_sha256 -cne $ExpectedSourceManifestSha256) { throw 'initial_stage_transition_plan' }
+        $approvalPath = Join-Path $root 'approval.json'
+        # Confirm any existing leaf before writing either one. Retries may only
+        # complete a publication with the exact same bytes.
+        foreach ($path in @($InputPath,$approvalPath)) {
+            if (Test-Path -LiteralPath $path) {
+                $pin = if ($path -ceq $InputPath) { $planPin } else { $approvalPin }
+                $null = Read-Protected $path $pin 49152 $sid
+            }
+        }
+        if (-not (Test-Path -LiteralPath $InputPath)) { $null = Write-New $InputPath $planBytes $sid }
+        if (-not (Test-Path -LiteralPath $approvalPath)) { $null = Write-New $approvalPath $approvalBytes $sid }
+        $null = Read-Protected $InputPath $planPin 49152 $sid
+        $null = Read-Protected $approvalPath $approvalPin 4096 $sid
+        [ordered]@{transition_plan_published=$true;plan_sha256=$planPin;approval_sha256=$approvalPin} |
+            ConvertTo-Json -Compress
+        return
+    }
+    if ($TransitionBundleBase64 -cne '') { throw 'initial_stage_transition_plan' }
+    if ($PublishTransitionAuthority) {
+        if (-not $Go -or $StartTransitionObserver -or $PublishTransitionObserverLaunch -or
+            $PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
+            $RuntimeSha256 -cne '' -or $IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) {
+            throw 'initial_stage_transition_authority'
+        }
+        $raw = [Convert]::FromBase64String($IntentBase64)
+        if ($raw.Length -gt 4096 -or (Digest $raw) -cne $InputSha256) { throw 'initial_stage_transition_authority' }
+        $record = ConvertFrom-Json -InputObject ($encoding.GetString($raw))
+        Assert-Pin $record.attempt_id
+        $bindingPath = Join-Path $root ('transition-service-' + $record.attempt_id + '.json')
+        $grantPath = Join-Path $root ('transition-grant-' + $record.attempt_id + '.json')
+        if ($InputPath -ceq $bindingPath) {
+            Assert-Fields $record @('attempt_id','controller_plan_sha256','generation','legacy_plan_sha256',
+                'old_disk_paths_sha256','old_vm_id','python_command_sha256','python_path_sha256','service_created_ticks',
+                'service_image_path_sha256','service_name','service_pid','state_path','target','timeline')
+            if ($record.controller_plan_sha256 -cne $ExpectedSourceManifestSha256 -or
+                $record.state_path -cne (Join-Path $root 'journal\controller-state.json')) {
+                throw 'initial_stage_transition_authority'
+            }
+        } elseif ($InputPath -ceq $grantPath) {
+            Assert-Fields $record @('attempt_id','handoff_sha256','service_instance_sha256')
+            Assert-Pin $record.handoff_sha256
+            if ($record.service_instance_sha256 -cne $ExpectedSourceManifestSha256) { throw 'initial_stage_transition_authority' }
+            $null = Read-Protected $bindingPath $record.service_instance_sha256 4096
+        } else { throw 'initial_stage_transition_authority' }
+        Assert-ReservedLeaf $InputPath $root
+        $authorityRoot = Get-Item -LiteralPath $root -Force
+        if ($authorityRoot -isnot [IO.DirectoryInfo]) { throw 'initial_stage_transition_authority' }
+        Assert-ProtectedPath $authorityRoot
+        if (Test-Path -LiteralPath $InputPath) {
+            $null = Read-Protected $InputPath $InputSha256 4096
+            if ((Get-Acl -LiteralPath $InputPath).GetSecurityDescriptorSddlForm($sections) -cne
+                (File-Access).GetSecurityDescriptorSddlForm($sections)) { throw 'initial_stage_published_acl' }
+        } else { $null = Write-New $InputPath $raw }
+        [ordered]@{transition_authority_record_sha256=$InputSha256}|ConvertTo-Json -Compress
+        return
+    }
+    if ($StartTransitionObserver -or $PublishTransitionObserverLaunch) {
+        if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
+            $StartTransitionObserver.IsPresent -eq $PublishTransitionObserverLaunch.IsPresent) { throw 'initial_stage_observer' }
+        Invoke-TransitionObserverLaunch $root $PublishTransitionObserverLaunch.IsPresent
+        return
+    }
+    if ($PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig) {
+        if (-not $Go -or $PublishTransitionObserverConfig.IsPresent -eq $ObserveTransitionObserverConfig.IsPresent) {
+            throw 'initial_stage_observer'
+        }
+        Assert-Pin $RuntimeSha256
+        Assert-ReservedLeaf $InputPath $root ('transition-observer-config-' + $InputSha256 + '.json')
+        if ($ObserveTransitionObserverConfig) {
+            if ($IntentBase64 -cne '') { throw 'initial_stage_observer' }
+            $raw = Read-Protected $InputPath $InputSha256 4096
+            if ((Get-Acl -LiteralPath $InputPath).GetSecurityDescriptorSddlForm($sections) -cne
+                (File-Access).GetSecurityDescriptorSddlForm($sections)) { throw 'initial_stage_published_acl' }
+        } else {
+            if ($IntentBase64.Length -lt 4 -or $IntentBase64.Length -gt 5464) { throw 'initial_stage_observer' }
+            $raw = [Convert]::FromBase64String($IntentBase64)
+            if ($raw.Length -gt 4096 -or (Digest $raw) -cne $InputSha256) { throw 'initial_stage_observer' }
+        }
+        $config = ConvertFrom-Json -InputObject ($encoding.GetString($raw))
+        Assert-Pin $config.vm_b_installation_id
+        if ($config.source_manifest_sha256 -cne $ExpectedSourceManifestSha256 -or
+            $config.runtime_sha256 -cne $RuntimeSha256) { throw 'initial_stage_observer' }
+        Assert-ReservedLeaf $config.vm_observer_path $root
+        $null = Read-Protected $config.vm_observer_path $config.vm_observer_sha256 65536
+        if ($ObserveTransitionObserverConfig) {
+            [ordered]@{observed_transition_observer_config_sha256=$InputSha256} | ConvertTo-Json -Compress
+            return
+        }
+        Assert-Absent $InputPath
+        [ordered]@{transition_observer_config_sha256=(Write-New $InputPath $raw)} | ConvertTo-Json -Compress
+        return
+    }
     $bootstrap = ConvertFrom-Json -InputObject ($encoding.GetString((Read-Protected $InputPath $InputSha256 1048576)))
     Assert-Fields $bootstrap @('schema_version','attempt_id','legacy_plan_sha256','plan_template','observer','callback_template','paths')
     Assert-One $bootstrap.schema_version

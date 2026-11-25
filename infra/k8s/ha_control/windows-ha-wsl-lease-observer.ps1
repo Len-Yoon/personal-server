@@ -4,33 +4,70 @@ $ErrorActionPreference = 'Stop'
 
 function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha, [string]$CollectorSha) {
     $fields = @($InputConfig.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    $markerAttempt = $null
+    if ('recovery_marker_attempt_id' -cin $fields) {
+        $markerAttempt = $InputConfig.recovery_marker_attempt_id
+        if ($markerAttempt -isnot [string] -or $markerAttempt -cnotmatch '\A[a-f0-9]{64}\z') {
+            throw 'lease_proof_callback_scope'
+        }
+        $fields = @($fields | Where-Object { $_ -cne 'recovery_marker_attempt_id' })
+    }
+    $offline = 'closure_mode' -cin $fields
+    if ($offline) {
+        if ($InputConfig.closure_mode -isnot [string] -or
+            $InputConfig.closure_mode -cne 'windows-offline-v1' -or 'kubernetes_reader' -cin $fields) {
+            throw 'lease_proof_callback_scope'
+        }
+        $fields = @($fields | Where-Object { $_ -cne 'closure_mode' })
+    }
     $httpsReader = 'kubernetes_reader' -cin $fields
     if ($httpsReader) {
         if ($InputConfig.kubernetes_reader -isnot [string] -or
             $InputConfig.kubernetes_reader -cne 'local-https-v1') { throw 'lease_proof_callback_scope' }
         $fields = @($fields | Where-Object { $_ -cne 'kubernetes_reader' })
     }
+    if ('vm_b_installation_id' -cin $fields) {
+        if ($InputConfig.vm_b_installation_id -isnot [string] -or
+            $InputConfig.vm_b_installation_id -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
+        $fields = @($fields | Where-Object { $_ -cne 'vm_b_installation_id' })
+    }
     if ('reactivation_plan_sha256' -cin $fields) {
         if ($InputConfig.reactivation_plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
         $fields = @($fields | Where-Object { $_ -cne 'reactivation_plan_sha256' })
     }
-    if (($fields -join ',') -cne 'a_disk_paths_sha256,b_disk_paths_sha256,driver_path,driver_sha256,installation_id,reactivation_plan_path,runtime_path,runtime_sha256,source_loader_sha256,source_manifest_path,source_manifest_sha256,source_root,vm_a,vm_b,vm_observer_path,vm_observer_sha256,wsl_uid' -or
-        $InputConfig.runtime_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+    $common = @('a_disk_paths_sha256','b_disk_paths_sha256','driver_path','driver_sha256','installation_id',
+        'reactivation_plan_path','vm_a','vm_b','vm_observer_path','vm_observer_sha256')
+    $wsl = @('runtime_path','runtime_sha256','source_loader_sha256','source_manifest_path',
+        'source_manifest_sha256','source_root','wsl_uid')
+    $expected = if ($offline) { $common } else { $common + $wsl }
+    if (($fields -join ',') -cne (($expected | Sort-Object -CaseSensitive) -join ',') -or
         $InputConfig.installation_id -cnotmatch '\A[a-f0-9]{64}\z' -or
-        $InputConfig.a_disk_paths_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or $InputConfig.b_disk_paths_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
-        $InputConfig.source_loader_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or $InputConfig.source_manifest_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $InputConfig.a_disk_paths_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $InputConfig.b_disk_paths_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $CollectorSha -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
+    if (-not $offline -and (
+        $InputConfig.runtime_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $InputConfig.source_loader_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $InputConfig.source_manifest_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
         $InputConfig.source_root -cnotmatch '\A/home/[a-zA-Z0-9_.-]+/\.local/state/n100-ha/cutover-source-[a-f0-9]{40}/infra/k8s\z' -or
         $InputConfig.runtime_path -cnotmatch '\A/home/[a-zA-Z0-9_.-]+/\.local/state/n100-ha/[a-zA-Z0-9_.-]+/runtime\.json\z' -or
         $InputConfig.source_manifest_path -cne ($InputConfig.source_root -creplace '/infra/k8s\z','.manifest.json') -or
         ($InputConfig.wsl_uid -isnot [int] -and $InputConfig.wsl_uid -isnot [long]) -or
         $InputConfig.wsl_uid -lt 1 -or $InputConfig.wsl_uid -ge 4294967295L -or
-        $InputConfig.source_root -match '/\.\.?/' -or $InputConfig.runtime_path -match '/\.\.?/') {
+        $InputConfig.source_root -match '/\.\.?/' -or $InputConfig.runtime_path -match '/\.\.?/')) {
         throw 'lease_proof_callback_scope'
     }
     $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().Ticks
     if ((Get-HaReactivationHash ([string]$boot)) -cne $WindowsBootSha) { throw 'lease_proof_host_boot_changed' }
     $plan = (ConvertFrom-Json -InputObject $PlanText).windows_reactivation
     $authority = Get-HaCutoverAuthority $plan
+    if ($null -ne $markerAttempt) {
+        $recoveryName = 'N100HA_' + $markerAttempt.Substring(0,24) + '_controller'
+        $recoverySid = [Security.Principal.NTAccount]::new('NT SERVICE',$recoveryName).
+            Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($recoverySid -ceq $authority.controller.Value) { throw 'lease_proof_callback_scope' }
+    }
+    $script:ClosureMarkerAttempt = $markerAttempt
     $path = Join-Path $authority.directory 'ha-controller-owner.json'
     $security = [Security.AccessControl.FileSecurity]::new()
     $security.SetOwner($authority.admins)
@@ -46,7 +83,8 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
     if ($plan.distribution -cne 'Ubuntu-24.04') { throw 'lease_proof_callback_scope' }
     # Initialize Windows providers in this runspace before advertising readiness.
     # Every challenge still checks current state independently.
-    Assert-HaReactivationClosed $plan
+    if ($offline) { Assert-HaWslOfflineReactivationClosed $plan }
+    else { Assert-HaReactivationClosed $plan }
     $script:ClosureVmA = [guid]::ParseExact($InputConfig.vm_a,'D')
     $script:ClosureVmB = [guid]::ParseExact($InputConfig.vm_b,'D')
     if ($script:ClosureVmA -eq [guid]::Empty -or $script:ClosureVmB -eq [guid]::Empty -or
@@ -55,10 +93,11 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
     $script:ClosurePlan = $plan
     $script:ClosureMarker = $marker
     $script:ClosureBoot = $WindowsBootSha
+    $script:ClosureOffline = $offline
+    if ($offline) { return }
     $script:ClosureWsl = Join-Path ([Environment]::SystemDirectory) 'wsl.exe'
     $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
     if ($LASTEXITCODE -ne 0 -or $plan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
-    if ($CollectorSha -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
     $source = [string]$InputConfig.source_root
     $bootstrap = "import hashlib,os,pathlib,sys; p,loader,manifest,pin,uid,collector=sys.argv[1:]; p=pathlib.Path(p); assert os.geteuid()==int(uid); b=(p/'ha_control/native_wsl_launcher.py').read_bytes(); assert hashlib.sha256(b).hexdigest()==loader; e={'__name__':'verified_source_loader'}; exec(compile(b,'native_wsl_launcher.py','exec'),e); s=e['verify'](p,pathlib.Path(manifest),pin,int(uid)); assert hashlib.sha256(s['ha_control/wsl_writer_proof.py']).hexdigest()==collector; sys.meta_path.insert(0,e['VerifiedSources'](p,s)); from ha_control.wsl_writer_proof import main; raise SystemExit(main(persistent=True))"
     if ($httpsReader) {
@@ -97,6 +136,23 @@ function Get-HaClosureRemaining($Context) {
     return $remaining
 }
 
+function Assert-HaLeaseMarkerScope($Request, [switch]$StrictRecord) {
+    $markerText = Assert-HaOwnedCutoverMarker $script:ClosureMarker -ReadContent
+    $marker = ConvertFrom-Json -InputObject $markerText
+    if ($StrictRecord -and (
+        (@($marker.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+            'attempt_id,cluster,generation,plan_sha256,source_commit' -or
+        $marker.attempt_id -isnot [string] -or $marker.plan_sha256 -isnot [string] -or
+        $marker.cluster -isnot [string] -or $marker.cluster -cne $script:ClosurePlan.authority_cluster -or
+        $marker.source_commit -isnot [string] -or $marker.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+        $marker.source_commit -cne $script:ClosurePlan.authority_source_commit -or
+        ($marker.generation -isnot [int] -and $marker.generation -isnot [long]))) {
+        throw 'lease_proof_callback_scope'
+    }
+    if ($marker.plan_sha256 -cne $Request.plan_sha256 -or $marker.attempt_id -cne $Request.attempt_id -or
+        $marker.generation -ne $Request.generation) { throw 'lease_proof_callback_scope' }
+}
+
 function Get-HaLeaseProof($Context) {
     $Context.Progress.step = 'request'
     $request = $Context.Challenge
@@ -108,6 +164,18 @@ function Get-HaLeaseProof($Context) {
         $Context.MarkerSha256 -cne $script:ClosureMarker.sha256 -or $Context.ReactivationPlanSha256 -cne $nativePin) {
         throw 'lease_proof_callback_scope'
     }
+    if ('marker_sha256' -cin $request.PSObject.Properties.Name) {
+        if ($null -eq $script:ClosureMarkerAttempt -or $request.marker_sha256 -cne $script:ClosureMarker.sha256) {
+            throw 'lease_proof_callback_scope'
+        }
+        Assert-HaLeaseMarkerScope $request -StrictRecord
+        $null = Get-HaClosureRemaining $Context
+        return [pscustomobject]@{
+            nonce=$request.nonce; marker_sha256=$request.marker_sha256
+            observation_sha256=Get-HaReactivationHash ('marker:' + $request.nonce + ':' + $request.marker_sha256)
+        }
+    }
+    if ($script:ClosureOffline) { return (Get-HaOfflineLeaseProof $Context) }
     $challenge = Get-HaReactivationHash ($request.nonce + ':' + $request.plan_sha256 + ':' + $request.attempt_id)
     $payload = [ordered]@{
         runtime_path=$script:ClosureInput.runtime_path; runtime_sha256=$script:ClosureInput.runtime_sha256;
@@ -136,14 +204,14 @@ function Get-HaLeaseProof($Context) {
         $null = $vmObserver.AddCommand('Get-FixedVmObserverSnapshot').
             AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).
             AddArgument($script:ClosureVmB).AddArgument($Context.Progress)
+        if ('vm_b_installation_id' -cin $script:ClosureInput.PSObject.Properties.Name) {
+            $null = $vmObserver.AddParameter('InstallationB', $script:ClosureInput.vm_b_installation_id)
+        }
         $vmPending = $vmObserver.BeginInvoke()
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.
         $Context.Progress.step = 'marker_before'
-        $markerText = Assert-HaOwnedCutoverMarker $script:ClosureMarker -ReadContent
-        $marker = ConvertFrom-Json -InputObject $markerText
-        if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
-            $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
+        Assert-HaLeaseMarkerScope $request
         $Context.Progress.step = 'wsl_running'
         $start = [Diagnostics.ProcessStartInfo]::new($script:ClosureWsl, '--list --running --quiet')
         $start.UseShellExecute = $false
@@ -226,4 +294,50 @@ function Get-HaLeaseProof($Context) {
         if ($null -ne $vmObserver) { $vmObserver.Dispose() }
         if ($null -ne $processObserver) { $processObserver.Dispose() }
     }
+}
+
+function Get-HaOfflineLeaseProof($Context) {
+    $request = $Context.Challenge
+    $vmObserver = [PowerShell]::Create()
+    $vmObserver.Runspace = $Context.VmRunspace
+    try {
+        $Context.Progress.step = 'offline_hyperv_start'
+        $null = $vmObserver.AddCommand('Get-FixedVmObserverSnapshot').
+            AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).
+            AddArgument($script:ClosureVmB).AddArgument($Context.Progress)
+        if ('vm_b_installation_id' -cin $script:ClosureInput.PSObject.Properties.Name) {
+            $null = $vmObserver.AddParameter('InstallationB', $script:ClosureInput.vm_b_installation_id)
+        }
+        $pending = $vmObserver.BeginInvoke()
+        $Context.Progress.step = 'offline_marker_before'
+        Assert-HaLeaseMarkerScope $request
+        $Context.Progress.step = 'offline_windows_closed'
+        Assert-HaWslOfflineReactivationClosed $script:ClosurePlan
+        $Context.Progress.step = 'offline_hyperv'
+        if (-not $pending.AsyncWaitHandle.WaitOne((Get-HaClosureRemaining $Context))) {
+            throw 'lease_proof_vm_deadline'
+        }
+        $rows = $vmObserver.EndInvoke($pending)
+        if ($vmObserver.HadErrors -or $rows.Count -ne 1) { throw 'lease_proof_vm_scope' }
+        $vms = $rows[0].PSObject.BaseObject
+        if ($vms.Count -ne 2 -or $vms[0].node -cne 'A' -or $vms[1].node -cne 'B' -or
+            $vms[0].state -cne 'Running' -or $vms[1].state -cne 'Running' -or
+            $vms[0].disk_paths_sha256 -cne $script:ClosureInput.a_disk_paths_sha256 -or
+            $vms[1].disk_paths_sha256 -cne $script:ClosureInput.b_disk_paths_sha256) { throw 'lease_proof_vm_scope' }
+        $Context.Progress.step = 'offline_marker_after'
+        Assert-HaOwnedCutoverMarker $script:ClosureMarker
+        Assert-HaWslWorkloadsAbsent
+        $null = Get-HaClosureRemaining $Context
+        $digest = Get-HaReactivationHash (ConvertTo-Json -InputObject ([ordered]@{
+            observation='windows-offline-v1'; challenge=$request; marker_sha256=$Context.MarkerSha256; vms=$vms
+        }) -Compress -Depth 8)
+        $Context.Progress.step = 'complete'
+        return [pscustomobject]@{
+            nonce=$request.nonce; generation=$request.generation; marker_sha256=$Context.MarkerSha256;
+            reactivation_plan_sha256=$Context.ReactivationPlanSha256; collector_sha256=$request.collector_sha256;
+            windows_boot_sha256=$script:ClosureBoot; wsl_boot_sha256=$request.wsl_boot_sha256;
+            observation_sha256=$digest; recovery_commands_settled=$true;
+            windows_reactivation_closed=$true; wsl_writers_closed=$true
+        }
+    } finally { $vmObserver.Dispose() }
 }

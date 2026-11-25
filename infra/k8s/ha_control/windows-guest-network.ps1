@@ -27,18 +27,27 @@ function Assert-GuestNetworkSpec($Spec){
             $Spec.vm_journal_sha256 -isnot [string] -or $Spec.vm_journal_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             $Spec.vm_manifest_base64 -isnot [string] -or $Spec.vm_manifest_base64 -cnotmatch '^[A-Za-z0-9+/]{4,32768}={0,2}$'){throw 'guest_network_component_provenance_rejected'}
     }
+    if($Spec.schema_version -eq 3){
+        $keys=@($keys|Where-Object{$_ -cnotin @('guest_a_ipv4','guest_b_ipv4')})
+        $keys+=@('node','guest_ipv4','vm_manifest_base64')
+        if($Spec.node -isnot [string] -or $Spec.node -cnotin @('A','B') -or
+            $Spec.prefix_length -ne 30 -or
+            $Spec.vm_manifest_base64 -isnot [string] -or
+            $Spec.vm_manifest_base64 -cnotmatch '^[A-Za-z0-9+/]{4,32768}={0,2}$'){throw 'guest_network_isolated_scope_rejected'}
+    }
     if((($Spec.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($keys|Sort-Object -CaseSensitive)-join ',')){throw 'guest_network_shape_rejected'}
-    if(($Spec.schema_version -isnot [int] -and $Spec.schema_version -isnot [long]) -or $Spec.schema_version -notin @(1,2) -or
+    if(($Spec.schema_version -isnot [int] -and $Spec.schema_version -isnot [long]) -or $Spec.schema_version -notin @(1,2,3) -or
         ($Spec.prefix_length -isnot [int] -and $Spec.prefix_length -isnot [long]) -or $Spec.prefix_length -lt 24 -or $Spec.prefix_length -gt 30){throw 'guest_network_shape_rejected'}
     foreach($key in @('source_commit','vm_driver_source_commit')){if($Spec.$key -isnot [string] -or $Spec.$key -cnotmatch '^[0-9a-f]{40}$'){throw 'guest_network_source_rejected'}}
     foreach($key in @('vm_driver_sha256','installation_id','prepared_receipt_sha256')){if($Spec.$key -isnot [string] -or $Spec.$key -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_network_pin_rejected'}}
-    $ranges=@(foreach($key in @('host_ipv4','guest_a_ipv4','guest_b_ipv4')){
+    $addressKeys=if($Spec.schema_version -eq 3){@('host_ipv4','guest_ipv4')}else{@('host_ipv4','guest_a_ipv4','guest_b_ipv4')}
+    $ranges=@(foreach($key in $addressKeys){
         if($Spec.$key -isnot [string]){throw 'guest_network_address_rejected'}
         $v=Get-GuestNetworkRange $Spec.$key $Spec.prefix_length
         if(-not (($v.address -ge 167772160 -and $v.address -le 184549375) -or ($v.address -ge 2886729728 -and $v.address -le 2887778303) -or ($v.address -ge 3232235520 -and $v.address -le 3232301055)) -or $v.address -eq $v.first -or $v.address -eq $v.last){throw 'guest_network_private_host_required'}
         $v
     })
-    if(@($ranges|ForEach-Object{$_.address}|Select-Object -Unique).Count -ne 3 -or @($ranges|ForEach-Object{$_.first}|Select-Object -Unique).Count -ne 1){throw 'guest_network_subnet_rejected'}
+    if(@($ranges|ForEach-Object{$_.address}|Select-Object -Unique).Count -ne $addressKeys.Count -or @($ranges|ForEach-Object{$_.first}|Select-Object -Unique).Count -ne 1){throw 'guest_network_subnet_rejected'}
 }
 function Get-GuestNetworkAdapter($Switch,$ManagementNics,$Adapters){
     $owned=@($ManagementNics|Where-Object{$_.SwitchId.ToString() -ceq $Switch.Id.ToString() -and $_.SwitchName -ceq $Switch.Name})
@@ -80,13 +89,14 @@ function Invoke-GuestNetwork{
     if((Get-GuestNetworkHash $bytes) -cne $ManifestSha256){throw 'guest_network_manifest_changed'}
     $text=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes)
     $keys=@([regex]::Matches($text,'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')|ForEach-Object{$_.Groups[1].Value})
-    if($text.Contains('\') -or $keys.Count -notin @(10,17) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_network_duplicate_or_escaped_keys'}
+    if($text.Contains('\') -or $keys.Count -notin @(10,11,17) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_network_duplicate_or_escaped_keys'}
     $networkSpec=$text|ConvertFrom-Json
+    if(-not $PSCommandPath -and $networkSpec.schema_version -ne 3){throw 'guest_network_in_memory_scope_rejected'}
     Assert-GuestNetworkSpec $networkSpec
     $networkManifestHash=$ManifestSha256
     $networkRoot=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) ('N100HA_'+$networkSpec.installation_id.Substring(0,24))
     $driverPath=Join-Path $networkRoot 'windows-guest-vm.ps1'
-    $ownedSupportPath=Join-Path $PSScriptRoot 'guest-owned-profile.ps1'
+    $ownedSupportPath=if($networkSpec.schema_version -eq 2){Join-Path $PSScriptRoot 'guest-owned-profile.ps1'}else{''}
     $networkScriptHash=if($networkSpec.schema_version -eq 2){Get-GuestNetworkHash ([IO.File]::ReadAllBytes($PSCommandPath))}else{''}
     # Execute only the externally pinned buffer, never reopen mutable code.
     if((Get-Item -LiteralPath $driverPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'guest_network_driver_reparse'}
@@ -104,11 +114,21 @@ function Invoke-GuestNetwork{
     try{
     Assert-GuestVmPrivate $networkRoot
     Assert-GuestVmPrivate $driverPath
-    $prepared=Read-GuestVmPreparedReceipt (Join-Path $networkRoot 'vm-A-prepared-receipt.json') $networkSpec.prepared_receipt_sha256
+    $node=if($networkSpec.schema_version -eq 3){$networkSpec.node}else{'A'}
+    $prepared=Read-GuestVmPreparedReceipt (Join-Path $networkRoot ('vm-'+$node+'-prepared-receipt.json')) $networkSpec.prepared_receipt_sha256
     $pins=$prepared.pins
-    if($pins.installation_id -cne $networkSpec.installation_id -or $pins.node -cne 'A'){throw 'guest_network_prepared_binding_changed'}
+    if($pins.installation_id -cne $networkSpec.installation_id -or $pins.node -cne $node){throw 'guest_network_prepared_binding_changed'}
     if($null -ne $ownedLease){
         $vmSpec=Read-GuestNetworkOwnedVmSpec $networkSpec $pins $ownedSupportPath
+    }elseif($networkSpec.schema_version -eq 3){
+        if($pins.source_commit -cne $networkSpec.vm_driver_source_commit){throw 'guest_network_prepared_binding_changed'}
+        $Manifest=$networkSpec.vm_manifest_base64
+        $ManifestSha256=$pins.manifest_sha256
+        $vmSpec=Read-GuestVmSpec
+        if($vmSpec.schema_version -ne 3 -or $vmSpec.source_commit -cne $pins.source_commit -or
+            $vmSpec.installation_id -cne $networkSpec.installation_id -or
+            $vmSpec.node -cne $node -or $vmSpec.config_profile.acceptance_scope -cne 'isolated-predeployment' -or
+            $vmSpec.optional_egress_nic){throw 'guest_network_isolated_scope_rejected'}
     }else{
     if($pins.source_commit -cne $networkSpec.vm_driver_source_commit){throw 'guest_network_prepared_binding_changed'}
     $vmSpec=[pscustomobject]@{schema_version=1;source_commit=$pins.source_commit;stage_source_commit=$pins.stage_source_commit;seed_source_commit=$pins.seed_source_commit;installation_id=$pins.installation_id;stage_manifest_sha256=$pins.stage_manifest_sha256;seed_iso_sha256=$pins.seed_sha256;seed_iso_bytes=(Get-Item -LiteralPath $pins.seed_path).Length;node='A';mac_address=$pins.mac_address;optional_egress_nic=$pins.optional_egress_nic;egress_mac_address=$pins.egress_mac_address;peer_prepared_receipt_sha256=''}
@@ -116,31 +136,58 @@ function Invoke-GuestNetwork{
     }
     $ManifestSha256=$pins.manifest_sha256
     $names=Get-GuestVmNames $vmSpec
-    $null=Assert-GuestVmPrepared $vmSpec $names $pins (Join-Path $networkRoot 'guest-A') $pins.disk_path $pins.seed_path
+    $null=Assert-GuestVmPrepared $vmSpec $names $pins (Join-Path $networkRoot ('guest-'+$node)) $pins.disk_path $pins.seed_path
     if($null -ne $ownedLease){Assert-GuestNetworkOwnedSeal $networkRoot $vmSpec $pins $networkSpec}
     $switch=Get-VMSwitch -Id ([Guid]$pins.switch_id)
+    if($networkSpec.schema_version -eq 3){
+        $members=@(Get-VMNetworkAdapter -VMName '*' | Where-Object {$_.SwitchId -eq $switch.Id})
+        if($members.Count -ne 1 -or [string]$members[0].VMId -ine $pins.vm_id -or
+            $members[0].Name -cne 'ha-data' -or $members[0].MacAddress -cne $pins.mac_address){
+            throw 'guest_network_isolated_membership_rejected'
+        }
+    }
     $adapter=Get-GuestNetworkAdapter $switch @(Get-VMNetworkAdapter -ManagementOS -SwitchName $names.switch) @(Get-NetAdapter -IncludeHidden)
     $index=[int]$adapter.InterfaceIndex
     $interface=Get-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4
     if(@($interface).Count -ne 1 -or [string]$interface.Forwarding -cne 'Disabled'){throw 'guest_network_forwarding_must_be_disabled'}
+    if($networkSpec.schema_version -eq 3 -and
+        ($interface.WeakHostSend -ne 'Disabled' -or $interface.WeakHostReceive -ne 'Disabled')){
+        throw 'guest_network_weak_host_rejected'
+    }
     $addresses=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop|Where-Object{$_.InterfaceIndex -eq $index})
     if(@($addresses|Where-Object{$_.IPAddress -notlike '169.254.*'}).Count){throw 'guest_network_interface_already_addressed'}
     $candidate=Get-GuestNetworkRange $networkSpec.host_ipv4 $networkSpec.prefix_length
-    foreach($route in @(Get-NetRoute -AddressFamily IPv4|Where-Object{$_.DestinationPrefix -ne '0.0.0.0/0'})){
+    $routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore)
+    if($networkSpec.schema_version -eq 3){
+        try{$routes+=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore PersistentStore -ErrorAction Stop)}
+        catch{
+            if($_.CategoryInfo.Category -ne 'ObjectNotFound' -or
+                $_.FullyQualifiedErrorId -cne 'CmdletizationQuery_NotFound_AddressFamily,Get-NetRoute'){throw}
+        }
+    }
+    foreach($route in @($routes|Where-Object{$_.DestinationPrefix -ne '0.0.0.0/0'})){
         $parts=$route.DestinationPrefix.Split('/');$range=Get-GuestNetworkRange $parts[0] ([int]$parts[1])
         if($candidate.first -le $range.last -and $range.first -le $candidate.last){throw 'guest_network_existing_route_overlap'}
     }
     if($null -ne $ownedLease){$ownedLease.AssertCurrent();Assert-GuestOwnedRootAcl $networkRoot $networkSpec}
     $request=Join-Path $networkRoot 'network-request.json'
     Write-GuestVmRecord $request ([ordered]@{schema_version=1;scope='new_owned_internal_interface_only';source_commit=$networkSpec.source_commit;installation_id=$networkSpec.installation_id;manifest_sha256=$networkManifestHash;prepared_receipt_sha256=$networkSpec.prepared_receipt_sha256;switch_id=$pins.switch_id;interface_index=$index;phase='before_new_private_address'}) $true
-    $null=New-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress $networkSpec.host_ipv4 -PrefixLength $networkSpec.prefix_length
+    $addressOptions=@{}
+    if($networkSpec.schema_version -eq 3){$addressOptions.PolicyStore='ActiveStore'}
+    $null=New-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress $networkSpec.host_ipv4 -PrefixLength $networkSpec.prefix_length @addressOptions
     $watch=[Diagnostics.Stopwatch]::StartNew()
     do{
         $actual=@(Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4|Where-Object{$_.IPAddress -ceq $networkSpec.host_ipv4 -and $_.PrefixLength -eq $networkSpec.prefix_length -and [string]$_.AddressState -ceq 'Preferred'})
         if($actual.Count -eq 1){break};Start-Sleep -Milliseconds 100
     }while($watch.Elapsed.TotalSeconds -lt 5)
     $after=Get-GuestNetworkAdapter (Get-VMSwitch -Id ([Guid]$pins.switch_id)) @(Get-VMNetworkAdapter -ManagementOS -SwitchName $names.switch) @(Get-NetAdapter -IncludeHidden)
-    if($actual.Count -ne 1 -or $after.InterfaceIndex -ne $index -or $after.InterfaceGuid -ne $adapter.InterfaceGuid -or [string](Get-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4).Forwarding -cne 'Disabled'){throw 'guest_network_postcheck_failed'}
+    $afterInterface=Get-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4
+    if($actual.Count -ne 1 -or $after.InterfaceIndex -ne $index -or $after.InterfaceGuid -ne $adapter.InterfaceGuid -or
+        @($afterInterface).Count -ne 1 -or [string]$afterInterface.Forwarding -cne 'Disabled' -or
+        ($networkSpec.schema_version -eq 3 -and
+        ($afterInterface.WeakHostSend -ne 'Disabled' -or $afterInterface.WeakHostReceive -ne 'Disabled'))){
+        throw 'guest_network_postcheck_failed'
+    }
     Write-GuestVmRecord (Join-Path $networkRoot 'network-receipt.json') ([ordered]@{schema_version=1;source_commit=$networkSpec.source_commit;installation_id=$networkSpec.installation_id;manifest_sha256=$networkManifestHash;switch_id=$pins.switch_id;interface_index=$index;configured=$true;nat_created=$false;default_route_created=$false;forwarding_enabled=$false;production_transition=$false}) $true
     [ordered]@{scope='new_owned_internal_interface_only';source_commit=$networkSpec.source_commit;installation_id=$networkSpec.installation_id;manifest_sha256=$networkManifestHash;configured=$true;nat_created=$false;default_route_created=$false;forwarding_enabled=$false;production_transition=$false}|ConvertTo-Json -Compress
     }finally{if($null -ne $ownedLease){$ownedLease.Dispose()}}
