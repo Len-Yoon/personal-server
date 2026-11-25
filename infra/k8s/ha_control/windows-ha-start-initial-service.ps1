@@ -36,8 +36,56 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $hashPattern = '\A[a-f0-9]{64}\z'
 
+function Assert-RecoveryImageLineage($Plan,[string]$CandidatePath,[string]$Parent,[string]$ReservationSha,
+                                     [string]$ReservedImage){
+    $current=$Plan
+    $planPath=$CandidatePath
+    $custodyRoot=Join-Path $Parent 'N100HA-InitialCutover'
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $handoff=ConvertTo-Json $Plan.initial_cutover_handoff -Compress -Depth 8
+    $recovery=ConvertTo-Json $Plan.initial_cutover_recovery -Compress -Depth 8
+    $boot=$Plan.windows_initial_observer.windows_boot_sha256
+    for($index=0;$index -le 32;$index++){
+        $service=$current.windows_enforced
+        $scope=$current.initial_recovery_postboot
+        Assert-PostbootEnvelope $scope
+        $root=Join-Path $custodyRoot $scope.attempt_id.Substring(0,40)
+        if(-not $seen.Add($scope.attempt_id) -or $planPath -cne (Join-Path $root 'plan.json') -or
+           $current.installation_id -cne $Plan.installation_id -or
+           (ConvertTo-Json $current.initial_cutover_handoff -Compress -Depth 8) -cne $handoff -or
+           (ConvertTo-Json $current.initial_cutover_recovery -Compress -Depth 8) -cne $recovery -or
+           $current.initial_service_start.reservation_receipt_sha256 -cne $ReservationSha -or
+           $current.windows_initial_observer.windows_boot_sha256 -cne $boot -or
+           $service.service_name -cne $Plan.windows_enforced.service_name -or
+           $service.service_sid -cne $Plan.windows_enforced.service_sid -or
+           $service.service_image_sha256 -cnotmatch $hashPattern){throw 'initial_service_recovery_lineage'}
+        if($index -gt 0 -and $service.service_image_sha256 -ceq $ReservedImage){return}
+        if($index -eq 32 -or 'predecessor_kind' -cnotin $scope.PSObject.Properties.Name -or
+           $scope.predecessor_kind -cne 'published-postboot-sameboot-v1' -or
+           $scope.previous_windows_boot_sha256 -cne $boot){throw 'initial_service_recovery_lineage'}
+        $expectedPreviousImage=$service.service_image_sha256
+        if('previous_service_image_sha256' -cin $scope.PSObject.Properties.Name){
+            if($scope.successor_service_image_sha256 -cne $service.service_image_sha256 -or
+               $scope.successor_service_image_path_sha256 -cne $current.initial_service_start.service_image_path_sha256){
+                throw 'initial_service_recovery_lineage'
+            }
+            $expectedPreviousImage=$scope.previous_service_image_sha256
+        }
+        $archive=Join-Path $root 'postboot-predecessor-plan.json'
+        Assert-UnpublishedTcbPath $archive
+        $previous=Read-PinnedJson $archive $scope.predecessor_plan_sha256
+        if($previous.windows_enforced.service_image_sha256 -cne $expectedPreviousImage){throw 'initial_service_recovery_lineage'}
+        $previousScope=$previous.initial_recovery_postboot
+        Assert-PostbootEnvelope $previousScope
+        $planPath=Join-Path (Join-Path $custodyRoot $previousScope.attempt_id.Substring(0,40)) 'plan.json'
+        Assert-UnpublishedTcbPath $planPath
+        $current=Read-PinnedJson $planPath $scope.predecessor_plan_sha256
+    }
+    throw 'initial_service_recovery_lineage'
+}
+
 function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$ReservationSha,
-                                   [string]$Name,[string]$HostPath,[string]$Parent){
+                                   [string]$Name,[string]$HostPath,[string]$Parent,[string]$CandidatePath){
     $recovery=$Plan.initial_cutover_recovery
     $postboot='initial_recovery_postboot' -cin $Plan.PSObject.Properties.Name
     $rearming='initial_recovery_rearm' -cin $Plan.PSObject.Properties.Name
@@ -92,13 +140,19 @@ function Assert-RecoveryStartScope($Plan,$Approval,[string]$Attempt,[string]$Res
     if($ownership.format -cne 'ha-owned-recovery-service-v1' -or
         $ownership.installation_id -cne $Plan.installation_id -or $ownership.recovery_attempt_id -cne $Attempt -or
         $ownership.service_name -cne $Name -or $ownership.service_sid -cne $Plan.windows_enforced.service_sid -or
-        $ownership.service_image_sha256 -cne $reservationImage -or
+        $ownership.service_image_sha256 -cnotmatch $hashPattern -or
         $ownership.service_config_sha256 -cne $receipt.service_config_sha256 -or
         $ownership.predecessor_service_sha256 -cne $recovery.predecessor_service_sha256 -or
         $ownership.predecessor_terminal_sha256 -cne $recovery.predecessor_terminal_sha256 -or
         $ownership.new_owned_service -isnot [bool] -or -not $ownership.new_owned_service -or
         $ownership.scm_registration_complete -isnot [bool] -or -not $ownership.scm_registration_complete){
         throw 'initial_service_recovery_scope'
+    }
+    if($ownership.service_image_sha256 -cne $reservationImage){
+        if(-not $postboot -or 'previous_service_image_sha256' -cnotin $Plan.initial_recovery_postboot.PSObject.Properties.Name){
+            throw 'initial_service_recovery_scope'
+        }
+        Assert-RecoveryImageLineage $Plan $CandidatePath $Parent $ReservationSha $ownership.service_image_sha256
     }
 }
 
@@ -1222,7 +1276,7 @@ function Arm-SamebootSuccessorHost($Plan,$Approval,$Current){
     $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     $serviceRoot=Join-Path $parent ('N100HA_'+$RecoveryAttemptId.Substring(0,24))
     $hostPath=Join-Path $serviceRoot ('postboot-'+$r.attempt_id+'\host\windows-service-host.exe')
-    Assert-RecoveryStartScope $Plan $Approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath $parent
+    Assert-RecoveryStartScope $Plan $Approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath $parent $PlanPath
     Assert-UnpublishedTcbPath $hostPath
     Assert-Executable $hostPath $ServiceHostSha256
     $target='"'+$hostPath+'"'
@@ -1343,7 +1397,7 @@ try {
     $action = if($unpublished){'ha-recover-unpublished-initial-writer'}elseif($postboot){'ha-resume-initial-writer'}elseif($rearming){'ha-rearm-initial-writer'}elseif($recovering){'ha-recover-initial-writer'}else{'ha-initial-wsl-cutover'}
     if ($recovering) {
         Assert-RecoveryStartScope $plan $approval $RecoveryAttemptId $RecoveryReservationSha256 $ServiceName $hostPath (
-            [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) $PlanPath
     } elseif ('initial_cutover_recovery' -cin $plan.PSObject.Properties.Name) {
         throw 'initial_service_recovery_scope'
     }

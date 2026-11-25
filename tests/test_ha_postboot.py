@@ -781,6 +781,90 @@ class ContinuationDerivationTests(unittest.TestCase):
         with patch.object(guest.worker.runtime,'_read',side_effect=(raw,raw+b' ')),self.assertRaises(TransitionBlocked):guest.closed_revision(request)
 
 class SamebootPostbootSealTests(unittest.TestCase):
+    def test_windows_repeated_image_transition_anchors_to_original_reservation(self):
+        from tempfile import TemporaryDirectory
+
+        candidate, _ = self.transition_fixture()
+        candidate['initial_service_start']['reservation_receipt_sha256'] = '9' * 64
+        envelope = candidate['initial_recovery_postboot']
+        boot = envelope['previous_windows_boot_sha256']
+        candidate['windows_initial_observer']['windows_boot_sha256'] = boot
+
+        def plan(attempt, image, predecessor_image, predecessor_pin):
+            value = deepcopy(candidate)
+            value['windows_enforced']['service_image_sha256'] = image
+            value['initial_recovery_postboot'].update(
+                attempt_id=attempt, previous_service_image_sha256=predecessor_image,
+                successor_service_image_sha256=image, predecessor_plan_sha256=predecessor_pin,
+                successor_service_image_path_sha256=value['initial_service_start']['service_image_path_sha256'])
+            return value
+
+        def pin(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+        origin = plan('1' * 64, 'a' * 64, '8' * 64, '7' * 64)
+        current = plan('2' * 64, 'b' * 64, 'a' * 64, pin(origin))
+        successor = plan('3' * 64, 'c' * 64, 'b' * 64, pin(current))
+        with TemporaryDirectory() as folder:
+            fixture = Path(folder) / 'fixture.json'
+            fixture.write_text(json.dumps({'plans': [origin, current, successor],
+                                           'pins': [pin(origin), pin(current), pin(successor)]}))
+            source = ROOT / 'infra/k8s/ha_control/windows-ha-start-initial-service.ps1'
+            script = Path(folder) / 'exercise.ps1'
+            script.write_text(r"""$ErrorActionPreference='Stop'
+Set-StrictMode -Version Latest
+$hashPattern='\A[a-f0-9]{64}\z'
+function Join-Path($Parent,$Leaf){$Parent+'\'+$Leaf}
+function Assert-UnpublishedTcbPath([string]$Path){$seenProtected.Add($Path)}
+function Read-PinnedJson([string]$Path,[string]$Sha){
+    if(-not $files.ContainsKey($Path) -or $files[$Path].pin -cne $Sha){throw 'wrong_archive_pin'}
+    return $files[$Path].plan
+}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($args[1],[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'parse_failed'}
+foreach($name in @('Assert-PostbootEnvelope','Assert-RecoveryImageLineage')){
+    $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true)
+    . ([scriptblock]::Create($function.Extent.Text))
+}
+$fixture=ConvertFrom-Json ([IO.File]::ReadAllText($args[0]))
+$plans=$fixture.plans
+$roots=@($plans|ForEach-Object {'C:\ProgramData\N100HA-InitialCutover\'+$_.initial_recovery_postboot.attempt_id.Substring(0,40)})
+$files=@{}
+for($i=0;$i -lt 2;$i++){
+    $artifact=@{plan=$plans[$i];pin=$fixture.pins[$i]}
+    $files[$roots[$i]+'\plan.json']=$artifact
+    $files[$roots[$i+1]+'\postboot-predecessor-plan.json']=$artifact
+}
+$seenProtected=[Collections.Generic.List[string]]::new()
+function Invoke-Lineage([string]$Image){
+    Assert-RecoveryImageLineage $plans[2] ($roots[2]+'\plan.json') 'C:\ProgramData' ('9'*64) $Image
+}
+function Must-Reject([scriptblock]$Action){
+    $accepted=$false
+    try { & $Action; $accepted=$true } catch {}
+    if($accepted){throw 'unsafe_lineage_accepted'}
+}
+Invoke-Lineage ('a'*64)
+if($seenProtected.Count -ne 4){throw 'archives_not_checked'}
+Must-Reject {Invoke-Lineage ('d'*64)}
+$plans[1].initial_recovery_postboot.previous_service_image_sha256='d'*64
+Must-Reject {Invoke-Lineage ('a'*64)}
+$plans[1].initial_recovery_postboot.previous_service_image_sha256='a'*64
+$plans[1].initial_service_start.reservation_receipt_sha256='d'*64
+Must-Reject {Invoke-Lineage ('a'*64)}
+$plans[1].initial_service_start.reservation_receipt_sha256='9'*64
+$files.Remove($roots[1]+'\plan.json')
+Must-Reject {Invoke-Lineage ('a'*64)}
+$plans[2].windows_enforced.service_image_sha256='a'*64
+$plans[2].initial_recovery_postboot.successor_service_image_sha256='a'*64
+Must-Reject {Invoke-Lineage ('a'*64)}
+exit 0
+""")
+            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(script), str(fixture), str(source)],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_sameboot_stop_derives_closed_revision_from_both_exact_terminal_copies(self):
         from ha_control import native_guest_postboot as guest, native_stdio_bridge as wire
 

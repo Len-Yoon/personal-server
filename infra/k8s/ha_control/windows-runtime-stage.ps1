@@ -287,6 +287,115 @@ function Open-RearmRuntimeInput([string]$Path,[string]$Root,[string]$Sid,[long]$
         return [pscustomobject]@{Path=$Path;Identity=$identity;Stream=$file}
     }catch{$file.Dispose();throw}
 }
+function Read-RearmRuntimeLineagePlan([string]$Path,[string]$Hash,[string]$PrivateRoot,$Spec,$Opened,$Lineage){
+    if($Hash -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+    $heldPlan=Open-RearmRuntimeInput $Path $PrivateRoot $Spec.ServiceSid 65536
+    $Opened.Add($heldPlan.Stream)
+    if([HaRuntimeStageV1.Rules]::StreamHash($heldPlan.Stream) -cne $Hash){throw 'runtime_stage_rearm_lineage'}
+    $heldPlan.Stream.Position=0
+    $reader=[IO.StreamReader]::new($heldPlan.Stream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
+    try{$plan=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),65536)}finally{$reader.Dispose()}
+    $heldPlan.Stream.Position=0
+    $Lineage.Add([pscustomobject]@{Path=$heldPlan.Path;Identity=$heldPlan.Identity;Stream=$heldPlan.Stream;Hash=$Hash;Root=$PrivateRoot})
+    return ,$plan
+}
+function Assert-RearmRuntimeLineageScope($Plan,$Spec,$Baseline=$null){
+    foreach($field in @('windows_enforced','initial_service_start','initial_cutover_handoff','initial_cutover_recovery','windows_initial_observer')){
+        if($Plan[$field] -isnot [Collections.Generic.Dictionary[string,object]]){throw 'runtime_stage_rearm_lineage'}
+    }
+    $identity=$Plan['windows_enforced'];$start=$Plan['initial_service_start']
+    $recovery=$Plan['initial_cutover_recovery'];$handoff=$Plan['initial_cutover_handoff']
+    [HaRuntimeStageV1.Rules]::Keys($recovery,@('attempt_id','predecessor_service_sha256','predecessor_terminal_sha256'))
+    [HaRuntimeStageV1.Rules]::Keys($handoff,@('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256'))
+    if([HaRuntimeStageV1.Rules]::Text($Plan,'installation_id') -cne $Spec.InstallationId -or
+       [HaRuntimeStageV1.Rules]::Text($identity,'service_name') -cne $Spec.ServiceName -or
+       [HaRuntimeStageV1.Rules]::Text($identity,'service_sid') -cne $Spec.ServiceSid -or
+       [HaRuntimeStageV1.Rules]::Text($identity,'service_image_sha256') -cnotmatch '\A[a-f0-9]{64}\z' -or
+       [HaRuntimeStageV1.Rules]::Text($start,'reservation_receipt_sha256') -cne $Spec.ReservationHash -or
+       [HaRuntimeStageV1.Rules]::Text($recovery,'attempt_id') -cne $Spec.RecoveryAttempt){throw 'runtime_stage_rearm_lineage'}
+    foreach($field in @('predecessor_service_sha256','predecessor_terminal_sha256')){
+        if([HaRuntimeStageV1.Rules]::Text($recovery,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+    }
+    foreach($field in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
+        if([HaRuntimeStageV1.Rules]::Text($handoff,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+    }
+    if($handoff['attempt_id'] -ceq $recovery['attempt_id'] -or
+       [HaRuntimeStageV1.Rules]::Text($Plan['windows_initial_observer'],'windows_boot_sha256') -cnotmatch '\A[a-f0-9]{64}\z'){
+        throw 'runtime_stage_rearm_lineage'
+    }
+    if($null -ne $Baseline){
+        foreach($field in @('predecessor_service_sha256','predecessor_terminal_sha256')){
+            if($recovery[$field] -cne $Baseline['initial_cutover_recovery'][$field]){throw 'runtime_stage_rearm_lineage'}
+        }
+        foreach($field in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
+            if($handoff[$field] -cne $Baseline['initial_cutover_handoff'][$field]){throw 'runtime_stage_rearm_lineage'}
+        }
+        if($Plan['windows_initial_observer']['windows_boot_sha256'] -cne $Baseline['windows_initial_observer']['windows_boot_sha256']){
+            throw 'runtime_stage_rearm_lineage'
+        }
+    }
+}
+function Open-RearmRuntimeImageLineage([string]$Root,$Spec,$Settings,$Service,[string]$ActualHostSha,$Ownership,$Opened){
+    # Current service.args is already pinned by ArgsSha. It supplies the current
+    # plan pin, never a caller-selected lineage list. Every archive path below
+    # is derived from the hash-bound native same-boot envelope.
+    $lineage=[Collections.Generic.List[object]]::new()
+    $planPath=$Settings.plan_path;$planHash=$Settings.plan_sha256
+    if($planPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z'){
+        throw 'runtime_stage_rearm_lineage'
+    }
+    $privateRoot=[IO.Path]::GetDirectoryName($planPath)
+    $plan=Read-RearmRuntimeLineagePlan $planPath $planHash $privateRoot $Spec $Opened $lineage
+    Assert-RearmRuntimeLineageScope $plan $Spec
+    $baseline=$plan
+    foreach($field in @('predecessor_service_sha256','predecessor_terminal_sha256')){
+        if($baseline['initial_cutover_recovery'][$field] -cne $Ownership[$field]){throw 'runtime_stage_rearm_lineage'}
+    }
+    $OriginalHostSha=$Ownership['service_image_sha256']
+    $pathHash=[HaRuntimeStageV1.Rules]::Hash([Text.Encoding]::UTF8.GetBytes($Service.PathName))
+    if($plan['windows_enforced']['service_image_sha256'] -cne $ActualHostSha -or
+       $plan['initial_service_start']['service_image_path_sha256'] -cne $pathHash){throw 'runtime_stage_rearm_lineage'}
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $null=$seen.Add($planHash)
+    for($depth=0;$depth -lt 32;$depth++){
+        $post=$plan['initial_recovery_postboot']
+        if($post -isnot [Collections.Generic.Dictionary[string,object]]){throw 'runtime_stage_rearm_lineage'}
+        $fields=@('schema_version','attempt_id','predecessor_terminal_sha256','predecessor_binding_sha256',
+            'predecessor_args_sha256','predecessor_seal_sha256','previous_windows_boot_sha256','closure_mode',
+            'predecessor_kind','predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256','carryover_receipt_sha256',
+            'previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
+        [HaRuntimeStageV1.Rules]::Keys($post,$fields)
+        if([HaRuntimeStageV1.Rules]::Number($post,'schema_version') -ne 1 -or
+           $post['predecessor_kind'] -cne 'published-postboot-sameboot-v1' -or
+           $post['closure_mode'] -cne 'windows-offline-v1'){throw 'runtime_stage_rearm_lineage'}
+        foreach($field in $fields|Where-Object{$_ -notin @('schema_version','predecessor_kind','closure_mode')}){
+            if([HaRuntimeStageV1.Rules]::Text($post,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+        }
+        $image=$plan['windows_enforced']['service_image_sha256']
+        $expectedRoot=Join-Path 'C:\ProgramData\N100HA-InitialCutover' $post['attempt_id'].Substring(0,40)
+        $expectedHost=Join-Path $Root ('postboot-'+$post['attempt_id']+'\host\windows-service-host.exe')
+        $expectedPathHash=[HaRuntimeStageV1.Rules]::Hash([Text.Encoding]::UTF8.GetBytes(('"'+$expectedHost+'"')))
+        if(($depth -eq 0 -and $planPath -cne (Join-Path $expectedRoot 'plan.json')) -or
+           $post['attempt_id'] -ceq $post['stopped_attempt_id'] -or $post['attempt_id'] -in @(
+               $Spec.RecoveryAttempt,$baseline['initial_cutover_handoff']['attempt_id']) -or
+           $post['successor_service_image_sha256'] -cne $image -or
+           $post['successor_service_image_sha256'] -ceq $post['previous_service_image_sha256'] -or
+           $post['successor_service_image_path_sha256'] -cne $expectedPathHash -or
+           $plan['initial_service_start']['service_image_path_sha256'] -cne $expectedPathHash -or
+           $post['previous_windows_boot_sha256'] -cne $baseline['windows_initial_observer']['windows_boot_sha256']){
+            throw 'runtime_stage_rearm_lineage'
+        }
+        $nextHash=$post['predecessor_plan_sha256']
+        if(-not $seen.Add($nextHash)){throw 'runtime_stage_rearm_lineage'}
+        $plan=Read-RearmRuntimeLineagePlan (Join-Path $expectedRoot 'postboot-predecessor-plan.json') $nextHash $expectedRoot $Spec $Opened $lineage
+        Assert-RearmRuntimeLineageScope $plan $Spec $baseline
+        if($plan['windows_enforced']['service_image_sha256'] -cne $post['previous_service_image_sha256']){
+            throw 'runtime_stage_rearm_lineage'
+        }
+        if($plan['windows_enforced']['service_image_sha256'] -ceq $OriginalHostSha){return ,$lineage.ToArray()}
+    }
+    throw 'runtime_stage_rearm_lineage'
+}
 function Open-RearmRuntimeStopped([string]$Root,$Spec,[string]$ArgsSha,[string]$OwnershipSha){
     $opened=[Collections.Generic.List[IDisposable]]::new()
     try{
@@ -326,11 +435,15 @@ function Open-RearmRuntimeStopped([string]$Root,$Spec,[string]$ArgsSha,[string]$
         if($ownership['format'] -cne 'ha-owned-recovery-service-v1' -or
            $ownership['service_name'] -cne $Spec.ServiceName -or $ownership['service_sid'] -cne $Spec.ServiceSid -or
            $ownership['installation_id'] -cne $Spec.InstallationId -or $ownership['recovery_attempt_id'] -cne $Spec.RecoveryAttempt -or
-           $ownership['service_image_sha256'] -cnotmatch '\A[a-f0-9]{64}\z' -or
-           [HaRuntimeStageV1.Rules]::StreamHash($hostInput.Stream) -cne $ownership['service_image_sha256'] -or
-           $settings.host_sha256 -cne $ownership['service_image_sha256']){throw 'runtime_stage_rearm_host'}
+           $ownership['service_image_sha256'] -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_host'}
+        $actualHostSha=[HaRuntimeStageV1.Rules]::StreamHash($hostInput.Stream)
+        if($settings.host_sha256 -cne $actualHostSha){throw 'runtime_stage_rearm_host'}
+        $lineage=@()
+        if($actualHostSha -cne $ownership['service_image_sha256']){
+            $lineage=Open-RearmRuntimeImageLineage $Root $Spec $settings $service $actualHostSha $ownership $opened
+        }
         $lease=[pscustomobject]@{Service=$service;Arguments=$arguments;Host=$hostInput;Ownership=$owner;
-            Opened=$opened;ArgsSha=$ArgsSha;HostSha=$ownership['service_image_sha256']}
+            Opened=$opened;ArgsSha=$ArgsSha;HostSha=$actualHostSha;OwnershipSha=$OwnershipSha;Lineage=$lineage}
         Assert-RearmRuntimeStopped $Root $Spec $lease
         return $lease
     }catch{foreach($file in $opened){$file.Dispose()};throw}
@@ -343,10 +456,19 @@ function Assert-RearmRuntimeStopped([string]$Root,$Spec,$Lease){
     foreach($item in @($Lease.Arguments,$Lease.Host,$Lease.Ownership)){
         if([HaRuntimeStageV1.Native]::Identity($item.Path) -cne $item.Identity){throw 'runtime_stage_rearm_input'}
     }
+    foreach($item in $Lease.Lineage){
+        Assert-RuntimeStagePath $item.Path $item.Root $Spec.ServiceSid $true
+        if([HaRuntimeStageV1.Native]::Identity($item.Path) -cne $item.Identity){throw 'runtime_stage_rearm_input'}
+        $item.Stream.Position=0
+        if([HaRuntimeStageV1.Rules]::StreamHash($item.Stream) -cne $item.Hash){throw 'runtime_stage_rearm_input'}
+        $item.Stream.Position=0
+    }
     $Lease.Arguments.Stream.Position=0
     $Lease.Host.Stream.Position=0
+    $Lease.Ownership.Stream.Position=0
     if([HaRuntimeStageV1.Rules]::StreamHash($Lease.Arguments.Stream) -cne $Lease.ArgsSha -or
-       [HaRuntimeStageV1.Rules]::StreamHash($Lease.Host.Stream) -cne $Lease.HostSha){throw 'runtime_stage_rearm_input'}
+       [HaRuntimeStageV1.Rules]::StreamHash($Lease.Host.Stream) -cne $Lease.HostSha -or
+       [HaRuntimeStageV1.Rules]::StreamHash($Lease.Ownership.Stream) -cne $Lease.OwnershipSha){throw 'runtime_stage_rearm_input'}
 }
 function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$ReaderSid='',[bool]$InputFile=$false){
     if($Path -cnotmatch '^[A-Za-z]:\\' -or $Path.Substring(2).Contains(':') -or $Path.Contains('/') -or $Path -match '(^|\\)\.\.?($|\\)' -or $Path -match '[ .](\\|$)'){throw 'runtime_stage_path_rejected'}

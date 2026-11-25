@@ -265,6 +265,116 @@ catch{if($_.Exception.Message -cne 'runtime_stage_rearm_host'){throw}}
 exit 0
 ''', folder)
 
+    def test_rearm_runtime_sameboot_image_lineage_keeps_original_reservation(self):
+        self.ps(r"""
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:RUNTIME_STAGE_SOURCE,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'fixture_parse'}
+foreach($name in @('Read-RearmRuntimeLineagePlan','Assert-RearmRuntimeLineageScope','Open-RearmRuntimeImageLineage')){
+ $node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
+ # Emulate Windows path operations while every file is a memory-only fixture.
+ $text=$node.Extent.Text.Replace('[IO.Path]::GetDirectoryName($planPath)',"(`$planPath.Substring(0,`$planPath.LastIndexOf('\')))")
+ . ([scriptblock]::Create($text))
+}
+function Join-Path {param($Path,$ChildPath);return $Path.TrimEnd('\')+'\'+$ChildPath}
+$script:inputs=@{};$script:reads=@()
+function Open-RearmRuntimeInput {param($Path,$Root,$Sid,$Maximum)
+ if($Sid -cne $spec.ServiceSid -or $Maximum -ne 65536 -or -not $Path.StartsWith($Root+'\',[StringComparison]::Ordinal)){
+  throw 'fixture_input_scope'
+ }
+ $script:reads+=@($Path)
+ if(-not $script:inputs.ContainsKey($Path)){throw 'fixture_missing_archive'}
+ return [pscustomobject]@{Path=$Path;Identity=('stable:'+ $Path);Stream=[IO.MemoryStream]::new([byte[]]$script:inputs[$Path])}
+}
+function Clone($value){return (ConvertFrom-Json (ConvertTo-Json $value -Depth 20 -Compress) -AsHashtable)}
+function Bytes($value){return [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $value -Depth 20 -Compress))}
+function Digest($value){return [HaRuntimeStageV1.Rules]::Hash((Bytes $value))}
+$spec=[pscustomobject]@{InstallationId=('a'*64);RecoveryAttempt=('b'*64);ServiceName='fixture';ServiceSid='fixtureSID';ReservationHash=('c'*64)}
+$root='C:\ProgramData\N100HA_'+('b'*24)
+$originImage='d'*64;$middleImage='e'*64;$actualImage='f'*64
+$base=@{installation_id=$spec.InstallationId;windows_enforced=@{service_name=$spec.ServiceName;service_sid=$spec.ServiceSid;service_image_sha256=$originImage};
+ initial_service_start=@{reservation_receipt_sha256=$spec.ReservationHash};
+ initial_cutover_recovery=@{attempt_id=$spec.RecoveryAttempt;predecessor_service_sha256=('1'*64);predecessor_terminal_sha256=('2'*64)};
+ initial_cutover_handoff=@{attempt_id=('3'*64);legacy_plan_sha256=('4'*64);restore_receipt_sha256=('5'*64);activation_intent_sha256=('6'*64)};
+ windows_initial_observer=@{windows_boot_sha256=('9'*64)}}
+$ownership=@{service_image_sha256=$originImage;predecessor_service_sha256=('1'*64);predecessor_terminal_sha256=('2'*64)}
+function Node($attempt,$image,$previous){
+ $plan=Clone $base;$plan.windows_enforced.service_image_sha256=$image
+ $path=Join-Path $root ('postboot-'+$attempt+'\host\windows-service-host.exe')
+ $pathPin=[HaRuntimeStageV1.Rules]::Hash([Text.Encoding]::UTF8.GetBytes(('"'+$path+'"')))
+ $plan.initial_service_start.service_image_path_sha256=$pathPin
+ $plan.initial_recovery_postboot=@{schema_version=1;attempt_id=$attempt;predecessor_terminal_sha256=('1'*64);
+  predecessor_binding_sha256=('2'*64);predecessor_args_sha256=('3'*64);predecessor_seal_sha256=('4'*64);
+  previous_windows_boot_sha256=('9'*64);closure_mode='windows-offline-v1';predecessor_kind='published-postboot-sameboot-v1';
+  predecessor_plan_sha256=('5'*64);stopped_attempt_id=('6'*64);stopped_receipt_sha256=('7'*64);carryover_receipt_sha256=('8'*64);
+  previous_service_image_sha256=$previous;successor_service_image_sha256=$image;successor_service_image_path_sha256=$pathPin}
+ return $plan
+}
+function Reset {
+ $script:origin=Clone $base
+ $script:middle=Node ('7'*64) $middleImage $originImage
+ $script:current=Node ('8'*64) $actualImage $middleImage
+}
+function Build {
+ $script:middle.initial_recovery_postboot.predecessor_plan_sha256=Digest $script:origin
+ $script:current.initial_recovery_postboot.predecessor_plan_sha256=Digest $script:middle
+ $currentRoot=Join-Path 'C:\ProgramData\N100HA-InitialCutover' ('8'*40)
+ $middleRoot=Join-Path 'C:\ProgramData\N100HA-InitialCutover' ('7'*40)
+ $script:settings=@{plan_path=(Join-Path $currentRoot 'plan.json');plan_sha256=(Digest $script:current)}
+ $script:service=[pscustomobject]@{PathName=('"'+(Join-Path $root ('postboot-'+('8'*64)+'\host\windows-service-host.exe'))+'"')}
+ $script:inputs=@{}
+ $script:inputs[$settings.plan_path]=Bytes $script:current
+ $script:inputs[(Join-Path $currentRoot 'postboot-predecessor-plan.json')]=Bytes $script:middle
+ $script:inputs[(Join-Path $middleRoot 'postboot-predecessor-plan.json')]=Bytes $script:origin
+ $script:reads=@()
+}
+function Check([bool]$Reject){
+ $opened=[Collections.Generic.List[IDisposable]]::new()
+ try{
+  $failed=$false
+  try{$lineage=Open-RearmRuntimeImageLineage $root $spec $settings $service $actualImage $ownership $opened}catch{$failed=$true}
+  if($failed -ne $Reject){throw 'fixture_lineage_result'}
+  if(-not $Reject){
+   if($lineage.Count -ne 3 -or $script:reads.Count -ne 3){throw 'fixture_chain_not_walked'}
+   foreach($entry in $lineage){if(-not $entry.Stream.CanRead -or $entry.Stream.Position -ne 0){throw 'fixture_lost_held_plan'}}
+   if($ownership.service_image_sha256 -cne $originImage){throw 'fixture_mutated_ownership'}
+  }
+ }finally{foreach($f in $opened){$f.Dispose()}}
+}
+Reset;Build;Check $false
+# Authenticate two hops, not merely an asserted previous-image string.
+foreach($change in @(
+ { $script:current.initial_service_start.reservation_receipt_sha256='0'*64 },
+ { $script:middle.initial_cutover_handoff.legacy_plan_sha256='0'*64 },
+ { $script:middle.initial_cutover_recovery.attempt_id='0'*64 },
+ { $script:middle.windows_initial_observer.windows_boot_sha256='0'*64 },
+ { $script:middle.windows_enforced.service_image_sha256='0'*64 },
+ { $script:current.initial_recovery_postboot.successor_service_image_sha256='0'*64 },
+ { $script:current.initial_recovery_postboot.successor_service_image_path_sha256='0'*64 },
+ { $script:current.initial_recovery_postboot.schema_version=2 },
+ { $script:current.initial_recovery_postboot.predecessor_kind='other' },
+ { $script:current.initial_recovery_postboot.extra='unapproved' }
+)){
+ Reset;& $change;Build;Check $true
+}
+Reset;Build;$settings.plan_sha256='0'*64;Check $true
+Reset;Build;$settings.plan_path='C:\untrusted\plan.json';Check $true
+Reset;Build;$null=$script:inputs.Remove($script:inputs.Keys.Where({$_ -like '*postboot-predecessor-plan.json'})[0]);Check $true
+Reset;Build;$script:inputs[$settings.plan_path]=[Text.Encoding]::UTF8.GetBytes('{}');Check $true
+# Simulate a repeated declared pin at the function boundary. It must be rejected
+# before an additional archive read, independently of cryptographic preimages.
+Reset;Build
+$originalRead=(Get-Command Read-RearmRuntimeLineagePlan).ScriptBlock
+function Read-RearmRuntimeLineagePlan {
+ param($Path,$Hash,$PrivateRoot,$Spec,$Opened,$Lineage)
+ $value=& $originalRead $Path $Hash $PrivateRoot $Spec $Opened $Lineage
+ if($Path -ceq $settings.plan_path){$value['initial_recovery_postboot']['predecessor_plan_sha256']=$settings.plan_sha256}
+ return ,$value
+}
+Check $true
+'lineage-portable-only'
+""")
+
     def test_clr_parent_walk_uses_real_filesystem_objects(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp);(folder/'leaf').write_text('fixture')
