@@ -1327,6 +1327,72 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn("docker-compose.yml", script)
         self.assertIn("docker-compose.n100.yml", script)
 
+    def test_car_egress_hold_excludes_car_from_deploy_and_rollback_selections(self):
+        source = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        start = source.index("exclude_k3s_owned_services() {")
+        functions = source[start:source.index("yaml_quote() {", start)]
+        fixture = """
+runtime_service_mode() { [[ "$1" == crawler-worker ]] && printf k3s || printf compose; }
+load_runtime_service_modes() { :; }
+CAR_CARE_EGRESS_HELD=$1
+shift
+refresh_deploy_services "$@"
+printf '%s' "${DEPLOY_SERVICES[*]:-}"
+"""
+        for held, requested, expected in (
+            ("0", ("car-care-worker", "book-memo", "crawler-worker"), "car-care-worker book-memo"),
+            ("1", ("car-care-worker", "book-memo", "crawler-worker"), "book-memo"),
+            ("1", ("car-care-worker",), ""),
+        ):
+            with self.subTest(held=held, requested=requested):
+                result = subprocess.run(
+                    ["bash", "-c", "set -eu\n" + functions + fixture, "safe-deploy-test", held, *requested],
+                    capture_output=True, text=True, timeout=5, check=True,
+                )
+                self.assertEqual(result.stdout, expected)
+                self.assertEqual("safe_cd_skip_car_egress_hold=car-care-worker" in result.stderr, held == "1")
+        main = source[source.index("main() {"):]
+        self.assertIn('git show "$expected_sha:scripts/runtime-service-state-reader.py"', main)
+        self.assertLess(main.index("require_n100_legacy_deploy_admission"), main.index("--car-egress-hold"))
+        self.assertLess(main.index("--car-egress-hold"), main.index("refresh_deploy_services"))
+        self.assertLess(main.index("refresh_deploy_services"), main.index("capture_current_car_image"))
+
+    def test_manual_deploy_car_egress_hold_skips_recreate_in_all_runtime_modes(self):
+        source = (ROOT / "scripts/deploy-n100.sh").read_text(encoding="utf-8")
+        self.assertLess(source.index('require_n100_legacy_deploy_admission "$PROJECT_ROOT"'), source.index("--car-egress-hold"))
+        self.assertLess(source.index("--car-egress-hold"), source.index("deploy_runtime_services() {"))
+        start = source.index("deploy_runtime_services() {")
+        function = source[start:source.index("\n}\n", start) + 3]
+        fixture = """
+require_portal_state_ready() { :; }
+validate_docker_bridge_gateway() { :; }
+all_crawler_services_compose() { [[ "$FIXTURE_ALL_COMPOSE" -eq 1 ]]; }
+runtime_service_mode() { [[ "$FIXTURE_ALL_COMPOSE" -eq 1 ]] && printf compose || printf k3s; }
+set_compose_homeops_lists() { :; }
+set_cutover_homeops_lists() { :; }
+resolve_crawler_worker_caddy_upstream() { :; }
+resolve_book_memo_caddy_upstream() { :; }
+resolve_youtube_memo_caddy_upstream() { :; }
+docker() { printf '%s\n' "$*"; }
+python3() { while [[ "$1" != -- ]]; do shift; done; shift; "$@"; }
+PORTAL_BRIDGE_COMPOSE_FILE=bridge.yml
+SCRIPT_DIR=.
+deploy_runtime_services
+"""
+        for mode, all_compose in (("compose", "1"), ("compose", "0"), ("cutover", "0"), ("k3s", "0")):
+            for held in ("0", "1"):
+                with self.subTest(mode=mode, all_compose=all_compose, held=held):
+                    result = subprocess.run(
+                        ["bash", "-c", "set -eu\n" + function + fixture],
+                        env={**os.environ, "CAR_CARE_EGRESS_HELD": held,
+                             "FIXTURE_ALL_COMPOSE": all_compose, "PORTAL_RUNTIME_MODE": mode},
+                        capture_output=True, text=True, timeout=5, check=True,
+                    )
+                    self.assertIn("homeops-executor system-agent", result.stdout)
+                    self.assertIn("caddy", result.stdout)
+                    self.assertEqual("car-care-worker" in result.stdout, held == "0")
+                    self.assertEqual("manual_deploy_skip_car_egress_hold" in result.stderr, held == "1")
+
     def test_deploy_script_repairs_only_allowlisted_service_data_with_restricted_helper(self):
         script = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("safe_cd_stage=data_ownership", script)
