@@ -1,4 +1,5 @@
 """Artifact security/restore atomicity guards; real PG evidence is separate."""
+from copy import deepcopy
 import hashlib
 import io
 import json
@@ -72,12 +73,14 @@ class RestoreArtifactTests(unittest.TestCase):
             backup._open(encrypted, os.urandom(32))
         self.assertNotEqual(encrypted, backup._seal(b"synthetic protected fixture", key))
 
-    def archive(self, *, blob=b"synthetic immutable attachment", names=None, declared=None):
+    def archive(self, *, blob=b"synthetic immutable attachment", names=None, declared=None, embedded=True):
         sha = hashlib.sha256(b"synthetic immutable attachment").hexdigest()
         manifest = {"format": 1, "scope": "local-isolated", "objects": {sha: len(b"synthetic immutable attachment")}, "dump_sha256": hashlib.sha256(b"dump").hexdigest()}
         if declared:
             manifest.update(declared)
-        entries = names or [("manifest.json", json.dumps(manifest).encode()), ("database.dump", b"dump"), ("objects/" + sha, blob)]
+        entries = names or [("manifest.json", json.dumps(manifest).encode()), ("database.dump", b"dump")]
+        if names is None and embedded:
+            entries.append(("objects/" + sha, blob))
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w") as archive:
             for name, value in entries:
@@ -101,6 +104,147 @@ class RestoreArtifactTests(unittest.TestCase):
                 data, _ = self.archive(names=bad)
             with self.assertRaises(DatabaseUnavailable):
                 backup._unpack(data)
+
+    def test_postgres_dump_only_format_and_v1_payload_compatibility(self):
+        prior, sha = self.archive(declared={"blob_backend": "postgresql"})
+        manifest, dump, embedded = backup._unpack(prior)
+        self.assertEqual((manifest["format"], dump, list(embedded)), (1, b"dump", [sha]))
+        current, _ = self.archive(declared={"format": 2, "blob_backend": "postgresql"}, embedded=False)
+        manifest, dump, embedded = backup._unpack(current)
+        self.assertEqual((manifest["format"], dump, embedded), (2, b"dump", {}))
+        self.assertEqual(manifest["objects"], {sha: len(b"synthetic immutable attachment")})
+
+    def test_rejects_archive_format_backend_and_member_mismatches(self):
+        for version, backend, embedded in ((1, "postgresql", False), (1, "filesystem", False),
+                                           (2, "postgresql", True), (2, "filesystem", False),
+                                           (2, None, False), (True, "postgresql", True), (3, "postgresql", False)):
+            with self.subTest(version=version, backend=backend, embedded=embedded):
+                declared = {"format": version}
+                if backend:
+                    declared["blob_backend"] = backend
+                payload, _ = self.archive(declared=declared, embedded=embedded)
+                with self.assertRaisesRegex(DatabaseUnavailable, "^backup_archive_invalid$"):
+                    backup._unpack(payload)
+        for objects in ({"invalid": 1}, {"a" * 64: -1}, {"a" * 64: True}, {"a" * 64: 33 * 1024 * 1024}):
+            payload, _ = self.archive(declared={"format": 2, "blob_backend": "postgresql",
+                                                     "objects": objects}, embedded=False)
+            with self.assertRaisesRegex(DatabaseUnavailable, "^backup_archive_invalid$"):
+                backup._unpack(payload)
+        payload, _ = self.archive(declared={"format": 2, "blob_backend": "postgresql",
+                                                 "dump_sha256": "0" * 64}, embedded=False)
+        with self.assertRaisesRegex(DatabaseUnavailable, "^backup_dump_hash_mismatch$"):
+            backup._unpack(payload)
+
+    def test_backup_writes_pg_blobs_once_and_verifies_snapshot_reference_before_dump(self):
+        value = b"synthetic immutable attachment"
+        sha = hashlib.sha256(value).hexdigest()
+        objects = {sha: len(value)}
+        control = {"epoch": 1, "revision": 4}
+        logical = {"schemas": ["ha"], "tables": {}, "sequences": {}}
+
+        for backend in ("postgresql", "filesystem", "corrupt-postgresql"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                artifact, key = root / "artifact", root / "key"
+                backup._write_new(key, os.urandom(32))
+                connection = MagicMock()
+                connection.execute.return_value.fetchone.side_effect = [(0,), ("local_fixture", 1, 4),
+                                                                         (control,), ("123",), ("fixture-snapshot",)]
+                connection.execute.return_value.fetchall.return_value = [("ha", "control")]
+                if backend != "filesystem":
+                    connection.execute.return_value.fetchone.side_effect = [
+                        (0,), ("local_fixture", 1, 4), (control,), ("123",), ("fixture-snapshot",), (len(value), 1),
+                    ]
+                    def execute(query, *args):
+                        result = connection.execute.return_value
+                        if isinstance(query, str) and query.startswith("SELECT ordinal,payload"):
+                            chunks = MagicMock()
+                            data = value if backend == "postgresql" else bytes([value[0] ^ 1]) + value[1:]
+                            chunks.fetchall.return_value = [(0, memoryview(data))]
+                            return chunks
+                        return result
+                    connection.execute.side_effect = execute
+                else:
+                    backup._write_new(root / sha, value, 0o400)
+
+                def dump(tool, admin, path, snapshot):
+                    self.assertEqual((tool, snapshot), ("pg_dump", "fixture-snapshot"))
+                    if backend == "postgresql":
+                        statements = [call.args[0] for call in connection.execute.call_args_list
+                                      if isinstance(call.args[0], str)]
+                        export = statements.index("SELECT pg_export_snapshot()")
+                        blob = next(index for index, statement in enumerate(statements)
+                                    if statement.startswith("SELECT ordinal,payload"))
+                        self.assertLess(export, blob)
+                    path.write_bytes(b"dump")
+
+                declared_backend = "filesystem" if backend == "filesystem" else "postgresql"
+                with (patch.object(backup, "_guard", return_value=None),
+                      patch.object(backup, "_connect", return_value=MagicMock(__enter__=lambda _: connection)),
+                      patch.object(backup, "_schemas", return_value=["ha"]),
+                      patch.object(backup, "logical_manifest", return_value=logical),
+                      patch.object(backup, "object_references", return_value=objects),
+                      patch.object(backup, "_blob_backend", return_value=declared_backend),
+                      patch.object(backup, "_pg_tool", side_effect=dump) as pg_dump):
+                    if backend == "corrupt-postgresql":
+                        with self.assertRaisesRegex(DatabaseUnavailable, "^backup_blob_hash_mismatch$"):
+                            backup.create_backup({}, root, artifact, key, expected_cluster="local_fixture")
+                        pg_dump.assert_not_called()
+                        self.assertFalse(artifact.exists())
+                        self.assertFalse((root / ".backup-pins").exists())
+                        continue
+                    result = backup.create_backup({}, root, artifact, key, expected_cluster="local_fixture")
+                manifest, dump_bytes, embedded = backup._unpack(backup._open(artifact.read_bytes(), backup._key(key)))
+                self.assertEqual((result["objects"], manifest["objects"], dump_bytes), (1, objects, b"dump"))
+                if backend == "postgresql":
+                    self.assertEqual((manifest["format"], embedded), (2, {}))
+                else:
+                    self.assertEqual((manifest["format"], embedded), (1, {sha: value}))
+
+    def test_restore_hashes_v2_pg_rows_and_counts_references_without_writing_files(self):
+        value = b"synthetic immutable attachment"
+        logical = {"schemas": ["ha"], "tables": {"ha.control": {"sha256": "old"}},
+                   "sequences": {}, "triggers": {}, "policies": {}}
+        seal = {"epoch": 1, "revision": 4, "writes_open": True, "history_safe": True, "expires_at": "old"}
+        current_seal = dict(seal, epoch=2, revision=5, writes_open=False, history_safe=False, expires_at="closed")
+
+        for version, actual_backend, valid_blob, expected_error in (
+                (2, "postgresql", True, None),
+                (1, "postgresql", True, None),
+                (2, "postgresql", False, "backup_blob_hash_mismatch"),
+                (2, "filesystem", True, "restore_blob_backend_mismatch")):
+            with self.subTest(version=version, backend=actual_backend, valid_blob=valid_blob), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary).resolve()
+                artifact, key, root = folder / "artifact", folder / "key", folder / "objects"
+                root.mkdir(mode=0o700)
+                key_bytes = os.urandom(32)
+                backup._write_new(key, key_bytes)
+                payload, sha = self.archive(declared={"format": version, "blob_backend": "postgresql",
+                                                        "cluster": "local_fixture", "epoch": 1, "revision": 4,
+                                                        "system_id": "123", "control": seal, "logical": logical},
+                                            embedded=version == 1)
+                backup._write_new(artifact, backup._seal(payload, key_bytes))
+                connection = MagicMock()
+                connection.execute.return_value.fetchone.side_effect = [
+                    (0,), (False,), ("456",), (0,), (current_seal, True), (len(value), 1),
+                ]
+                chunk = value if valid_blob else bytes([value[0] ^ 1]) + value[1:]
+                connection.execute.return_value.fetchall.return_value = [(0, memoryview(chunk))]
+                with (patch.object(backup, "_guard", return_value=None),
+                      patch.object(backup, "_connect", return_value=MagicMock(__enter__=lambda _: connection)),
+                      patch.object(backup, "_restore_database") as restore,
+                      patch.object(backup, "logical_manifest", return_value=deepcopy(logical)),
+                      patch.object(backup, "_blob_backend", return_value=actual_backend),
+                      patch.object(backup, "object_references", return_value={sha: len(value)})):
+                    if expected_error:
+                        with self.assertRaisesRegex(DatabaseUnavailable, "^" + expected_error + "$"):
+                            backup.restore_backup({}, root, artifact, key, expected_cluster="local_fixture")
+                    else:
+                        result = backup.restore_backup({}, root, artifact, key, expected_cluster="local_fixture")
+                        self.assertTrue(result["pass"])
+                        self.assertEqual(result["objects"], 1)
+                    restore.assert_called_once()
+                    self.assertEqual(list(root.iterdir()), [])
 
     def test_missing_corrupt_mutable_symlink_and_hardlinked_blobs_refused(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -21,6 +21,7 @@ from .proof import digest
 
 MAGIC = b"LOCAL-HA-BACKUP-1\x00"
 MAX_BYTES = 128 * 1024 * 1024
+PG_DUMP_OBJECTS_FORMAT = 2
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -394,22 +395,29 @@ def create_backup(admin, object_root, artifact_path, key_path, *, expected_clust
             snapshot = connection.execute("SELECT pg_export_snapshot()").fetchone()[0]
             logical, objects = logical_manifest(connection), object_references(connection)
             backend = _blob_backend(connection)
+            if backend == "postgresql":
+                # The matching pg_dump already contains these rows. Verify
+                # every referenced object in this same snapshot without
+                # storing a second copy of the bytes in the archive.
+                for sha, size in objects.items():
+                    _pg_blob(connection, sha, size)
             dump = Path(temporary) / "database.dump"
             _pg_tool("pg_dump", admin, dump, snapshot)
             if dump.stat().st_size > MAX_BYTES:
                 _fail("backup_size_limit")
             dump_bytes = dump.read_bytes()
-            manifest = {"format": 1, "scope": "n100-approved" if approval else "local-isolated", "cluster": control[0], "epoch": control[1], "revision": control[2], "system_id": system_id,
+            manifest = {"format": PG_DUMP_OBJECTS_FORMAT if backend == "postgresql" else 1, "scope": "n100-approved" if approval else "local-isolated", "cluster": control[0], "epoch": control[1], "revision": control[2], "system_id": system_id,
                         "control": control_row, "logical": logical, "objects": objects, "dump_sha256": hashlib.sha256(dump_bytes).hexdigest(), "blob_gc": "disabled-pins-retained", "blob_backend": backend}
             manifest['required_broker_roles'] = _broker_role_requirements(connection, schemas)
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
                 archive.writestr("manifest.json", json.dumps(manifest, sort_keys=True).encode())
                 archive.writestr("database.dump", dump_bytes)
-                for sha, size in objects.items():
-                    archive.writestr("objects/" + sha, _pg_blob(connection,sha,size) if backend=='postgresql' else _blob(root, sha, size))
-                    if buffer.tell() > MAX_BYTES:
-                        _fail("backup_size_limit")
+                if backend == "filesystem":
+                    for sha, size in objects.items():
+                        archive.writestr("objects/" + sha, _blob(root, sha, size))
+                        if buffer.tell() > MAX_BYTES:
+                            _fail("backup_size_limit")
             encrypted = _seal(buffer.getvalue(), key)
             pins = root / ".backup-pins"
             pins.mkdir(mode=0o700, exist_ok=True)
@@ -426,7 +434,7 @@ def create_backup(admin, object_root, artifact_path, key_path, *, expected_clust
 
 
 def _unpack(payload):
-    """No filesystem extraction; authenticate and validate every member first."""
+    """Validate archived members before restore; v2 PG objects live in the dump."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             members = archive.infolist()
@@ -434,18 +442,30 @@ def _unpack(payload):
             if len(set(names)) != len(names) or sum(m.file_size for m in members) > MAX_BYTES or "manifest.json" not in names or "database.dump" not in names:
                 _fail("backup_archive_invalid")
             manifest = json.loads(archive.read("manifest.json"))
-            if manifest.get("format") != 1 or manifest.get("scope") not in {"local-isolated", "n100-approved"} or not isinstance(manifest.get("objects"), dict) or manifest.get('blob_backend','filesystem') not in {'filesystem','postgresql'}:
+            version = manifest.get("format")
+            backend = manifest.get("blob_backend", "filesystem")
+            if (type(version) is not int or version not in (1, PG_DUMP_OBJECTS_FORMAT)
+                    or manifest.get("scope") not in {"local-isolated", "n100-approved"}
+                    or not isinstance(manifest.get("objects"), dict)
+                    or backend not in {"filesystem", "postgresql"}
+                    or (version == PG_DUMP_OBJECTS_FORMAT and backend != "postgresql")):
                 _fail("backup_archive_invalid")
             objects = manifest["objects"]
-            if set(names) != {"manifest.json", "database.dump", *("objects/" + s for s in objects)}:
+            max_object_bytes = MAX_BYTES
+            if version == PG_DUMP_OBJECTS_FORMAT:
+                from .blobs import MAX_BLOB_BYTES
+                max_object_bytes = MAX_BLOB_BYTES
+            if any(not HEX.fullmatch(sha) or type(size) is not int or not 0 <= size <= max_object_bytes
+                   for sha, size in objects.items()):
+                _fail("backup_archive_invalid")
+            archived_objects = objects if version == 1 else {}
+            if set(names) != {"manifest.json", "database.dump", *("objects/" + s for s in archived_objects)}:
                 _fail("backup_archive_invalid")
             dump = archive.read("database.dump")
             if hashlib.sha256(dump).hexdigest() != manifest["dump_sha256"]:
                 _fail("backup_dump_hash_mismatch")
             blobs = {}
-            for sha, size in objects.items():
-                if not HEX.fullmatch(sha) or type(size) is not int or size < 0:
-                    _fail("backup_archive_invalid")
+            for sha, size in archived_objects.items():
                 value = archive.read("objects/" + sha)
                 if len(value) != size or hashlib.sha256(value).hexdigest() != sha:
                     _fail("backup_blob_hash_mismatch")
@@ -525,14 +545,18 @@ def restore_backup(admin, object_root, artifact_path, key_path, *, expected_clus
             restored["tables"]["ha.control"]["sha256"] = expected["tables"]["ha.control"]["sha256"]
             if restored != expected or object_references(connection) != manifest["objects"]:
                 _fail("restore_logical_mismatch")
-            for sha, value in blobs.items():
-                if manifest.get('blob_backend','filesystem') == 'postgresql':
-                    if _pg_blob(connection,sha,len(value)) != value:
-                        _fail('restore_blob_mismatch')
+            backend = manifest.get("blob_backend", "filesystem")
+            if manifest["format"] == PG_DUMP_OBJECTS_FORMAT and _blob_backend(connection) != backend:
+                _fail("restore_blob_backend_mismatch")
+            for sha, size in manifest["objects"].items():
+                if backend == "postgresql":
+                    value = _pg_blob(connection, sha, size)
+                    if manifest["format"] == 1 and value != blobs[sha]:
+                        _fail("restore_blob_mismatch")
                 else:
-                    _write_new(root / sha, value, 0o400)
-                    _blob(root, sha, len(value))
-            return {"pass": True, "all_services": 7, "tables": len(restored["tables"]), "sequences": len(restored["sequences"]), "objects": len(blobs), "logical_sha256": digest(restored), "prior_identity_preserved": True, "fresh_system_id": True, "authority_closed": True, "old_generation_invalidated": True}
+                    _write_new(root / sha, blobs[sha], 0o400)
+                    _blob(root, sha, size)
+            return {"pass": True, "all_services": 7, "tables": len(restored["tables"]), "sequences": len(restored["sequences"]), "objects": len(manifest["objects"]), "logical_sha256": digest(restored), "prior_identity_preserved": True, "fresh_system_id": True, "authority_closed": True, "old_generation_invalidated": True}
     except DatabaseUnavailable:
         raise
     except Exception:
