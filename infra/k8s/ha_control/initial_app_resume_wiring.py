@@ -361,20 +361,7 @@ print(json.dumps(result,sort_keys=True,separators=(',',':')))
     compile(code, '<successor-app-attestation>', 'exec')
     assert_guard()
     wire._remaining(deadline)
-    stamps, records = {}, {}
-    for role, endpoint in (('jump', dispatcher.jump), ('A', dispatcher.guests['A'])):
-        stamps.update(ssh._identity(endpoint, deadline))
-        path = dispatcher.known_hosts[role]
-        raw, stamps[path] = ssh._checked_file(path, private=False, maximum=1048576)
-        records[endpoint.alias] = ssh._host_record(raw, endpoint, guest=role == 'A')
-    root = '/private/tmp' if sys.platform == 'darwin' else '/tmp'
-    with tempfile.TemporaryDirectory(prefix='ha-successor-attest-', dir=root) as directory:
-        config = ssh._ssh_config(Path(directory), dispatcher.jump, dispatcher.guests['A'], records)
-        command = (ssh.SSH, '-F', str(config), '-T', dispatcher.guests['A'].alias,
-                   shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', code)))
-        need(ssh._same_files(stamps))
-        result = json.loads(ssh._exchange(command, b'', deadline), object_pairs_hook=wire._pairs)
-        need(ssh._same_files(stamps))
+    result = _guest_script(dispatcher, code, deadline)
     assert_guard()
     wire._remaining(deadline)
     fields = {'schema_version', 'authorization_sha256', 'request_nonce', 'baseline_sha256', 'prior_intent_sha256',
@@ -501,6 +488,16 @@ def guest_completion(dispatcher, request, launcher, manifest_sha256, authorizati
     need(len(code.encode()) <= 131072)
     compile(code, '<successor-app-completion>', 'exec')
     assert_guard()
+    result = _guest_script(dispatcher, code, deadline)
+    assert_guard()
+    wire._remaining(deadline)
+    return result
+
+
+def _guest_script(dispatcher, code, deadline):
+    if dispatcher.direct_link is not None:
+        return json.loads(dispatcher.exchange_direct_script('A', code, b'', deadline),
+                          object_pairs_hook=wire._pairs)
     stamps, records = {}, {}
     for role, endpoint in (('jump', dispatcher.jump), ('A', dispatcher.guests['A'])):
         stamps.update(ssh._identity(endpoint, deadline))
@@ -508,15 +505,13 @@ def guest_completion(dispatcher, request, launcher, manifest_sha256, authorizati
         raw, stamps[path] = ssh._checked_file(path, private=False, maximum=1048576)
         records[endpoint.alias] = ssh._host_record(raw, endpoint, guest=role == 'A')
     root = '/private/tmp' if sys.platform == 'darwin' else '/tmp'
-    with tempfile.TemporaryDirectory(prefix='ha-successor-completion-', dir=root) as directory:
+    with tempfile.TemporaryDirectory(prefix='ha-successor-', dir=root) as directory:
         config = ssh._ssh_config(Path(directory), dispatcher.jump, dispatcher.guests['A'], records)
         command = (ssh.SSH, '-F', str(config), '-T', dispatcher.guests['A'].alias,
                    shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', code)))
         need(ssh._same_files(stamps))
         result = json.loads(ssh._exchange(command, b'', deadline), object_pairs_hook=wire._pairs)
         need(ssh._same_files(stamps))
-    assert_guard()
-    wire._remaining(deadline)
     return result
 
 

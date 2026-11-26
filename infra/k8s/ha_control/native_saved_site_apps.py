@@ -221,6 +221,11 @@ class SavedSiteApps:
         self.app = self.carryover = None
 
     def _private(self, directory):
+        if sys.platform == 'win32':
+            from .windows_protected_io import WindowsProtectedIO
+
+            WindowsProtectedIO(admin_only=True).assert_directory(directory)
+            return
         _need(directory.is_absolute() and directory.resolve(strict=True) == directory)
         info = directory.lstat()
         _need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700)
@@ -243,6 +248,11 @@ class SavedSiteApps:
     def _write(self, name, value):
         self._private(self.directory)
         body = wire._bytes(value);_need(len(body) <= 16384)
+        if sys.platform == 'win32':
+            from .windows_protected_io import WindowsProtectedIO
+
+            WindowsProtectedIO(admin_only=True).write_new(self.directory / name, body)
+            return
         fd = os.open(self.directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'wb') as stream:stream.write(body);stream.flush();os.fsync(stream.fileno())
         fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -280,8 +290,12 @@ class SavedSiteApps:
     def _exchange_guest(self, data, body, payload, deadline):
         code = 'import json\nCFG=' + repr(data) + '\n' + self.launcher.split(MARKER)[0].decode() + body
         _need(len(code.encode()) <= 131072);compile(code, '<saved-site-apps>', 'exec')
-        stamps, records = {}, {}
         self.guard();wire._remaining(deadline)
+        if self.dispatcher.direct_link is not None:
+            output = self.dispatcher.exchange_direct_script('A', code, payload, deadline)
+            self.guard();wire._remaining(deadline)
+            return json.loads(output, object_pairs_hook=wire._pairs)
+        stamps, records = {}, {}
         for role, endpoint in (('jump', self.dispatcher.jump), ('A', self.dispatcher.guests['A'])):
             stamps.update(ssh._identity(endpoint, deadline));path = self.dispatcher.known_hosts[role]
             raw, stamps[path] = ssh._checked_file(path, private=False, maximum=1048576)

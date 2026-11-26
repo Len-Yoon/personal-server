@@ -9,9 +9,10 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import sys
 import time
 
-from .controller import TransitionBlocked, exclusive
+from .controller import TransitionBlocked, exclusive as _posix_exclusive
 from .native_stdio_bridge import BridgeRejected, RECOVERY_START_ORDER
 
 STAGES = (
@@ -47,6 +48,9 @@ def _pin(value):
 
 
 def _private_file(path, limit):
+    if sys.platform == 'win32':
+        from .windows_protected_io import WindowsProtectedIO
+        return WindowsProtectedIO(admin_only=True).read_stamp(path,limit,private=True)[0]
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         before = os.fstat(stream.fileno())
@@ -61,6 +65,14 @@ def _private_file(path, limit):
         _need(0 < len(raw) <= limit and len(raw) == before.st_size
               and all(getattr(before, key) == getattr(after, key) for key in stable))
     return raw
+
+
+def exclusive(path):
+    """Coordinator path lock; never contend with the running authority mutex."""
+    if sys.platform == 'win32':
+        from .windows_protected_io import WindowsProtectedIO
+        return WindowsProtectedIO(admin_only=True).exclusive(path)
+    return _posix_exclusive(path)
 
 
 def _encoded(value):
@@ -360,6 +372,10 @@ class SamebootTransition:
         self.driver = driver
 
     def _private(self):
+        if sys.platform == 'win32':
+            from .windows_protected_io import WindowsProtectedIO
+            WindowsProtectedIO(admin_only=True).assert_directory(self.directory,private=True)
+            return
         info = self.directory.lstat()
         _need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
               and stat.S_IMODE(info.st_mode) == 0o700, 'sameboot_transition_journal_untrusted')
@@ -376,6 +392,10 @@ class SamebootTransition:
     def _write(self, name, value):
         data = _encoded(value)
         _need(len(data) <= 8192)
+        if sys.platform == 'win32':
+            from .windows_protected_io import WindowsProtectedIO
+            WindowsProtectedIO(admin_only=True).write_new(self.directory/name,data)
+            return
         fd = os.open(self.directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)

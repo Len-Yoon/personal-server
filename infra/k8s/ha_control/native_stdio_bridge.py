@@ -278,21 +278,28 @@ class Stdio:
                     raise BridgeRejected("bridge_noncanonical_frame") from None
                 return value
             _need(len(self.buffer) < FRAME_BYTES, "bridge_frame_limit")
-            readable, _, _ = select.select([self.read_fd], [], [], _remaining(deadline))
-            _need(readable, "bridge_deadline_exceeded")
-            try:
-                data = os.read(self.read_fd, FRAME_BYTES - len(self.buffer))
-            except BlockingIOError:
-                continue
+            data = self._read(FRAME_BYTES - len(self.buffer), deadline)
             if not data:
                 if self.buffer:
                     raise BridgeRejected("bridge_truncated_frame")
                 raise _End("bridge_channel_closed")
             self.buffer.extend(data)
 
+    def _read(self, size, deadline):
+        while True:
+            readable, _, _ = select.select([self.read_fd], [], [], _remaining(deadline))
+            _need(readable, "bridge_deadline_exceeded")
+            try:
+                return os.read(self.read_fd, size)
+            except BlockingIOError:
+                continue
+
     def write(self, value, deadline):
         raw = _bytes(value)
         _need(0 < len(raw) <= FRAME_BYTES, "bridge_frame_limit")
+        self._write(raw, deadline)
+
+    def _write(self, raw, deadline):
         remaining = memoryview(raw)
         while remaining:
             _, writable, _ = select.select([], [self.write_fd], [], _remaining(deadline))

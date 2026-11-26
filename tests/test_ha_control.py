@@ -645,6 +645,37 @@ class WindowsReplacementNetworkTests(unittest.TestCase):
                 implementation.assert_crash_source_off("old", float("inf"))
 
 
+class DirectGuestPipeTests(unittest.TestCase):
+    def test_direct_binary_exchange_preserves_bytes_and_rejects_oversize(self):
+        from ha_control.native_pipe_process import exchange_direct
+        from ha_control.native_stdio_bridge import BridgeRejected
+        import time
+
+        command = (sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())')
+        self.assertEqual(exchange_direct(command, b'protected frame\n', time.monotonic() + 5, maximum=128),
+                         b'protected frame\n')
+        with self.assertRaisesRegex(BridgeRejected, 'guest_ssh_frame_limit'):
+            exchange_direct(command, b'x' * 129, time.monotonic() + 5, maximum=128)
+
+    def test_direct_transport_uses_same_activation_challenge_checks(self):
+        from ha_control import native_guest_ssh as ssh, native_stdio_bridge as bridge
+        from ha_control.native_pipe_process import start_direct
+        import time
+
+        nonce, challenge, proof = '1' * 64, '2' * 64, '3' * 64
+        frame = {'kind': 'activation_boundary', 'request_nonce': nonce, 'challenge': challenge, 'boundary': 'check'}
+        code = '\n'.join(('import sys', 'assert sys.stdin.buffer.readline()==b\'{"input":true}\\n\'',
+                         f'sys.stdout.buffer.write({bridge._bytes(frame)!r})', 'sys.stdout.buffer.flush()',
+                         f'assert sys.stdin.buffer.readline()=={bridge._bytes(frame | {"kind": "activation_boundary_current", "windows_proof_sha256": proof})!r}',
+                         'sys.stdout.buffer.write(b\'{"status":"PASS"}\\n\')'))
+        check = MagicMock(return_value=proof)
+        result = ssh._activation_exchange((sys.executable, '-c', code), b'{"input":true}\n',
+                                          time.monotonic() + 5, nonce, check, bind_boundary=True,
+                                          boundaries=('check',), direct_start=start_direct)
+        self.assertEqual(result, b'{"status":"PASS"}\n')
+        self.assertEqual(check.call_args.args[:2], (challenge, 'check'))
+
+
 class ServingEndpointTests(unittest.TestCase):
     def test_both_pinned_ssh_hosts_must_match_postgres_plan(self):
         dispatcher = GuestSshDispatcher.__new__(GuestSshDispatcher)

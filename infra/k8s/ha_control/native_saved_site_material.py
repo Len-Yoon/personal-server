@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import stat
+import sys
 import tempfile
 import time
 
@@ -68,6 +69,11 @@ class SavedSitePlanAssembly:
         self.path = self.journal / 'planned-successor.json'
 
     def _private(self):
+        if sys.platform == 'win32':
+            from .windows_protected_io import WindowsProtectedIO
+
+            WindowsProtectedIO(admin_only=True).assert_directory(self.journal)
+            return
         info = self.journal.lstat()
         _need(self.journal.is_absolute() and self.journal.resolve(strict=True) == self.journal
               and stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
@@ -125,6 +131,11 @@ class SavedSitePlanAssembly:
                     'runtime': runtime, 'attempt': attempt, 'prior_receipt_sha256': operation['previous_sha256']}
         encoded = _encoded(settings)
         _need(len(encoded) <= 524288)
+        if sys.platform == 'win32':
+            from .windows_protected_io import WindowsProtectedIO
+
+            WindowsProtectedIO(admin_only=True).write_new(self.path, encoded)
+            return
         with tempfile.NamedTemporaryFile(dir=self.journal, prefix='.successor-', delete=False) as stream:
             temporary = Path(stream.name)
             try:
@@ -148,7 +159,12 @@ class SavedSitePlanAssembly:
             raw = _private_file(self.path, 524288)
         except FileNotFoundError:
             _need(prepare and operation['stage'] == 'publish_material' and _hash(operation['previous_sha256']))
-            with exclusive(self.journal / 'plan.lock'):
+            lock = exclusive
+            if sys.platform == 'win32':
+                from .windows_protected_io import WindowsProtectedIO
+
+                lock = WindowsProtectedIO(admin_only=True).exclusive
+            with lock(self.journal / 'plan.lock'):
                 try:
                     raw = _private_file(self.path, 524288)
                 except FileNotFoundError:
