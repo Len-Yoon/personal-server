@@ -1,11 +1,17 @@
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import io
 import json
 import os
+import runpy
 import shutil
+import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from tests.test_homeops_auth_bootstrap import secret_reader_fixture
 
 
@@ -16,6 +22,77 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_car_egress_hold_requires_private_marker_and_trusted_parent(self):
+        read_hold = runpy.run_path(str(ROOT / "scripts/runtime-service-state-reader.py"))["read_car_egress_hold"]
+        parent = "/var/lib/personal-server"
+        marker = parent + "/car-care-egress-hold"
+        directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        held = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_size=0)
+        cases = [
+            ({}, 0, "clear"),
+            ({parent: FileNotFoundError()}, 0, "clear"),
+            ({marker: held}, 0, "held"),
+            ({marker: SimpleNamespace(**(vars(held) | {"st_mode": stat.S_IFLNK | 0o600}))}, 1, ""),
+            ({marker: SimpleNamespace(**(vars(held) | {"st_mode": stat.S_IFREG | 0o644}))}, 1, ""),
+            ({marker: SimpleNamespace(**(vars(held) | {"st_nlink": 2}))}, 1, ""),
+            ({marker: SimpleNamespace(**(vars(held) | {"st_uid": 1000}))}, 1, ""),
+            ({marker: SimpleNamespace(**(vars(held) | {"st_size": 1}))}, 1, ""),
+            ({parent: SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0)}, 1, ""),
+            ({parent: SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)}, 1, ""),
+            ({parent: PermissionError()}, 1, ""),
+        ]
+        for overrides, expected_code, expected_output in cases:
+            with self.subTest(overrides=overrides):
+                facts = {"/var/lib": directory, parent: directory} | overrides
+
+                def lstat(path):
+                    result = facts.get(path, FileNotFoundError())
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+
+                system = SimpleNamespace(lstat=lstat, path=os.path, access=lambda *_: True,
+                                         R_OK=os.R_OK, X_OK=os.X_OK)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.dict(read_hold.__globals__, {"os": system}), redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(read_hold(marker), expected_code)
+                self.assertEqual(stdout.getvalue().strip(), expected_output)
+                self.assertEqual(bool(stderr.getvalue()), bool(expected_code))
+
+    def test_legacy_car_boot_appends_egress_hold_override_after_other_compose_files(self):
+        start = WSL_SCRIPT.index("start_runtime_services() {")
+        function = WSL_SCRIPT[start:WSL_SCRIPT.index("\n}\n", start) + 3]
+        overrides = ROOT / "infra/k8s/host/docker-compose.car-egress-hold.yml"
+        stubs = """
+load_portal_runtime_mode() { PORTAL_RUNTIME_MODE=$FIXTURE_MODE; }
+require_portal_state_ready() { :; }
+validate_docker_bridge_gateway() { :; }
+all_crawler_services_compose() { return 0; }
+resolve_crawler_worker_caddy_upstream() { :; }
+resolve_book_memo_caddy_upstream() { :; }
+resolve_youtube_memo_caddy_upstream() { :; }
+docker() { printf '%s\n' "$*"; }
+python3() { while [[ "$1" != -- ]]; do shift; done; shift; "$@"; }
+PORTAL_BRIDGE_COMPOSE_FILE=bridge.yml
+SCRIPT_DIR=.
+"""
+        for mode in ("compose", "cutover", "k3s"):
+            for held in (True, False):
+                with self.subTest(mode=mode, held=held):
+                    result = subprocess.run(
+                        ["bash", "-c", "set -eu\n" + stubs + function + "\nstart_runtime_services"],
+                        env={**os.environ, "FIXTURE_MODE": mode,
+                             "CAR_CARE_EGRESS_HOLD_OVERRIDE": str(overrides) if held else ""},
+                        capture_output=True, text=True, timeout=5, check=True,
+                    )
+                    car_line, = (line for line in result.stdout.splitlines() if "car-care-worker" in line)
+                    expected = "compose -f docker-compose.yml -f docker-compose.n100.yml"
+                    if mode != "compose":
+                        expected += " -f bridge.yml"
+                    if held:
+                        expected += f" -f {overrides}"
+                    self.assertTrue(car_line.startswith(expected + " up "), car_line)
+
     def test_legacy_deploy_checks_owner_and_holds_bootstrap_lock_until_exit(self):
         import fcntl
 

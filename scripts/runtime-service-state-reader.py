@@ -8,6 +8,7 @@ import sys
 
 SERVICES = ("crawler-worker", "youtube-memo", "book-memo")
 DEFAULT = "".join(f"{service}=compose\n" for service in SERVICES)
+CAR_EGRESS_HOLD = "/var/lib/personal-server/car-care-egress-hold"
 
 
 def fail(message: str) -> int:
@@ -28,6 +29,35 @@ def trusted_directory(path: str) -> bool:
 def trusted_directory_hierarchy(state_path: str) -> bool:
     parent = os.path.dirname(state_path)
     return trusted_directory(os.path.dirname(parent)) and trusted_directory(parent)
+
+
+def read_car_egress_hold(path: str) -> int:
+    """Read custody metadata only. The root-owned marker is private to root."""
+    parent = os.path.dirname(path)
+    try:
+        if not trusted_directory(os.path.dirname(parent)):
+            return fail("car egress hold anchor is not trusted")
+        # Inspect the parent first so a missing child through a broken symlink
+        # or inaccessible directory cannot be interpreted as a cleared hold.
+        try:
+            os.lstat(parent)
+        except FileNotFoundError:
+            print("clear")
+            return 0
+        if not trusted_directory(parent):
+            return fail("car egress hold parent is not trusted")
+        try:
+            marker = os.lstat(path)
+        except FileNotFoundError:
+            print("clear")
+            return 0
+    except OSError:
+        return fail("car egress hold cannot be inspected")
+    if (not stat.S_ISREG(marker.st_mode) or marker.st_uid != 0 or marker.st_nlink != 1
+            or stat.S_IMODE(marker.st_mode) != 0o600 or marker.st_size != 0):
+        return fail("car egress hold marker is not a private root-owned empty file")
+    print("held")
+    return 0
 
 
 def read_state(path: str, require_explicit: bool = False) -> int:
@@ -99,6 +129,8 @@ def read_state(path: str, require_explicit: bool = False) -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--car-egress-hold"]:
+        raise SystemExit(read_car_egress_hold(CAR_EGRESS_HOLD))
     if len(sys.argv) not in {2, 3} or not sys.argv[1]:
         raise SystemExit(fail("state path argument required"))
     if len(sys.argv) == 3 and sys.argv[2] != "--require-explicit":

@@ -36,6 +36,15 @@ command -v docker >/dev/null 2>&1 || { echo "docker 명령을 찾을 수 없습�
 
 source "$SCRIPT_DIR/runtime-service-state.sh"
 require_n100_legacy_deploy_admission "$PROJECT_ROOT"
+CAR_CARE_EGRESS_HELD=0
+if [[ "$(/usr/bin/uname -s)" == Linux ]] && /usr/bin/grep -qi microsoft /proc/sys/kernel/osrelease; then
+  car_hold_state="$(/usr/bin/python3 -I -B "$SCRIPT_DIR/runtime-service-state-reader.py" --car-egress-hold)"
+  case "$car_hold_state" in
+    held) CAR_CARE_EGRESS_HELD=1 ;;
+    clear) ;;
+    *) exit 1 ;;
+  esac
+fi
 
 DOCKER_WAIT_ATTEMPTS="${DOCKER_WAIT_ATTEMPTS:-18}"
 DOCKER_WAIT_SECONDS="${DOCKER_WAIT_SECONDS:-10}"
@@ -212,7 +221,13 @@ resolve_crawler_worker_caddy_upstream() {
 
 deploy_runtime_services() {
   local bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
-  local bridge_services="homeops-executor system-agent car-care-worker"
+  local bridge_services="homeops-executor system-agent"
+  local car_service=car-care-worker
+  if [[ "${CAR_CARE_EGRESS_HELD:-0}" -eq 1 ]]; then
+    car_service=
+    printf '%s\n' 'manual_deploy_skip_car_egress_hold=car-care-worker' >&2
+  fi
+  bridge_services+="${car_service:+ $car_service}"
   local service
   for service in crawler-worker youtube-memo book-memo; do
     if [[ "$(runtime_service_mode "$service")" == compose ]]; then
@@ -228,7 +243,7 @@ deploy_runtime_services() {
         resolve_crawler_worker_caddy_upstream
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
-        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo $car_service caddy
       else
         set_compose_homeops_lists
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web $bridge_services

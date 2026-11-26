@@ -30,6 +30,7 @@ OWNERSHIP_SNAPSHOTS_VERIFIED=0
 PAUSED_SERVICES=()
 TARGET_SERVICES_STARTED=0
 CAR_ONLY_ROLLBACK=0
+CAR_CARE_EGRESS_HELD=0
 PREVIOUS_CAR_IMAGE=''
 PREVIOUS_CAR_CONTAINER=''
 TARGET_CAR_IMAGE=''
@@ -133,6 +134,10 @@ exclude_k3s_owned_services() {
 
   DEPLOY_SERVICES=()
   for service in "$@"; do
+    if [[ "$service" == car-care-worker && "$CAR_CARE_EGRESS_HELD" -eq 1 ]]; then
+      printf '%s\n' 'safe_cd_skip_car_egress_hold=car-care-worker' >&2
+      continue
+    fi
     if [[ "$(runtime_service_mode "$service")" == k3s ]]; then
       printf 'safe_cd_skip_k3s_service=%s\n' "$service" >&2
       continue
@@ -670,7 +675,7 @@ main() {
   local expected_sha="$1"
   local previous_sha
   local origin_main_sha
-  local kernel kernel_release runtime_state_source
+  local kernel kernel_release runtime_state_source car_hold_reader car_hold_state
 
   printf '%s\n' 'safe_cd_stage=preflight' >&2
   is_revision "$expected_sha" || return 1
@@ -704,6 +709,14 @@ main() {
       runtime_state_source="$(git show "$expected_sha:scripts/runtime-service-state.sh")" || return 1
       source /dev/stdin <<<"$runtime_state_source" || return 1
       require_n100_legacy_deploy_admission "$PROJECT_ROOT" || return 1
+      # Retain the shared legacy lock throughout deployment and rollback.
+      car_hold_reader="$(git show "$expected_sha:scripts/runtime-service-state-reader.py")" || return 1
+      car_hold_state="$(/usr/bin/python3 -I -B - --car-egress-hold <<<"$car_hold_reader")" || return 1
+      case "$car_hold_state" in
+        held) CAR_CARE_EGRESS_HELD=1 ;;
+        clear) ;;
+        *) return 1 ;;
+      esac
     fi
   fi
   select_unchanged_services "$expected_sha" "$origin_main_sha" "$2" || return 1
@@ -713,15 +726,19 @@ main() {
   fi
   prepare_state_directories || return 1
   validate_healthy_revision || return 1
+  refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
+  if [[ "${#DEPLOY_SERVICES[@]}" -eq 0 ]]; then
+    if [[ "$CAR_CARE_EGRESS_HELD" -eq 1 && " ${PARSED_SERVICES[*]} " == *' car-care-worker '* ]]; then
+      printf '%s\n' 'safe_cd_stage=skip reason=car_egress_hold' >&2
+    else
+      printf '%s\n' 'safe_cd_stage=skip reason=k3s_runtime_service' >&2
+    fi
+    return 0
+  fi
   # A car-only release restores its actual running image, not a global source
   # checkpoint that may describe an unrelated service.
   if [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]]; then
     capture_current_car_image || return 1
-  fi
-  refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
-  if [[ "${#DEPLOY_SERVICES[@]}" -eq 0 ]]; then
-    printf '%s\n' 'safe_cd_stage=skip reason=k3s_runtime_service' >&2
-    return 0
   fi
 
   if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${DEPLOY_SERVICES[@]}" && deployed_image_is_expected; then

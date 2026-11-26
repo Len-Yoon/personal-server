@@ -1,0 +1,6 @@
+# Explicit N100 restoration hold. Keep the in-container health check available.
+services:
+  car-care-worker:
+    network_mode: none
+    networks: !reset {}
+    ports: !reset []

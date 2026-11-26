@@ -64,6 +64,22 @@ with os.scandir(matches[0].path) as items:
   }
 fi
 source "$SCRIPT_DIR/runtime-service-state.sh"
+CAR_CARE_EGRESS_HOLD_OVERRIDE=
+if [[ -n "$protected_authority" ]]; then
+  # Hold creation and release take the exclusive side of the fd 9 lock above.
+  car_care_egress_state="$(/usr/bin/python3 -I -B "$SCRIPT_DIR/runtime-service-state-reader.py" --car-egress-hold)"
+  case "$car_care_egress_state" in
+    held)
+      CAR_CARE_EGRESS_HOLD_OVERRIDE="$PROJECT_ROOT/infra/k8s/host/docker-compose.car-egress-hold.yml"
+      [[ -f "$CAR_CARE_EGRESS_HOLD_OVERRIDE" && ! -L "$CAR_CARE_EGRESS_HOLD_OVERRIDE" && -r "$CAR_CARE_EGRESS_HOLD_OVERRIDE" ]] || {
+        printf '%s\n' 'car_egress_hold_override_unavailable' >&2
+        exit 1
+      }
+      ;;
+    clear) ;;
+    *) exit 1 ;;
+  esac
+fi
 {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] bootstrap start"
   echo "pwd=$(pwd)"
@@ -314,8 +330,18 @@ resolve_crawler_worker_caddy_upstream() {
 
 start_runtime_services() {
   local compose_services
-  local bridge_compose
+  local -a base_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml)
+  local -a bridge_compose
   load_portal_runtime_mode
+  if [[ "$PORTAL_RUNTIME_MODE" == cutover || "$PORTAL_RUNTIME_MODE" == k3s ]]; then
+    bridge_compose=("${base_compose[@]}" -f "$PORTAL_BRIDGE_COMPOSE_FILE")
+    if [[ -n "${CAR_CARE_EGRESS_HOLD_OVERRIDE:-}" ]]; then
+      bridge_compose+=(-f "$CAR_CARE_EGRESS_HOLD_OVERRIDE")
+    fi
+  fi
+  if [[ -n "${CAR_CARE_EGRESS_HOLD_OVERRIDE:-}" ]]; then
+    base_compose+=(-f "$CAR_CARE_EGRESS_HOLD_OVERRIDE")
+  fi
   case "$PORTAL_RUNTIME_MODE" in
     compose)
       require_portal_state_ready
@@ -326,7 +352,7 @@ start_runtime_services() {
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml build caddy
-        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
+        "${base_compose[@]}" up -d \
           portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
       else
         set_compose_homeops_lists
@@ -334,7 +360,7 @@ start_runtime_services() {
         for service in crawler-worker youtube-memo book-memo; do
           if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
         done
-        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
+        "${base_compose[@]}" up -d \
           portal-web $compose_services
         resolve_crawler_worker_caddy_upstream
         resolve_book_memo_caddy_upstream
@@ -355,7 +381,6 @@ start_runtime_services() {
       for service in crawler-worker youtube-memo book-memo; do
         if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
       done
-      bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       python3 "$SCRIPT_DIR/homeops-auth-run.py" --runtime-mode "$PORTAL_RUNTIME_MODE" -- \
         "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_crawler_worker_caddy_upstream
@@ -376,7 +401,6 @@ start_runtime_services() {
       for service in crawler-worker youtube-memo book-memo; do
         if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
       done
-      bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       python3 "$SCRIPT_DIR/homeops-auth-run.py" --runtime-mode "$PORTAL_RUNTIME_MODE" -- \
         "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_crawler_worker_caddy_upstream
