@@ -1,14 +1,19 @@
 """Windows custody policy, handle semantics and coordinator integration."""
 from contextlib import contextmanager
+import base64
 import ctypes
 from dataclasses import dataclass
-from pathlib import PureWindowsPath
+import gzip
+from pathlib import Path, PureWindowsPath
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from infra.k8s.ha_control import windows_protected_io as io
-from infra.k8s.ha_control import sameboot_transition as transition
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'infra/k8s'))
+from ha_control import native_windows_local as local
+from ha_control import sameboot_transition as transition
+from ha_control import windows_protected_io as io
 
 
 class AclTests(unittest.TestCase):
@@ -49,6 +54,71 @@ class AclTests(unittest.TestCase):
         user='S-1-5-21-1-2-3-1001'
         io.validate_acl(user,[(0,0,0x1f01ff,user)],depth=0,private=True,allowed=io.TRUSTED|{user})
         with self.assertRaises(io.TransitionBlocked):self.check([(0,0,0x1f01ff,user)],owner=user)
+
+
+class LocalSystemPowerShellTests(unittest.TestCase):
+    def setUp(self):
+        self.native = Mock()
+        self.native.owner_sid = 'S-1-5-18'
+        self.native.system_directory_path.return_value = PureWindowsPath(r'C:\Windows\System32')
+        self.image = b'approved OS executable'
+        self.native.system_executable_stamp.return_value = (self.image, 'stamp')
+        self.native.same_file.return_value = True
+        self.pin = local.wire._digest(self.image)
+        factory = patch.object(local, 'WindowsProtectedIO', return_value=self.native)
+        factory.start()
+        self.addCleanup(factory.stop)
+
+    def test_rejects_non_system_before_execution(self):
+        self.native.owner_sid = 'S-1-5-32-544'
+        with self.assertRaisesRegex(local.wire.BridgeRejected, 'local_recovery_system_required'):
+            local.LocalSystemPowerShell(executable_sha256=self.pin)
+        self.native.system_executable_stamp.assert_not_called()
+
+    def test_pinned_direct_executable_has_no_profile_or_inherited_environment(self):
+        shell = local.LocalSystemPowerShell(executable_sha256=self.pin)
+        source = '@{okay=$true}|ConvertTo-Json -Compress'
+
+        def execute(command, payload, deadline, *, maximum, start):
+            self.assertEqual(gzip.decompress(payload).decode(), source)
+            self.assertEqual(command[:-1], (str(shell.executable), '-NoLogo', '-NoProfile',
+                                           '-NonInteractive', '-EncodedCommand'))
+            loader = base64.b64decode(command[-1]).decode('utf-16-le')
+            self.assertIn(local.wire._digest(payload), loader)
+            self.assertEqual(maximum, 1048576)
+            with patch.object(local, 'start_direct') as launch:
+                start(command)
+                launch.assert_called_once_with(command, cwd=str(shell.executable.parent),
+                    env={'SystemRoot': str(shell.system.parent), 'WINDIR': str(shell.system.parent),
+                         'PATH': str(shell.system)})
+            return b'{"okay":true}\r\n'
+
+        with patch.object(local, 'exchange_direct', side_effect=execute):
+            self.assertEqual(shell.powershell(source, 1e12), {'okay': True})
+        self.native.same_file.assert_called_once_with(shell.executable, 'stamp', private=False)
+
+    def test_changed_image_and_invalid_response_are_rejected(self):
+        with patch.object(local, 'exchange_direct') as exchange:
+            shell = local.LocalSystemPowerShell(executable_sha256='a'*64)
+            with self.assertRaisesRegex(local.wire.BridgeRejected, 'local_recovery_powershell_image_changed'):
+                shell.powershell('{}', 1e12)
+            exchange.assert_not_called()
+            shell = local.LocalSystemPowerShell(executable_sha256=self.pin)
+            exchange.return_value = b'{"a":1,"a":2}'
+            with self.assertRaisesRegex(local.wire.BridgeRejected, 'bridge_duplicate_fields'):
+                shell.powershell('{}', 1e12)
+            self.native.same_file.return_value = False
+            with self.assertRaisesRegex(local.wire.BridgeRejected, 'local_recovery_powershell_image_changed'):
+                shell.powershell('{}', 1e12)
+
+    def test_authority_callback_is_live_only_within_session(self):
+        shell = local.LocalSystemPowerShell(executable_sha256=self.pin)
+        with patch.object(shell, 'powershell', return_value={'proof': True}) as observe:
+            with shell.live_authority_session(1e12) as query:
+                self.assertEqual(query('sample', 1e11), {'proof': True})
+            with self.assertRaisesRegex(local.wire.BridgeRejected, 'local_recovery_authority_session_closed'):
+                query('sample', 1e11)
+            observe.assert_called_once_with('sample', 1e11)
 
 
 @dataclass

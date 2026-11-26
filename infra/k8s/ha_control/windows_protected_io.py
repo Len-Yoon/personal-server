@@ -17,6 +17,7 @@ from . import initial_windows_gate as gate
 
 ERROR = 'windows_protected_io_unverified'
 TRUSTED = frozenset(gate.WRITERS)
+SYSTEM_POWERSHELL = ('WindowsPowerShell', 'v1.0', 'powershell.exe')
 
 
 def _need(value):
@@ -196,16 +197,20 @@ class WindowsProtectedIO:
             return actual==stamp
         except (OSError,ValueError,TransitionBlocked):return False
 
+    def system_directory_path(self):
+        buffer=ctypes.create_unicode_buffer(32768)
+        _need(0<self.system_directory(buffer,len(buffer))<len(buffer))
+        return self._path(buffer.value)
+
     def system_executable_stamp(self,path,limit=16777216):
-        """Read only the OS-owned, canonical System32 OpenSSH executables.
+        """Read only the canonical OS-owned OpenSSH and PowerShell images.
 
         TrustedInstaller is an OS authority here only. This exception never
         applies to key/config files or arbitrary caller-selected executables.
         """
-        path=self._path(path);buffer=ctypes.create_unicode_buffer(32768)
-        _need(0<self.system_directory(buffer,len(buffer))<len(buffer))
-        system=self._path(buffer.value)
-        _need(path in (system/'OpenSSH'/'ssh.exe',system/'OpenSSH'/'ssh-keygen.exe'))
+        path=self._path(path);system=self.system_directory_path()
+        _need(path in (system/'OpenSSH'/'ssh.exe',system/'OpenSSH'/'ssh-keygen.exe',
+                       system.joinpath(*SYSTEM_POWERSHELL)))
         # Separate instance: no change to the private-reader ACL policy, even
         # while another thread is validating a key with this object.
         reader=WindowsProtectedIO(admin_only=False)

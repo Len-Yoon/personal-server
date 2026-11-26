@@ -20,6 +20,35 @@ WSL = r'C:\Windows\System32\wsl.exe'
 _CUTOVER_KEEPALIVE = ('-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=12')
 
 
+def _powershell_input(source):
+    bridge._need(type(source) is str and 0 < len(source.encode('utf-8')) <= 131072,
+                 'native_windows_ssh_source_size')
+    payload = gzip.compress(source.encode('utf-8'), mtime=0)
+    digest = hashlib.sha256(payload).hexdigest()
+    loader = (
+        f'$b=[IO.BinaryReader]::new([Console]::OpenStandardInput()).ReadBytes({len(payload)});'
+        '$h=[Security.Cryptography.SHA256]::Create();'
+        'try{$pin=[BitConverter]::ToString($h.ComputeHash($b)).Replace("-", "").ToLowerInvariant()}'
+        'finally{$h.Dispose()};'
+        f'if($pin -cne "{digest}"){{exit 1}};'
+        '$m=[IO.MemoryStream]::new($b);'
+        '$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);'
+        '$r=[IO.StreamReader]::new($z,[Text.UTF8Encoding]::new($false,$true));'
+        'try{&([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose()}'
+    )
+    encoded = base64.b64encode(loader.encode('utf-16-le')).decode('ascii')
+    return ('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded), payload
+
+
+def _json_response(response):
+    try:
+        result = json.loads(response, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+    except (ValueError, UnicodeError):
+        raise bridge.BridgeRejected('native_windows_ssh_response_unconfirmed') from None
+    bridge._need(type(result) is dict, 'native_windows_ssh_response_unconfirmed')
+    return result
+
+
 class WindowsSsh:
     def __init__(self, endpoint, known_hosts):
         bridge._need(type(endpoint) is ssh.SshEndpoint, 'native_windows_ssh_endpoint_required')
@@ -90,30 +119,9 @@ class WindowsSsh:
 
     @staticmethod
     def _powershell(argv, source, deadline):
-        bridge._need(type(source) is str and 0 < len(source.encode('utf-8')) <= 131072,
-                     'native_windows_ssh_source_size')
-        payload = gzip.compress(source.encode('utf-8'), mtime=0)
-        digest = hashlib.sha256(payload).hexdigest()
-        loader = (
-            f'$b=[IO.BinaryReader]::new([Console]::OpenStandardInput()).ReadBytes({len(payload)});'
-            '$h=[Security.Cryptography.SHA256]::Create();'
-            'try{$pin=[BitConverter]::ToString($h.ComputeHash($b)).Replace("-", "").ToLowerInvariant()}'
-            'finally{$h.Dispose()};'
-            f'if($pin -cne "{digest}"){{exit 1}};'
-            '$m=[IO.MemoryStream]::new($b);'
-            '$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);'
-            '$r=[IO.StreamReader]::new($z,[Text.UTF8Encoding]::new($false,$true));'
-            'try{&([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose()}'
-        )
-        encoded = base64.b64encode(loader.encode('utf-16-le')).decode('ascii')
-        command = f'{POWERSHELL} -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}'
-        response = ssh._exchange((*argv, command), payload, deadline)
-        try:
-            result = json.loads(response, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
-        except (ValueError, UnicodeError):
-            raise bridge.BridgeRejected('native_windows_ssh_response_unconfirmed') from None
-        bridge._need(type(result) is dict, 'native_windows_ssh_response_unconfirmed')
-        return result
+        flags, payload = _powershell_input(source)
+        command = ' '.join((POWERSHELL, *flags))
+        return _json_response(ssh._exchange((*argv, command), payload, deadline))
 
     @contextmanager
     def wsl_cutover(self, source_root, manifest_path, source_sha256, boot_sha256, uid, config_path, config_sha256, deadline):

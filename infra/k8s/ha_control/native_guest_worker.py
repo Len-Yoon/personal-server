@@ -1479,10 +1479,12 @@ def handle(request, assert_windows_current=None, *, provider_inventory=None):
         return Receipt("UNKNOWN")
 
 
-def main():
+def main(*, authorize=None):
     try:
         signal.alarm(10)
         request = read_request(sys.stdin.buffer)
+        if authorize is not None:
+            _need(authorize(request) is True, "guest_worker_request_scope")
     except (TransitionBlocked, BridgeRejected, OSError, KeyError, TypeError, ValueError, RecursionError):
         return 1
     finally:
