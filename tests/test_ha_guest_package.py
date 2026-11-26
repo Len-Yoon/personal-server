@@ -1,16 +1,20 @@
 """Guest isolation and transition authority boundaries, without any deployment."""
 import copy
+from dataclasses import replace
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
+import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
-from ha_control import native_guest_config, native_guest_runtime
+from ha_control import native_guest_config, native_guest_restore, native_guest_runtime
 from ha_control.legacy_writers import TransitionBlocked
 
 spec=importlib.util.spec_from_file_location('ha_guest_package',ROOT/'infra/k8s/ha-package/guest.py')
@@ -50,6 +54,330 @@ class NativeGuestRuntimeTest(unittest.TestCase):
                 "runtime_mutations_excluded": True, "runtime_mutations_settled": settled,
                 "target_writes_closed": True, "target_never_opened": True,
                 "evidence_sha256": native_guest_runtime._digest(challenge.encode())}
+
+    def test_initial_standby_retirement_only_plans_exact_never_started_app_ids(self):
+        module = native_guest_runtime
+        pins = replace(self.pins("B"), boot_sha256=module._digest(b"guest-boot"))
+        shared = ("boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster", "system_id",
+                  "postgres_id", "retained_postgres_id")
+        postgres = SimpleNamespace(**{key: getattr(pins, key) for key in shared},
+                                   source_commit=pins.release["source_commit"], attempt_id=None, validate=lambda: None)
+        roles = sorted(module.SERVICES | {"ha-broker"})
+        owned = {role: {"container_id": f"{index:064x}", "image_id": "fixture-id"}
+                 for index, role in enumerate(roles, 1)}
+        zero = "0001-01-01T00:00:00Z"
+        objects = {record["container_id"]: {
+            "Id": record["container_id"], "Image": record["image_id"], "RestartCount": 0,
+            "Config": {"Labels": {"com.docker.compose.service": role, module.ATTEMPT_LABEL: pins.attempt_id}},
+            "State": {"Status": "created", "Running": False, "Pid": 0, "StartedAt": zero, "FinishedAt": zero,
+                      "ExitCode": 0, "Paused": False, "Restarting": False, "Dead": False, "OOMKilled": False},
+            "HostConfig": {"RestartPolicy": {"Name": "no"}},
+        } for role, record in owned.items()}
+        database = {"Config": {"Labels": {"com.docker.compose.service": "postgres"}}}
+        objects["a"*64] = database
+        raw = json.dumps({"containers": owned, "status": "PREPARED", "applications_started": False,
+                          "writer_authority_issued": False}).encode()
+        pin = module._digest(raw)
+        closed = ["ha_B", pins.system_id, True, pins.cluster, 1, "A", "B", 1, 1, False, False, True, "0/20"]
+        inventory_pin = lambda items: pins.protected_inventory_sha256 if items == {"a"*64: database} else "e"*64
+        with (patch.object(module.os, "geteuid", return_value=0), patch.object(module, "_read", return_value=raw),
+              patch.object(module, "_inspect_prepared", return_value=pin), patch.object(module, "_inventory", return_value=objects),
+              patch.object(module, "active_postgres"), patch.object(module, "_pg", return_value=closed) as pg,
+              patch.object(module, "inventory_sha256", side_effect=inventory_pin), patch.object(module, "_docker") as docker,
+              patch.object(module, "BOOT_ID") as boot):
+            boot.read_bytes.return_value = b"guest-boot"
+            no_activation = Mock()
+            options = dict(runtime_receipt_sha256=pin, assert_no_activation=no_activation)
+            result = module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
+            self.assertEqual(no_activation.call_count, 2)
+            self.assertEqual({record["role"] for record in result["owned"].values()}, set(roles))
+            self.assertNotIn("a"*64, result["owned"])
+            pg.return_value = closed[:]
+            pg.return_value[2] = False
+            with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_retirement_unconfirmed"):
+                module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
+            pg.return_value = closed
+            objects[owned[roles[0]]["container_id"]]["State"]["StartedAt"] = "2026-11-18T00:00:00Z"
+            with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_retirement_unconfirmed"):
+                module.observe_initial_standby_retirement(pins, postgres, Path("/stage"), **options)
+            docker.assert_not_called()
+
+    def test_standby_retirement_resumes_from_absence_without_resending(self):
+        module = native_guest_runtime
+        pins = replace(self.pins("B"), boot_sha256=module._digest(b"guest-boot"))
+        shared = ("boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
+                  "system_id", "postgres_id", "retained_postgres_id")
+        postgres = SimpleNamespace(**{key: getattr(pins, key) for key in shared},
+                                   source_commit=pins.release["source_commit"], attempt_id=None, validate=lambda: None)
+        owned = {f"{index:064x}": {"role": role, "inspect_sha256": "e"*64}
+                 for index, role in enumerate(sorted(module.SERVICES | {"ha-broker"}), 1)}
+        database_id = "a"*64
+        database = {"Config": {"Labels": {"com.docker.compose.service": "postgres"}}}
+        objects = {database_id: database, **{key: {} for key in owned}}
+        plan = {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                "runtime_receipt_sha256": "9"*64, "owned": owned,
+                "protected_inventory_sha256": pins.protected_inventory_sha256}
+        approval = module._digest(module._json_bytes(plan))
+        first = min(owned)
+
+        def remove(action, identifier):
+            self.assertEqual(action, "rm")
+            self.assertIn(identifier, owned)
+            if identifier == first:
+                raise subprocess.TimeoutExpired("docker rm", 1)
+            del objects[identifier]
+            return identifier.encode()
+
+        def fingerprint(items):
+            return pins.protected_inventory_sha256 if items == {database_id: database} else "e"*64
+
+        with (tempfile.TemporaryDirectory() as root, patch.object(module.os, "geteuid", return_value=0),
+              patch.object(module, "_directory"), patch.object(module, "BOOT_ID") as boot,
+              patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+              patch.object(module, "observe_initial_standby_retirement", return_value=plan) as observe,
+              patch.object(module, "_assert_initial_standby_closed"), patch.object(module, "active_postgres"),
+              patch.object(module, "_inventory", side_effect=lambda: dict(objects)),
+              patch.object(module, "inventory_sha256", side_effect=fingerprint),
+              patch.object(module, "_docker", side_effect=remove) as docker):
+            boot.read_bytes.return_value = b"guest-boot"
+            journal = Path(root) / "initial-standby-retirement"
+            journal.mkdir(mode=0o700)  # Crash before plan publication sent no Docker command.
+            options = dict(runtime_receipt_sha256=plan["runtime_receipt_sha256"], plan_sha256=approval,
+                           assert_no_activation=Mock())
+            for _ in range(2):
+                with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_removal_unsettled"):
+                    module.retire_initial_standby_containers(pins, postgres, root, **options)
+            docker.assert_called_once_with("rm", first)
+            del objects[first]  # Delayed completion is observed without replay.
+            result = module.retire_initial_standby_containers(pins, postgres, root, **options)
+            self.assertEqual(result["count"], 8)
+            self.assertEqual(objects, {database_id: database})
+            self.assertEqual(docker.call_count, 8)
+            observe.assert_called_once()
+
+    def test_standby_rebind_recovers_after_atomic_replacement_interruption(self):
+        module = native_guest_runtime
+        pins = replace(self.pins("B"), boot_sha256=module._digest(b"guest-boot"))
+        shared = ("boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
+                  "system_id", "postgres_id", "retained_postgres_id")
+        postgres = SimpleNamespace(**{key: getattr(pins, key) for key in shared},
+                                   source_commit=pins.release["source_commit"], attempt_id=None, validate=lambda: None)
+        roles = sorted(module.SERVICES | {"ha-broker"})
+        owned = {f"{index:064x}": {"role": role} for index, role in enumerate(roles, 1)}
+        receipt = "9"*64
+        plan = {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                "runtime_receipt_sha256": receipt, "owned": owned,
+                "protected_inventory_sha256": pins.protected_inventory_sha256}
+        plan_pin = module._digest(module._json_bytes(plan))
+        cert = "e"*64
+        real_replace = module.os.replace
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            journal = root / "initial-standby-retirement"
+            journal.mkdir()
+            (journal / "plan.json").write_bytes(module._json_bytes(plan))
+            for identifier in owned:
+                (journal / (identifier + ".remove.json")).write_bytes(
+                    module._json_bytes({"plan_sha256": plan_pin, "container_id": identifier}))
+            (root / "broker").mkdir()
+            (root / "broker" / "broker.crt").write_bytes(b"certificate")
+            before = {}
+            for service in module.SERVICES:
+                path = root / "apps" / service
+                path.mkdir(parents=True)
+                old, passfile = native_guest_config.application_config(
+                    cluster=pins.cluster, release=pins.release, plan_sha256=pins.plan_sha256, node="B",
+                    installation_id=pins.installation_id, system_id=pins.system_id, service=service,
+                    password="p"*32, broker_server_sha256=cert,
+                )
+                before[service] = (module._json_bytes(old), passfile)
+                (path / "config.json").write_bytes(before[service][0])
+                (path / "postgres.pgpass").write_bytes(passfile)
+            with (patch.object(module.os, "geteuid", return_value=0), patch.object(module.os, "fchown"),
+                  patch.object(module, "ROOT", root), patch.object(module, "BOOT_ID") as boot,
+                  patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+                  patch.object(module, "_cert_digest", return_value=cert),
+                  patch.object(module, "_assert_initial_standby_closed"), patch.object(module, "active_postgres"),
+                  patch.object(module, "_inventory", return_value={}),
+                  patch.object(module, "inventory_sha256", return_value=pins.protected_inventory_sha256),
+                  patch.object(module, "_docker") as docker):
+                boot.read_bytes.return_value = b"guest-boot"
+                options = dict(runtime_receipt_sha256=receipt, plan_sha256=plan_pin, assert_no_activation=Mock())
+                writes = 0
+
+                def interrupt(src, dst):
+                    nonlocal writes
+                    if dst.name == "config.json":
+                        writes += 1
+                        if writes == 2:
+                            raise OSError("fixture interruption")
+                    return real_replace(src, dst)
+
+                with patch.object(module.os, "replace", side_effect=interrupt):
+                    with self.assertRaisesRegex(OSError, "fixture interruption"):
+                        module.rebind_initial_standby_application_configs(pins, postgres, root, **options)
+                result = module.rebind_initial_standby_application_configs(pins, postgres, root, **options)
+                docker.assert_not_called()
+            self.assertEqual(result["status"], "APP_CONFIGS_REBOUND")
+            self.assertEqual(set(result["config_sha256"]), module.SERVICES)
+            for service, (old, passfile) in before.items():
+                path = root / "apps" / service
+                current = json.loads((path / "config.json").read_bytes())
+                self.assertEqual((current["generation"], current["primary_node"], current["primary"]["host"]),
+                                 (2, "B", "ha-b"))
+                self.assertEqual((path / "postgres.pgpass").read_bytes(), passfile)
+                self.assertEqual((journal / (service + ".generation-1-config.json")).read_bytes(), old)
+
+    def test_standby_clears_only_empty_ingress_after_preserving_original_broker(self):
+        module = native_guest_runtime
+        pins = self.pins("B")
+        broker_raw = b'{"generation":1}'
+        broker_pin = module._digest(broker_raw)
+        configs = {}
+        plan_pin = "a"*64
+        proof = {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_pin, "node": "B",
+                 "generation": 2, "config_sha256": configs}
+        real_rmdir = module.os.rmdir
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            journal = root / "journal"
+            journal.mkdir()
+            (root / "broker").mkdir()
+            broker = root / "broker" / "config.json"
+            broker.write_bytes(broker_raw)
+            prepared = module._json_bytes({"broker_sha256": broker_pin})
+            (root / "runtime-prepared.json").write_bytes(prepared)
+            ingress = root / "ingress"
+            ingress.mkdir()
+            for service in module.SERVICES:
+                (ingress / service).mkdir()
+                folder = root / "apps" / service
+                folder.mkdir(parents=True)
+                config_bytes = module._json_bytes({"node": "B", "service": service, "generation": 2,
+                                                  "primary_node": "B", "primary": {"host": "ha-b"},
+                                                  "partner": {"host": "ha-a"}})
+                (folder / "config.json").write_bytes(config_bytes)
+                configs[service] = module._digest(config_bytes)
+            with (patch.object(module, "ROOT", root), patch.object(module, "RUN", root),
+                  patch.object(module, "_initial_retirement_scope"), patch.object(module, "_directory"),
+                  patch.object(module, "_initial_retired_guard", return_value=(journal, Mock())),
+                  patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+                  patch.object(module.os, "fchown"), patch.object(module, "_assert_ingress_dir",
+                      side_effect=lambda path: module._need(not any(path.iterdir()), "fixture socket not empty"))):
+                options = dict(runtime_receipt_sha256=module._digest(prepared), plan_sha256=plan_pin,
+                               rebind_receipt=proof, assert_no_activation=Mock())
+                service = min(module.SERVICES)
+                config_path = root / "apps" / service / "config.json"
+                original = config_path.read_bytes()
+                old = module._json_bytes(json.loads(original) | {"generation": 1})
+                config_path.write_bytes(old)
+                configs[service] = module._digest(old)
+                with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_paths_unconfirmed"):
+                    module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                self.assertEqual(broker.read_bytes(), broker_raw)
+                config_path.write_bytes(original)
+                configs[service] = module._digest(original)
+                leftover = ingress / service / "socket"
+                leftover.touch()
+                with self.assertRaisesRegex(TransitionBlocked, "socket not empty"):
+                    module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                self.assertEqual(broker.read_bytes(), broker_raw)
+                leftover.unlink()
+
+                def interrupt(path, *, dir_fd):
+                    if path == sorted(module.SERVICES)[1]:
+                        raise OSError("fixture removal interruption")
+                    real_rmdir(path, dir_fd=dir_fd)
+
+                with patch.object(module.os, "rmdir", side_effect=interrupt):
+                    with self.assertRaisesRegex(OSError, "removal interruption"):
+                        module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                result = module.clean_initial_standby_runtime_paths(pins, None, root, **options)
+                self.assertEqual(result, {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_pin,
+                                          "broker_backup_sha256": broker_pin, "ingress_count": 7})
+                self.assertFalse(broker.exists())
+                self.assertFalse(any(ingress.iterdir()))
+                self.assertEqual((journal / "generation-1-broker-config.json").read_bytes(), broker_raw)
+
+    def test_standby_candidate_pins_preserve_non_app_inputs_and_bind_new_attempt(self):
+        module = native_guest_runtime
+        original_config = b"fixture-old"
+        new_config = b"fixture-new"
+        cert_key = "broker/broker.crt"
+        live = {f"apps/{service}/config.json": module._digest(new_config) for service in module.SERVICES}
+        live[cert_key] = "7"*64
+        old = {key: module._digest(original_config) for key in live if key != cert_key} | {cert_key: "7"*64}
+        spec = b'{"node":"B"}'
+        pins = replace(self.pins("B"), postgres_id="2"*64, inputs_sha256=module._digest(module._json_bytes(old)),
+                       boot_sha256=module._digest(b"boot"), spec_sha256=module._digest(spec))
+        write_before_mock = module._write
+        postgres = native_guest_restore.RestorePins(
+            boot_sha256=pins.boot_sha256, installation_id=pins.installation_id, inventory_sha256="a"*64,
+            postgres_id=pins.postgres_id, uid=999, gid=999, system_id=pins.system_id,
+            utility_digest="sha256:"+"e"*64, initializer_sha256="0"*64, source_commit=pins.release["source_commit"],
+            plan_sha256=pins.plan_sha256, config_sha256="f"*64, manifest_sha256=pins.manifest_sha256,
+            cluster=pins.cluster, peer_ipv4="192.0.2.10",
+        )
+        binding = module.Binding("a"*64, "1"*64, "b"*64, "c"*64, pins.boot_sha256)
+        backup = b"fixture-broker"
+        cleanup = {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": "c"*64,
+                   "broker_backup_sha256": module._digest(backup), "ingress_count": len(module.SERVICES)}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / pins.attempt_id
+            stage.mkdir()
+            (stage / "guest-spec.json").write_bytes(spec)
+            journal = stage / "journal"
+            journal.mkdir()
+            (root / "ingress").mkdir()
+            prepared = module._json_bytes({"broker_sha256": cleanup["broker_backup_sha256"]})
+            (stage / "runtime-prepared.json").write_bytes(prepared)
+            (journal / "generation-1-broker-config.json").write_bytes(backup)
+            for service in module.SERVICES:
+                (journal / (service + ".generation-1-config.json")).write_bytes(original_config)
+            with (patch.object(module.os, "geteuid", return_value=0), patch.object(module, "RUN", root),
+                  patch.object(module, "_initial_retired_guard", return_value=(journal, Mock())),
+                  patch.object(module, "_directory"), patch.object(module, "_preflight_environment",
+                      return_value=("renderer", "spec", None, None, None, "haproxy", "ownership")),
+                  patch.object(module, "_collect_inputs", return_value=(live, None)),
+                  patch.object(module, "_read", side_effect=lambda path, *_: path.read_bytes()),
+                  patch.object(module, "_write") as write):
+                args = dict(runtime_receipt_sha256=module._digest(prepared), plan_sha256=cleanup["plan_sha256"],
+                            cleanup_receipt=cleanup, assert_no_activation=Mock())
+                candidate, db = module.plan_initial_standby_generation(pins, postgres, stage, binding, **args)
+                self.assertEqual((candidate.primary_node, candidate.generation, candidate.attempt_id), ("B", 2, binding.attempt_id))
+                self.assertEqual(candidate.plan_sha256, pins.plan_sha256)
+                self.assertEqual(candidate.inputs_sha256, module._digest(module._json_bytes(live)))
+                self.assertEqual(db, replace(postgres, attempt_id=binding.attempt_id))
+                live[cert_key] = "6"*64
+                with self.assertRaisesRegex(TransitionBlocked, "guest_initial_standby_generation_unconfirmed"):
+                    module.plan_initial_standby_generation(pins, postgres, stage, binding, **args)
+                write.assert_not_called()
+                live[cert_key] = "7"*64
+                planned = module.initial_standby_generation_record(candidate, db, binding)
+                digest = module._digest(planned)
+                with (patch.object(module, "_write", wraps=write_before_mock) as persistent,
+                      patch.object(module, "_assert_initial_standby_closed"),
+                      patch.object(module, "BOOT_ID", SimpleNamespace(read_bytes=lambda: b"boot"))):
+                    with self.assertRaisesRegex(TransitionBlocked, "generation_publication_unconfirmed"):
+                        module.publish_initial_standby_generation(
+                            pins, postgres, stage, binding, generation_record_sha256="5"*64, **args,
+                        )
+                    persistent.assert_not_called()
+                    for _ in range(2):
+                        published = module.publish_initial_standby_generation(
+                            pins, postgres, stage, binding, generation_record_sha256=digest, **args,
+                        )
+                        self.assertEqual(published["record_sha256"], digest)
+                    for wrong in (replace(binding, boot_a_sha256="6"*64), replace(binding, source_sha256="7"*64)):
+                        with self.assertRaisesRegex(TransitionBlocked, "generation_publication_unconfirmed"):
+                            module.publish_initial_standby_generation(
+                                pins, postgres, stage, wrong, generation_record_sha256=digest, **args,
+                            )
+                    self.assertEqual(persistent.call_count, 2)
+                    target = root / binding.attempt_id
+                    self.assertEqual((target / "guest-spec.json").read_bytes(), spec)
+                    self.assertEqual((target / "generation-preflight.json").read_bytes(), planned)
 
     def test_preflight_reports_frozen_socket_occupancy_without_mutating(self):
         module = native_guest_runtime
@@ -262,10 +590,10 @@ class GuestLayoutTest(unittest.TestCase):
         init = native_guest_config.initializer_config(**common, broker_instance="e" * 64, passwords=credentials)
         self.assertEqual(init["passwords"]["ha_repl"], "r" * 48)
         self.assertEqual(len(set(init["passwords"].values())), 16)
-        app, passfile = native_guest_config.application_config(
-            **common, node="B", installation_id="f" * 64, system_id="123", service="portal-web",
-            password=credentials["portal_web_b"], broker_server_sha256="1" * 64,
-        )
+        guest_identity = dict(common, node="B", installation_id="f" * 64, system_id="123")
+        app_args = dict(guest_identity, service="portal-web", password=credentials["portal_web_b"],
+                        broker_server_sha256="1" * 64)
+        app, passfile = native_guest_config.application_config(**app_args)
         self.assertEqual((app["primary"]["host"], app["partner"]["host"]), ("ha-a", "ha-b"))
         self.assertEqual(app["primary"]["user"], "portal_web_b")
         self.assertEqual(passfile.count(credentials["portal_web_b"].encode()), 2)
@@ -274,18 +602,32 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertNotIn("authority_kind", app)
         self.assertEqual(app["effects"]["plan_sha256"], init["plan_sha256"])
         clients = {name: str(index) * 64 for index, name in enumerate(sorted(guest.SERVICES), 1)}
-        broker, broker_passfile = native_guest_config.broker_config(
-            **common, node="B", installation_id="f" * 64, system_id="123", broker_instance="e" * 64,
+        broker_args = dict(
+            guest_identity, broker_instance="e" * 64,
             password=credentials["ha_effect_broker"], client_sha256=clients,
             ingress_server_sha256="2" * 64, engine_id="fixture",
             targets={"portal-web": {"container_id": "3" * 64, "image_id": "sha256:" + "4" * 64}},
         )
+        broker, broker_passfile = native_guest_config.broker_config(**broker_args)
         self.assertEqual({row["service"] for row in broker["clients"]}, set(guest.SERVICES))
         self.assertTrue(all(row["node"] == "B" for row in broker["clients"]))
         self.assertIn(credentials["ha_effect_broker"].encode(), broker_passfile)
         self.assertNotIn(credentials["ha_effect_broker"], repr(broker))
         self.assertEqual(broker["providers"]["executor"]["services"], ["portal-web"])
         self.assertEqual(broker["providers"]["hyundai"], "/etc/ha-broker/providers/hyundai.json")
+        next_app, next_passfile = native_guest_config.application_config(**app_args, primary_node="B", generation=2)
+        next_broker, next_broker_passfile = native_guest_config.broker_config(**broker_args, primary_node="B", generation=2)
+        self.assertEqual((next_app["generation"], next_app["primary_node"], next_app["primary"]["host"],
+                          next_app["partner"]["host"]), (2, "B", "ha-b", "ha-a"))
+        self.assertEqual((next_broker["generation"], next_broker["postgres"]["primary"]["host"],
+                          next_broker["postgres"]["peer"]["host"]), (2, "ha-b", "ha-a"))
+        self.assertTrue(all(row["generation"] == 2 and row["node"] == "B" for row in next_broker["clients"]))
+        self.assertEqual((next_passfile, next_broker_passfile), (passfile, broker_passfile))
+        self.assertNotIn("authority_kind", next_app)
+        for build, args in ((native_guest_config.application_config, app_args),
+                            (native_guest_config.broker_config, broker_args)):
+            with self.assertRaisesRegex(TransitionBlocked, "guest_activation_generation_invalid"):
+                build(**args, primary_node="B", generation=1)
 
     def test_seven_apps_have_only_fixed_capabilities_and_no_external_network(self):
         value=fixture();original=copy.deepcopy(value)
@@ -353,7 +695,6 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertNotIn('portal.len.pe.kr', haproxy)
 
     def test_caddy_candidate_preserves_approved_native_crlf_and_http_host(self):
-        import hashlib
         from ha_control.caddy_cutover import render
         from ha_control.controller import TransitionBlocked
 
@@ -365,6 +706,21 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertIn(b'redir https://len.pe.kr{uri} permanent', candidate)
         with self.assertRaisesRegex(TransitionBlocked, 'caddy_cutover_source_unconfirmed'):
             render(source + b'\r\n', digest, fixture()['guest_ip'])
+
+    def test_caddy_roundtrip_requires_exact_current_routes(self):
+        from ha_control.caddy_cutover import render, retarget
+
+        source = (ROOT / 'caddy/Caddyfile').read_bytes()
+        pin = hashlib.sha256(source).hexdigest()
+        a, b = "192.168.100.2", "192.168.100.3"
+        active = render(source, pin, a)
+        candidate = retarget(source, pin, active, a, b)
+        self.assertEqual(candidate.count(f"https://{b}:10443".encode()), 7)
+        self.assertEqual(retarget(source, pin, candidate, b, a), active)
+        with self.assertRaisesRegex(TransitionBlocked, "caddy_failover_active_routes_changed"):
+            retarget(source, pin, active + b"\n", a, b)
+        with self.assertRaisesRegex(TransitionBlocked, "caddy_failover_target_unchanged"):
+            retarget(source, pin, active, a, a)
 
     def test_unpinned_images_secret_injection_and_namespace_bypass_are_rejected(self):
         changes=[lambda v:v['images'].update({'portal-web':'portal:latest'}),

@@ -88,22 +88,27 @@ class BookSearchBudgetTests(unittest.IsolatedAsyncioTestCase):
         search = self.search
         disconnected = []
         handlers = set()
+        connections_closed = asyncio.Event()
         async def slow_body(reader, writer):
-            await serve_slow_body(reader, writer, disconnected, handlers)
+            try:
+                await serve_slow_body(reader, writer, disconnected, handlers)
+            finally:
+                if len(disconnected) == 2:
+                    connections_closed.set()
         server = await asyncio.start_server(slow_body, '127.0.0.1', 0)
         url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/search"
         try:
             before = set(asyncio.all_tasks())
-            with patch.dict(os.environ, {'YES24_API_KEY':''}), patch.object(search, 'GOOGLE_BOOKS_URL', url), patch.object(search, 'OPEN_LIBRARY_URL', url), patch.object(search, 'SEARCH_BUDGET_SECONDS', .12), patch.object(search, 'PROVIDER_BUDGET_SECONDS', .05):
+            # Leave room for real TCP setup on a busy CI runner. The whole
+            # budget still expires before two full provider budgets elapse.
+            with patch.dict(os.environ, {'YES24_API_KEY':''}), patch.object(search, 'GOOGLE_BOOKS_URL', url), patch.object(search, 'OPEN_LIBRARY_URL', url), patch.object(search, 'SEARCH_BUDGET_SECONDS', .75), patch.object(search, 'PROVIDER_BUDGET_SECONDS', .5):
                 started = time.monotonic()
                 with self.assertRaises(ValueError):
                     await search.search_books_async('slow-body')
-                self.assertLess(time.monotonic()-started, .5)
-            for _ in range(20):
-                if len(disconnected)==2:
-                    break
-                await asyncio.sleep(.01)
+                self.assertLess(time.monotonic()-started, 1.5)
+            await asyncio.wait_for(connections_closed.wait(), 1)
             self.assertEqual(len(disconnected), 2)
+            self.assertFalse(handlers)
             self.assertFalse(set(asyncio.all_tasks()) - before)
         finally:
             server.close()

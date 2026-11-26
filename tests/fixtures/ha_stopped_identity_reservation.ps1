@@ -118,4 +118,47 @@ $holdFixture=$holdDefinition.Extent.Text.Replace($constructor,'$h=[pscustomobjec
 Need ($held.Count -eq 1 -and $result.path -ceq $mockRoot -and $script:entryCalls[0].is_private -and -not $script:entryCalls[1].is_private -and $script:entryCalls[1].is_ancestor);$count++
 Need ($ps -match 'Hold \$script:installRoot \$true \$sid 0');$count++
 Need ($ps.IndexOf("'reservation-intent.json'") -lt $ps.IndexOf('::Register('));Need ($ps -match 'CreateNew|NewPrivate' -and $ps -match 'automatic_stop_or_delete=\$false');$count++
+foreach($definition in $ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -cin @('Hash','Keys','Get-ReservationIdentity','Assert-RecoveryPredecessor')
+},$false)){. ([scriptblock]::Create($definition.Extent.Text))}
+$required=@('format','installation_id')
+$request=@{format='fresh-service-identity-reservation-v1';installation_id=$iid}
+$scope=Get-ReservationIdentity $request $required
+Need (-not $scope.recovery -and $scope.scope -ceq $iid);$count++
+$request['recovery_attempt_id']='2'*64
+Reject {Get-ReservationIdentity $request $required | Out-Null}
+$request['format']='fresh-recovery-service-reservation-v1'
+$request['predecessor_service_sha256']='3'*64
+$request['predecessor_terminal_sha256']='4'*64
+$scope=Get-ReservationIdentity $request $required
+Need ($scope.recovery -and $scope.scope -ceq ('2'*64));$count++
+$errorCopy=$request.Clone()
+$errorCopy['recovery_attempt_id']=$iid.Substring(0,24)+('5'*40)
+Reject {Get-ReservationIdentity $errorCopy $required | Out-Null}
+$errorCopy=$request.Clone()
+$errorCopy.Remove('predecessor_terminal_sha256')
+Reject {Get-ReservationIdentity $errorCopy $required | Out-Null}
+$script:scmState=[pscustomobject]@{Name=$name;State='Stopped';ProcessId=0;StartMode='Disabled';
+    ServiceType='Own Process';DesktopInteract=$false;StartName=('NT SERVICE\'+$name);PathName=$image}
+function Get-CimInstance{
+    param($Class,[string]$Filter,[int]$OperationTimeoutSec,[string]$ErrorAction)
+    Need ($OperationTimeoutSec -eq 5 -and $ErrorAction -ceq 'Stop')
+    return $script:scmState
+}
+$binding=@{attempt_id='a'*64;controller_plan_sha256='b'*64;legacy_plan_sha256='c'*64;
+    first_write_proof_sha256='d'*64;service_name=$name;service_created_ticks='123456789';service_pid=[long]2;
+    service_image_path_sha256=(Hash ([Text.Encoding]::UTF8.GetBytes($image)));state_path='C:\fake\controller-state.json'}
+$journal=@{kind='initial-wsl-cutover';schema_version=[long]1;generation=[long]1;sequence=[long]1;phase='lease_lost';
+    attempt_id=$binding.attempt_id;controller_plan_sha256=$binding.controller_plan_sha256;legacy_plan_sha256=$binding.legacy_plan_sha256}
+Assert-RecoveryPredecessor $request $binding $journal;$count++
+$errorCopy=$request.Clone()
+$errorCopy['recovery_attempt_id']=$binding.attempt_id
+Reject {Assert-RecoveryPredecessor $errorCopy $binding $journal}
+$script:scmState.StartMode='Manual'
+Reject {Assert-RecoveryPredecessor $request $binding $journal}
+$script:scmState.StartMode='Disabled'
+$script:scmState.PathName=$image+' --changed'
+Reject {Assert-RecoveryPredecessor $request $binding $journal}
 [ordered]@{tests_passed=$count;native_calls_performed=$false;service_created=$false;compile='PASS';scope='portable_metadata_json_and_partial_preserve_negative_guards';native_sddl_acl_service_integration='NOT_RUN'}|ConvertTo-Json -Compress

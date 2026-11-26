@@ -1,8 +1,15 @@
 """Transition ordering, durable retry bounds and legacy exclusion contracts."""
 from contextlib import contextmanager
+from dataclasses import replace
 import json
+import os
 from email.message import Message
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
+import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,10 +19,1649 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Controller, Journal, TransitionBlocked, exclusive
 from ha_control.windows import WindowsFence
-from ha_control import car_callback_ingress
+from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_execution, transition_ingress
+from ha_control import windows_native_ingress as native, wsl_writer_proof
+from ha_control.initial_pg_lease import RECOVERY_OPEN_REVISION
+from ha_control.native_guest_activation import INITIAL_GENERATION, ServingGeneration
+from ha_control.native_guest_ssh import GuestSshDispatcher, SshEndpoint
+from ha_control.native_replacement_network import WindowsReplacementNetwork
+
+
+class WindowsNativeIngressTests(unittest.TestCase):
+    def setUp(self):
+        self.source = (ROOT / "caddy/Caddyfile").read_bytes()
+
+    def render(self, *, source=None, **options):
+        source = self.source if source is None else source
+        inputs = {
+            "source_sha256": sha256(source).hexdigest(),
+            "active_ip": "10.23.45.67",
+            "generation": INITIAL_GENERATION,
+            "plan_sha256": "b" * 64,
+            "tls_files_sha256": "c" * 64,
+        }
+        return native.render_candidate(source, **(inputs | options))
+
+    def test_service_create_preserves_quoted_image_in_structured_cim_arguments(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for service creation validation")
+        command = r'''
+$e=$null;$t=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$t,[ref]$e)
+if($e.Count){throw 'parser'}
+foreach($name in @('Require','New-NativeFrontendService')){
+ $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$false)
+ if($null -eq $node){throw 'missing_function'}
+ . ([scriptblock]::Create($node.Extent.Text))
+}
+$script:code=0;$script:observed=$null
+function Invoke-CimMethod($ClassName,$MethodName,$Arguments,$ErrorAction){
+ if($ClassName -cne 'Win32_Service' -or $MethodName -cne 'Create' -or $ErrorAction -cne 'Stop'){throw 'cim_method'}
+ $script:observed=$Arguments
+ return [pscustomobject]@{ReturnValue=$script:code}
+}
+$image='"C:\Program Files\Caddy\caddy.exe" run --config "C:\ProgramData\Caddy\config.json"'
+New-NativeFrontendService 'N100HA_fixture_caddy' $image
+if($observed.Count -ne 7 -or $observed.Name -cne 'N100HA_fixture_caddy' -or
+ $observed.DisplayName -cne 'N100HA_fixture_caddy' -or $observed.PathName -cne $image -or
+ $observed.ServiceType -isnot [byte] -or $observed.ServiceType -ne 16 -or
+ $observed.ErrorControl -isnot [byte] -or $observed.ErrorControl -ne 1 -or
+ $observed.StartMode -cne 'Manual' -or $observed.StartName -cne 'LocalSystem'){throw 'cim_fields'}
+$script:code=5;$blocked=$false
+try{New-NativeFrontendService 'N100HA_fixture_caddy' $image}catch{
+ if($_.Exception.Message -cne 'native_frontend_rejected'){throw};$blocked=$true
+}
+if(-not $blocked){throw 'nonzero_accepted'}
+exit 0
+'''
+        environment = os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1")}
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=environment, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_new_service_owner_helper_compiles_and_rejects_unscoped_services(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for service owner validation")
+        command = r'''
+$e=$null;$t=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$t,[ref]$e)
+if($e.Count){throw 'parser'}
+$node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Set-NativeFrontendServiceOwner'},$false)
+if($null -eq $node){throw 'missing_owner_function'}
+. ([scriptblock]::Create($node.Extent.Text))
+$blocked=$false
+try{Set-NativeFrontendServiceOwner 'UnrelatedService'}catch{
+ if(-not $_.Exception.ToString().Contains('native_frontend_owner_scope')){throw};$blocked=$true
+}
+if(-not $blocked -or -not ('HaNativeFrontendOwnerV1' -as [type])){throw 'owner_scope_not_enforced'}
+exit 0
+'''
+        environment = os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1")}
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=environment, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_frontend_adapter_requires_guard_and_bound_service_states(self):
+        windows = MagicMock()
+        arguments = dict(script_path=r"C:\ProgramData\Reviewed\windows-ha-native-ingress-service.ps1",
+                         script_sha256="a" * 64, stage_script_sha256="b" * 64,
+                         request_path=r"C:\ProgramData\Reviewed\request.json", request_sha256="c" * 64,
+                         profile_sha256="d" * 64)
+        frontend = native.WindowsNativeFrontend(windows, **arguments)
+        guard = MagicMock(return_value=True)
+        base = dict(schema_version=1, status="PASS", request_sha256=arguments["request_sha256"],
+                    profile_sha256=arguments["profile_sha256"], production_external_verified=False, credentials_copied=False)
+        for mode, states in (("Install", ("Stopped", "Stopped")), ("StartCaddy", ("Running", "Stopped")),
+                             ("StartTunnel", ("Running", "Running")), ("Observe", ("Running", "Running")),
+                             ("Rollback", ("Stopped", "Absent"))):
+            windows.powershell.return_value = base | dict(mode=mode, caddy_state=states[0], tunnel_state=states[1])
+            result = frontend.run(mode, 90, assert_guard=guard)
+            self.assertEqual(result["mode"], mode)
+            source, deadline = windows.powershell.call_args.args
+            self.assertEqual(deadline, 90)
+            self.assertIn("[IO.FileShare]::Read", source)
+            self.assertIn("[HaFrontendDirectoryLease]::Open($parent.FullName)", source)
+            self.assertIn("Hold-FrontendParents", source)
+            self.assertIn("Assert-FrontendAcl", source)
+            self.assertIn("-ExpectedProfileSha256 " + arguments["profile_sha256"], source)
+            self.assertIn(arguments["script_sha256"], source)
+            self.assertIn("-Mode " + mode, source)
+            self.assertNotIn("cloudflared service install", source)
+        windows.reset_mock()
+        with self.assertRaisesRegex(TransitionBlocked, "guard_unconfirmed"):
+            frontend.run("Install", 90, assert_guard=lambda: False)
+        windows.powershell.assert_not_called()
+        windows.powershell.return_value = base | dict(mode="StartTunnel", caddy_state="Running", tunnel_state="Stopped")
+        with self.assertRaisesRegex(TransitionBlocked, "result_unconfirmed"):
+            frontend.run("StartTunnel", 90, assert_guard=guard)
+        for override in (dict(script_path=r"C:\ProgramData\Reviewed\..\wrong.ps1"),
+                         dict(request_path=r"C:\ProgramData\Reviewed\request.json:alternate"),
+                         dict(script_path=r"C:\ProgramData\Reviewed\$script.ps1"), dict(profile_sha256="bad")):
+            with self.assertRaisesRegex(TransitionBlocked, "request_invalid"):
+                native.WindowsNativeFrontend(windows, **(arguments | override))
+
+    def test_maintenance_frontend_never_claims_application_readiness(self):
+        windows = MagicMock()
+        frontend = native.WindowsNativeFrontend(windows, script_path=r"C:\ProgramData\Reviewed\service.ps1",
+            script_sha256="a" * 64, stage_script_sha256="b" * 64,
+            request_path=r"C:\ProgramData\Reviewed\request.json", request_sha256="c" * 64,
+            profile_sha256="d" * 64)
+        codes = {host + path: 503 for host, upstream in native.PUBLIC_ROUTES.items() if upstream
+                 for path in ("/ready", "/health")}
+        codes[car_callback_ingress.PUBLIC_HOST + "/health"] = 200
+        base = dict(schema_version=1, status="MAINTENANCE", request_sha256="c" * 64,
+                    profile_sha256="d" * 64, production_external_verified=False, credentials_copied=False,
+                    application_ready=False, origin_status_codes=codes, caddy_state="Running", tunnel_state="Running")
+        for mode in ("StartCaddyMaintenance", "StartTunnelMaintenance", "ObserveMaintenance"):
+            result = base | dict(mode=mode, tunnel_state="Stopped" if mode == "StartCaddyMaintenance" else "Running")
+            windows.powershell.return_value = result
+            self.assertEqual(frontend.run(mode, 90, assert_guard=lambda: True), result)
+        for change in (dict(status="PASS"), dict(application_ready=True), dict(origin_status_codes={}),
+                       dict(origin_status_codes=codes | {"len.pe.kr/health": 502}),
+                       dict(origin_status_codes=codes | {"len.pe.kr/health": True}),
+                       dict(caddy_state="Stopped")):
+            windows.powershell.return_value = base | dict(mode="StartTunnelMaintenance") | change
+            with self.subTest(change=change), self.assertRaisesRegex(TransitionBlocked, "result_unconfirmed"):
+                frontend.run("StartTunnelMaintenance", 90, assert_guard=lambda: True)
+        windows.powershell.return_value = base | dict(mode="StartTunnel")
+        with self.assertRaisesRegex(TransitionBlocked, "result_unconfirmed"):
+            frontend.run("StartTunnel", 90, assert_guard=lambda: True)
+
+    def test_maintenance_response_proves_route_without_accepting_other_failures(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        source = ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"
+        command = r"""
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'maintenance_ast'}
+foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -cin @('Require','Assert-MaintenanceResponse')},$false)){. ([scriptblock]::Create($fn.Extent.Text))}
+function Response([int]$Status,[string]$Marker,[string]$Body='ok'){
+ $value=[pscustomobject]@{StatusCode=$Status;Headers=@{'X-N100-Ingress-Route'=$Marker;'X-N100-Car-Route'=$Marker};Body=$Body}
+ $value|Add-Member ScriptMethod GetResponseStream {return [IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($this.Body))}
+ return $value
+}
+foreach($status in @(200,503)){
+ foreach($car in @($true,$false)){
+  $got=Assert-MaintenanceResponse (Response $status 'route') 'route' $car $true
+  if($got -ne $status){throw 'maintenance_status'}
+ }
+}
+foreach($status in @(301,400,500,502,504)){
+ $rejected=$false;try{Assert-MaintenanceResponse (Response $status 'route') 'route' $false $true}catch{$rejected=$true}
+ if(-not $rejected){throw 'maintenance_other_error'}
+}
+foreach($bad in @('wrong','')){
+ $rejected=$false;try{Assert-MaintenanceResponse (Response 503 $bad) 'route' $false $true}catch{$rejected=$true}
+ if(-not $rejected){throw 'maintenance_unmarked_503'}
+}
+$rejected=$false;try{Assert-MaintenanceResponse (Response 200 'route' 'wrong') 'route' $true $true}catch{$rejected=$true}
+if(-not $rejected){throw 'maintenance_car_body'}
+"""
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(source)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_maintenance_http_probe_handles_real_503_without_accepting_502(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+        observed = []
+        fixture = {"status": 503, "marker": "route"}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                observed.append((self.headers["Host"], self.path))
+                self.send_response(fixture["status"])
+                self.send_header(native.ROUTE_HEADER, fixture["marker"])
+                self.send_header(car_callback_ingress.ROUTE_HEADER, fixture["marker"])
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        command = r"""
+$ErrorActionPreference='Stop'
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$tokens,[ref]$errors)
+foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -cin @('Require','Assert-MaintenanceResponse','Assert-MaintenanceOrigins')},$false)){
+ . ([scriptblock]::Create(($fn.Extent.Text -replace '18080|18015',$env:FIXTURE_PORT)))
+}
+Assert-MaintenanceOrigins 'route'|ConvertTo-Json -Compress
+"""
+        try:
+            for status, marker in ((503, "route"), (200, "route"), (502, "route"), (503, "wrong")):
+                fixture.update(status=status, marker=marker)
+                result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                    env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"),
+                                      "FIXTURE_PORT": str(server.server_port)}, capture_output=True, text=True, timeout=15)
+                with self.subTest(status=status, marker=marker):
+                    if status in (200, 503) and marker == "route":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        codes = json.loads(result.stdout)
+                        self.assertEqual(len(codes), 15)
+                        self.assertEqual(set(codes.values()), {status})
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(observed)
+            self.assertTrue(all(path in {"/health", "/ready"} for _, path in observed))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_native_validator_keeps_file_context_mode_and_shared_contracts(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        source = (ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1").read_text()
+        start = source.index("        $serviceMode=$Mode")
+        stop = source.index("        Require ((ConvertFrom-Json $validated).status -ceq 'validated')", start)
+        block = source[start:stop]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            child = root / "support"
+            child.mkdir()
+            stage = child / "stage.ps1"
+            stage.write_text(r"""param($Mode,$InputDirectory,$ProfileSha256,$SupportSha256)
+if($Mode -cne 'Validate' -or $PSScriptRoot -cne $InputDirectory){throw 'file_context'}
+$script:mainRoutes=@{fixture='retained'};$script:hosts=@('fixture')
+$script:fixture_calls++
+'{"status":"validated"}'
+""")
+            runner = root / "runner.ps1"
+            runner.write_text(r"""$ErrorActionPreference='Stop';$script:fixture_calls=0
+function Require([bool]$Value){if(-not $Value){throw 'rejected'}}
+function Digest([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+$Mode='Install';$stageScript=$env:CONTEXT_STAGE;$stageRoot=[IO.Path]::GetDirectoryName($stageScript)
+$stageRaw=[IO.File]::ReadAllBytes($stageScript);$StageScriptSha256=Digest $stageRaw
+$preliminary=[pscustomobject]@{profile_sha256='fixture';support_sha256='fixture'}
+""" + block + r"""
+if($Mode -cne 'Install' -or $script:mainRoutes.fixture -cne 'retained' -or $script:hosts[0] -cne 'fixture'){throw 'scope_lost'}
+$StageScriptSha256='0'*64;$blocked=$false
+try{
+""" + block + r"""
+}catch{$blocked=$true}
+if(-not $blocked -or $Mode -cne 'Install' -or $script:fixture_calls -ne 1){throw 'unpinned_stage_executed'}
+""")
+            result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-File", str(runner)],
+                env=os.environ | {"CONTEXT_STAGE": str(stage)}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_derived_native_plan_binds_original_deployment_marker_and_driver(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        code = r"""
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition ([IO.File]::ReadAllText($env:STRICT_JSON_SOURCE))
+$e=$null;$t=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$t,[ref]$e)
+if($e.Count){throw 'derived_parse'}
+foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $n.Name -cin @('Require','Assert-KeysExact','Get-LegacyDeploymentBinding','Assert-LegacyMarkerBinding')},$false)){
+ . ([scriptblock]::Create($fn.Extent.Text))
+}
+function Object([string]$Json){return [TrustedStoppedV1.Json]::Object($Json,8192)}
+$ex=@{plan_sha256=('e'*64);driver_sha256=('a'*64)}
+$direct=Object '{"windows_reactivation":{},"cluster":"fixture"}'
+$binding=Get-LegacyDeploymentBinding $direct $ex
+if($binding.plan_sha256 -cne $ex.plan_sha256 -or $null -ne $binding.attempt_id){throw 'direct_contract_changed'}
+$valid='{"deployment_plan_sha256":"PLAN","deployment_attempt_id":"ATTEMPT","windows_driver_sha256":"DRIVER","windows_reactivation":{}}'.Replace('PLAN',('b'*64)).Replace('ATTEMPT',('c'*64)).Replace('DRIVER',('a'*64))
+$binding=Get-LegacyDeploymentBinding (Object $valid) $ex
+$approved=[pscustomobject]@{authority_cluster='fixture';authority_source_commit=('d'*40);authority_generation=1}
+$marker=Object ('{"cluster":"fixture","generation":1,"source_commit":"SOURCE","plan_sha256":"PLAN","attempt_id":"ATTEMPT"}'.Replace('SOURCE',('d'*40)).Replace('PLAN',('b'*64)).Replace('ATTEMPT',('c'*64)))
+Assert-LegacyMarkerBinding $marker $approved $binding
+foreach($bad in @($valid.Replace(('a'*64),('f'*64)),$valid.Replace(('b'*64),'invalid'),
+    $valid.Replace(('c'*64),'invalid'),$valid.Replace(('"'+('b'*64)+'"'),'42'),
+    $valid.Replace('"windows_reactivation":{}','"windows_reactivation":{},"extra":true'),
+    $valid.Replace(('"deployment_attempt_id":"'+('c'*64)+'",'),''))){
+ $blocked=$false;try{Get-LegacyDeploymentBinding (Object $bad) $ex}catch{$blocked=$true}
+ if(-not $blocked){throw 'derived_bad_binding_accepted'}
+}
+foreach($key in @('plan_sha256','attempt_id','cluster','generation','source_commit')){
+ $prior=$marker[$key];$marker[$key]=if($key -ceq 'generation'){[long]2}else{'f'*64}
+ $blocked=$false;try{Assert-LegacyMarkerBinding $marker $approved $binding}catch{$blocked=$true}
+ $marker[$key]=$prior
+ if(-not $blocked){throw 'derived_marker_mismatch_accepted'}
+}
+"""
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", code],
+            env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"),
+                              "STRICT_JSON_SOURCE": str(ROOT / "infra/k8s/ha_control/stopped_service_installer/StrictJson.cs")},
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_frontend_lifecycle_rejects_posix_before_reading_inputs(self):
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for native frontend validation")
+        source = ROOT / "infra/k8s/ha_control/windows-ha-native-ingress-service.ps1"
+        command = r"""
+$errors=$null;$tokens=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:NATIVE_FRONTEND_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'frontend_ast'}
+$functions=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst]},$false)|ForEach-Object {$_.Name})
+foreach($name in @('Assert-Origins','Assert-Listeners','Assert-LegacyConnectorExclusion','Service-Facts')){
+ if($name -cnotin $functions){throw 'frontend_contract_missing'}
+}
+foreach($fn in $ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -cin @('Require','Assert-ServiceRecoveryDisabled','Assert-ExpectedProfile','Assert-KeysExact','Assert-LegacyConnectorExclusion','Assert-TunnelCredential')},$false)){
+ . ([scriptblock]::Create($fn.Extent.Text))
+}
+$tunnel='11111111-1111-4111-8111-111111111111'
+$credential=[Collections.Generic.Dictionary[string,object]]::new()
+$credential['AccountTag']='a'*32
+$credential['TunnelSecret']=[Convert]::ToBase64String([byte[]]::new(32))
+$credential['TunnelID']=$tunnel
+Assert-TunnelCredential $credential $tunnel
+foreach($endpoint in @('','us')){
+ $credential['Endpoint']=$endpoint
+ Assert-TunnelCredential $credential $tunnel
+ if($credential['Endpoint'] -cne $endpoint){throw 'frontend_credential_rewritten'}
+}
+foreach($bad in @($null,42,@('us'),@{region='us'})){
+ $credential['Endpoint']=$bad
+ $rejected=$false
+ try{Assert-TunnelCredential $credential $tunnel}catch{$rejected=$true}
+ if(-not $rejected){throw 'frontend_credential_bad_endpoint'}
+}
+$credential.Remove('Endpoint')|Out-Null
+$credential['Unexpected']='fixture'
+$rejected=$false
+try{Assert-TunnelCredential $credential $tunnel}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_credential_unknown_key'}
+$credential.Remove('Unexpected')|Out-Null
+$credential['TunnelSecret']='malformed-base64'
+$rejected=$false
+try{Assert-TunnelCredential $credential $tunnel}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_credential_bad_secret'}
+$rejected=$false
+try{Assert-LegacyConnectorExclusion $null 'Ubuntu-24.04'}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_connector_without_owner'}
+$invalid=[Collections.Generic.Dictionary[string,object]]::new()
+foreach($key in @('plan_path','plan_sha256','driver_path','driver_sha256','marker_sha256','linux_boot_sha256','original_fragment_sha256')){
+ $invalid[$key]='a'*64
+}
+$invalid['owner_uid']=[long]0
+$invalid['original_unit_backup']='/etc/n100-ha-cutover/cloudflared-original-'+('a'*64)+'.service'
+$rejected=$false
+try{Assert-LegacyConnectorExclusion $invalid 'Ubuntu-24.04'}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_connector_wrong_owner'}
+Assert-ExpectedProfile ([pscustomobject]@{profile_sha256=('a'*64);support_sha256=('b'*64)}) ('a'*64)
+$rejected=$false
+try{Assert-ExpectedProfile ([pscustomobject]@{profile_sha256=('c'*64);support_sha256=('b'*64)}) ('a'*64)}catch{$rejected=$true}
+if(-not $rejected){throw 'frontend_profile_drift'}
+$baseline=@{Delayed=$false;NonCrash=$false;Actions=0;Triggers=0;Start=3}
+Assert-ServiceRecoveryDisabled ([pscustomobject]$baseline)
+foreach($key in @('Delayed','NonCrash','Actions','Triggers','Start')){
+ $changed=$baseline.Clone()
+ $changed[$key]=if($key -cin @('Delayed','NonCrash')){$true}else{1}
+ $rejected=$false
+ try{Assert-ServiceRecoveryDisabled ([pscustomobject]$changed)}catch{$rejected=$true}
+ if(-not $rejected){throw 'frontend_recovery_policy_adopted'}
+}
+& $env:NATIVE_FRONTEND_SCRIPT -Mode Install -RequestPath 'C:\Absent\request.json' -RequestSha256 ('a'*64) -ExpectedProfileSha256 ('d'*64) -StageScriptSha256 ('b'*64)
+"""
+        result = subprocess.run([str(pwsh), "-NoProfile", "-NonInteractive", "-Command", command],
+                                env=os.environ | {"NATIVE_FRONTEND_SCRIPT": str(source)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertIn(receipt["phase"], {"native", "request"} if sys.platform == "win32" else {"native"})
+        self.assertEqual(receipt["created_services"], 0)
+        self.assertFalse(receipt["remote_action_unconfirmed"])
+        self.assertFalse(receipt["credentials_copied"])
+
+    def test_preserves_host_routes_and_isolates_callback(self):
+        result = self.render()
+        config = result.caddyfile.decode("ascii")
+        rules = json.loads(result.tunnel_ingress)["ingress"]
+        groups = {
+            "portal-web": ("len.pe.kr", "portfolio.len.pe.kr", "file.len.pe.kr", "admin.len.pe.kr"),
+            "book-memo": ("books.len.pe.kr",),
+            "youtube-memo": ("memo.len.pe.kr",),
+            "crawler-worker": ("news.len.pe.kr",),
+        }
+        web_hosts = {host for hosts in groups.values() for host in hosts} | {"portal.len.pe.kr"}
+        actual = {rule["hostname"]: rule for rule in rules[:-1]}
+        self.assertEqual(len(actual), len(rules) - 1)
+        self.assertEqual(set(actual), web_hosts | {car_callback_ingress.PUBLIC_HOST})
+        self.assertEqual(rules[-1], {"service": "http_status:404"})
+        for host in web_hosts:
+            self.assertEqual(actual[host], {
+                "hostname": host, "service": f"http://127.0.0.1:{native.MAIN_ORIGIN_PORT}",
+                "originRequest": {"httpHostHeader": host},
+            })
+        car_host = car_callback_ingress.PUBLIC_HOST
+        self.assertEqual(actual[car_host]["service"], f"http://127.0.0.1:{native.CAR_ORIGIN_PORT}")
+        self.assertEqual(actual[car_host]["originRequest"], {"httpHostHeader": car_host})
+        for service, hosts in groups.items():
+            for host in hosts:
+                site = config.split(f"http://{host}:{native.MAIN_ORIGIN_PORT} {{\n", 1)[1].split("\n}\n", 1)[0]
+                self.assertIn(f"tls_server_name {service}.ha.internal", site)
+                self.assertIn("header_up Host {hostport}", site)
+        self.assertEqual(config.count("    bind 127.0.0.1\n"), len(actual) + 2)
+        self.assertEqual(config.count("import portal_file_upload_limit\n"), 4)
+        self.assertIn("max_size 30MB", config)
+        self.assertIn("redir https://len.pe.kr{uri} permanent", config)
+        self.assertEqual(config.count(f"tls_trust_pool file {native.WINDOWS_TLS}/server-ca.crt"), 8)
+        self.assertEqual(config.count(f"tls_client_auth {native.WINDOWS_TLS}/client.crt {native.WINDOWS_TLS}/client.key"), 8)
+        self.assertNotIn("{env.", config)
+        self.assertNotIn("/run/n100-ha", config)
+        self.assertIn("    log {\n        output discard\n    }\n", config.split("\n\n", 1)[0])
+        _, expected_car = car_callback_ingress.render("10.23.45.67", route_pin=result.route_pin).decode("ascii").split("\n\n", 1)
+        self.assertEqual(config.count("        match status 200 503\n"), 9)
+        expected_car = expected_car.replace("        match status 200\n", "        match status 200 503\n", 1)
+        expected_car = expected_car.replace(":8015 {\n", f":{native.CAR_ORIGIN_PORT} {{\n    bind 127.0.0.1\n")
+        self.assertTrue(config.endswith(expected_car.replace("/run/n100-ha/caddy-mtls", native.WINDOWS_TLS)))
+
+    def test_candidate_marker_pins_serving_generation_and_certs(self):
+        initial = self.render()
+        self.assertEqual(initial, self.render())
+        for override in ({"generation": ServingGeneration("B", 2, 2, 4)},
+                         {"active_ip": "10.23.45.68"}, {"plan_sha256": "e" * 64},
+                         {"tls_files_sha256": "e" * 64}):
+            self.assertNotEqual(initial.route_pin, self.render(**override).route_pin)
+        self.assertIn(f"{native.ROUTE_HEADER} {initial.route_pin}".encode(), initial.caddyfile)
+        self.assertIn(f"{car_callback_ingress.ROUTE_HEADER} {initial.route_pin}".encode(), initial.caddyfile)
+        self.assertIn(b"http://len.pe.kr:", self.render(source=self.source.replace(b"\n", b"\r\n")).caddyfile)
+
+    def test_recovered_initial_candidate_requires_its_distinct_attempt(self):
+        recovered = replace(INITIAL_GENERATION, revision=RECOVERY_OPEN_REVISION)
+        self.assertNotEqual(self.render().route_pin,
+                            self.render(generation=recovered, recovery_attempt_id="d" * 64).route_pin)
+        self.assertNotEqual(self.render(generation=recovered, recovery_attempt_id="d" * 64).route_pin,
+                            self.render(generation=recovered, recovery_attempt_id="e" * 64).route_pin)
+        for generation, attempt in ((recovered, None), (recovered, "invalid"), (INITIAL_GENERATION, "d" * 64),
+                                    (replace(recovered, revision=5), "d" * 64),
+                                    (replace(recovered, timeline=True), "d" * 64)):
+            with self.subTest(generation=generation, attempt=attempt), self.assertRaises(TransitionBlocked):
+                self.render(generation=generation, recovery_attempt_id=attempt)
+
+    def test_rejects_drift_unconfirmed_keys_and_unsafe_addresses(self):
+        for options in ({"source_sha256": "b" * 64}, {"active_ip": "127.0.0.1"},
+                        {"generation": replace(INITIAL_GENERATION, revision=3)}, {"tls_files_sha256": None}):
+            with self.subTest(options=options), self.assertRaises(TransitionBlocked):
+                self.render(**options)
+        for source in (
+            self.source.replace(b"import common_tls", b"bind 0.0.0.0\n    import common_tls", 1),
+            self.source.replace(b"books.len.pe.kr", b"car.len.pe.kr"),
+            self.source.replace(b"books.len.pe.kr", b"different.len.pe.kr"),
+            self.source.replace(b"memo.len.pe.kr", b"placeholder").replace(b"books.len.pe.kr", b"memo.len.pe.kr")
+            .replace(b"placeholder", b"books.len.pe.kr"),
+            self.source.replace(b"    import portal_file_upload_limit\n", b"", 1),
+        ):
+            with self.assertRaises(TransitionBlocked):
+                self.render(source=source)
+
+
+    def test_native_package_validation_is_inert_and_checks_exact_artifacts(self):
+        control = ROOT / "infra/k8s/ha_control"
+        installer = control / "windows-ha-native-ingress.ps1"
+        pwsh = Path(shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh")
+        self.assertTrue(pwsh.is_file(), "PowerShell is required for native package validation")
+        support = (
+            "stopped_service_installer/StrictJson.cs", "stopped_service_installer/StoppedService.cs",
+            "stopped_service_installer/PrivateIo.cs", "windows-service-preflight.ps1",
+        )
+        support_hashes = [sha256((control / name).read_bytes()).hexdigest() for name in support]
+        support_sha = sha256("\n".join(support_hashes).encode()).hexdigest()
+        image = bytearray(512)
+        struct.pack_into("<H", image, 0, 0x5a4d)
+        struct.pack_into("<I", image, 60, 64)
+        struct.pack_into("<IHHIIIHHH", image, 64, 0x4550, 0x8664, 1, 0, 0, 0, 240, 2, 0x20b)
+        candidate = self.render()
+        payload = {"caddy.exe": image, "cloudflared.exe": image, "Caddyfile": candidate.caddyfile,
+                   "cloudflared-ingress.json": candidate.tunnel_ingress}
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary).resolve()
+
+            def check(phase, *, overrides=None, mode="Validate", protocol="http2", profile_pin=None):
+                contents = payload | (overrides or {})
+                files = {name: {"sha256": sha256(data).hexdigest(), "bytes": len(data)} for name, data in contents.items()}
+                profile = json.dumps({"schema_version": 1, "source_commit": "a" * 40,
+                                      "route_sha256": candidate.route_pin, "protocol": protocol, "files": files}).encode()
+                for name, data in contents.items():
+                    (package / name).write_bytes(data)
+                (package / "profile.json").write_bytes(profile)
+                snapshot = {path.name: path.read_bytes() for path in package.iterdir()}
+                result = subprocess.run(
+                    [str(pwsh), "-NoProfile", "-NonInteractive", "-File", str(installer), "-Mode", mode,
+                     "-InputDirectory", str(package), "-ProfileSha256", profile_pin or sha256(profile).hexdigest(),
+                     "-SupportSha256", support_sha], capture_output=True, text=True, timeout=45,
+                )
+                self.assertTrue(result.stdout, result.stderr)
+                receipt = json.loads(result.stdout)
+                self.assertEqual({path.name: path.read_bytes() for path in package.iterdir()}, snapshot)
+                self.assertIs(receipt["service_started"], False)
+                self.assertIs(receipt["credentials_staged"], False)
+                if phase is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(receipt["status"], "validated")
+                    self.assertEqual(receipt["artifact_count"], 4)
+                else:
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(receipt["phase"], phase)
+                    self.assertIs(receipt["published"], False)
+                    self.assertIs(receipt["incomplete_private_staging"], False)
+
+            check(None)
+            check("profile", profile_pin="b" * 64)
+            check("profile", protocol=["http2"])
+            check("artifacts", overrides={"caddy.exe": image[:68] + b"\x4c\x01" + image[70:]})
+            check("artifacts", overrides={"cloudflared-ingress.json": candidate.tunnel_ingress.replace(
+                b"{", b'{"credentials-file":"fixture",', 1)})
+            check("artifacts", overrides={"Caddyfile": candidate.caddyfile + b"\nhttp://:8199 {\n    respond 200\n}\n"})
+            blocks = candidate.caddyfile.split(b"\n\n")
+            check(None, overrides={"Caddyfile": b"\n\n".join(blocks[:3] + [blocks[4], blocks[3]] + blocks[5:])})
+            for order in ((1, 0, 2), (0, 2, 1)):
+                with self.subTest(section_order=order):
+                    altered = b"\n\n".join([blocks[index] for index in order] + blocks[3:])
+                    check("artifacts", overrides={"Caddyfile": altered})
+            # check recalculates the profile SHA for each altered Caddyfile.
+            for line in (b"    import ../mutable.caddy\n", b"    import C:/mutable.caddy\n",
+                         b"    request_header X-Route {$UNTRUSTED}\n"):
+                with self.subTest(line=line):
+                    altered = candidate.caddyfile.replace(b"    import common_tls\n", line + b"    import common_tls\n", 1)
+                    check("artifacts", overrides={"Caddyfile": altered})
+            for previous, replacement in (
+                (b"https://10.23.45.67:10443", b"http://10.23.45.67:10443"),
+                (b"tls_server_name portal-web.ha.internal", b"tls_server_name wrong.ha.internal"),
+                (b"tls_trust_pool file C:/ProgramData/N100HA/ingress/tls/server-ca.crt", b"tls_insecure_skip_verify"),
+                (b"C:/ProgramData/N100HA/ingress/tls/client.key", b"C:/Mutable/client.key"),
+            ):
+                with self.subTest(previous=previous):
+                    self.assertIn(previous, candidate.caddyfile)
+                    check("artifacts", overrides={"Caddyfile": candidate.caddyfile.replace(previous, replacement, 1)})
+            if sys.platform != "win32":
+                check("native_intent", mode="Stage")
+
+
+class WindowsReplacementNetworkTests(unittest.TestCase):
+    def test_binds_native_result_to_fence_vm_and_switch(self):
+        bridge = transition_ingress.bridge
+        binding = bridge.Binding(*(letter * 64 for letter in "abcde"))
+        replacement = {"node": "A", "installation_id": "f" * 64, "vm_id": "replacement",
+                       "disk_paths_sha256": "1" * 64}
+        request = bridge.Request(binding, "A", bridge.GUEST_PREFLIGHT_REPLACEMENT, 2, "2" * 64,
+                                 {"installation_id": replacement["installation_id"], "bootstrap_manifest_sha256": "3" * 64})
+        stage = "4" * 64
+        windows = MagicMock()
+        windows.powershell.return_value = {"attached": True, "stage_sha256": stage, "vm_id": "replacement",
+                                           "switch_id": "live"}
+        script = ROOT / "infra/k8s/ha_control/windows-ha-replacement-network.ps1"
+        implementation = WindowsReplacementNetwork(
+            windows, sha256(script.read_bytes()).hexdigest(), primary_vm_id="survivor",
+            old_disk_paths_sha256="5" * 64, isolated_switch_id="isolated", serving_switch_id="live",
+            replacement_mac="020000000001",
+        )
+        original = windows.powershell.return_value
+        windows.powershell.return_value = {"isolated": True, "vm_id": "replacement", "switch_id": "isolated"}
+        self.assertTrue(implementation.preflight(replacement, "old", request, 90))
+        source = windows.powershell.call_args.args[0]
+        self.assertTrue(source.endswith(" -ObserveOnly"))
+        self.assertNotIn(" -Go", source)
+        windows.powershell.reset_mock()
+        windows.powershell.return_value = original
+        fence = MagicMock(return_value=None)
+        with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
+            implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
+        windows.powershell.assert_not_called()
+
+        fence.reset_mock(return_value=True)
+        fence.side_effect = [stage, None]
+        with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
+            implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
+        windows.powershell.assert_called_once()
+        self.assertEqual(fence.call_count, 2)
+        fence.side_effect = None
+        fence.return_value = stage
+        self.assertTrue(implementation(replacement, "old", request, stage, 90, assert_fenced=fence))
+        windows.powershell.return_value["switch_id"] = "unexpected"
+        with self.assertRaisesRegex(bridge.BridgeRejected, "network_unconfirmed"):
+            implementation(replacement, "old", request, stage, 90, assert_fenced=fence)
+
+
+    def test_crash_source_read_requires_exact_off_vm_and_disabled_restart(self):
+        bridge = transition_ingress.bridge
+        path = ROOT / "infra/k8s/ha_control/windows-ha-replacement-network.ps1"
+        pin = sha256(path.read_bytes()).hexdigest()
+        windows = MagicMock()
+        implementation = WindowsReplacementNetwork(
+            windows, pin, primary_vm_id="active", old_disk_paths_sha256="c"*64,
+            isolated_switch_id="isolation", serving_switch_id="serving", replacement_mac="021122334455",
+        )
+        receipt = {"vm_id": "old", "disk_paths_sha256": "c"*64, "state": "Off", "automatic_start": "Nothing"}
+        windows.powershell.return_value = receipt
+        self.assertTrue(implementation.assert_crash_source_off("old", float("inf")))
+        command = windows.powershell.call_args.args[0]
+        self.assertIn(" -ReadCrashSource ", command)
+        self.assertNotIn(" -Go", command)
+        for override in ({"state":"Running"}, {"automatic_start":"Start"}, {"vm_id":"foreign"},
+                         {"disk_paths_sha256":"d"*64}):
+            windows.powershell.return_value = receipt | override
+            with self.assertRaisesRegex(bridge.BridgeRejected, "crash_source_unconfirmed"):
+                implementation.assert_crash_source_off("old", float("inf"))
+
+
+class DirectGuestPipeTests(unittest.TestCase):
+    def test_direct_binary_exchange_preserves_bytes_and_rejects_oversize(self):
+        from ha_control.native_pipe_process import exchange_direct
+        from ha_control.native_stdio_bridge import BridgeRejected
+        import time
+
+        command = (sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())')
+        self.assertEqual(exchange_direct(command, b'protected frame\n', time.monotonic() + 5, maximum=128),
+                         b'protected frame\n')
+        with self.assertRaisesRegex(BridgeRejected, 'guest_ssh_frame_limit'):
+            exchange_direct(command, b'x' * 129, time.monotonic() + 5, maximum=128)
+
+    def test_direct_transport_uses_same_activation_challenge_checks(self):
+        from ha_control import native_guest_ssh as ssh, native_stdio_bridge as bridge
+        from ha_control.native_pipe_process import start_direct
+        import time
+
+        nonce, challenge, proof = '1' * 64, '2' * 64, '3' * 64
+        frame = {'kind': 'activation_boundary', 'request_nonce': nonce, 'challenge': challenge, 'boundary': 'check'}
+        code = '\n'.join(('import sys', 'assert sys.stdin.buffer.readline()==b\'{"input":true}\\n\'',
+                         f'sys.stdout.buffer.write({bridge._bytes(frame)!r})', 'sys.stdout.buffer.flush()',
+                         f'assert sys.stdin.buffer.readline()=={bridge._bytes(frame | {"kind": "activation_boundary_current", "windows_proof_sha256": proof})!r}',
+                         'sys.stdout.buffer.write(b\'{"status":"PASS"}\\n\')'))
+        check = MagicMock(return_value=proof)
+        result = ssh._activation_exchange((sys.executable, '-c', code), b'{"input":true}\n',
+                                          time.monotonic() + 5, nonce, check, bind_boundary=True,
+                                          boundaries=('check',), direct_start=start_direct)
+        self.assertEqual(result, b'{"status":"PASS"}\n')
+        self.assertEqual(check.call_args.args[:2], (challenge, 'check'))
+
+
+class ServingEndpointTests(unittest.TestCase):
+    def test_both_pinned_ssh_hosts_must_match_postgres_plan(self):
+        dispatcher = GuestSshDispatcher.__new__(GuestSshDispatcher)
+        dispatcher.guests = {node: SimpleNamespace(host=host)
+                             for node, host in (("A", "192.168.40.11"), ("B", "192.168.40.12"))}
+        plan = {"A": {"host": "192.168.40.11"}, "B": {"host": "192.168.40.12"}}
+        self.assertTrue(dispatcher.assert_serving_endpoints(plan))
+        for changed in (None, {"A": plan["A"]},
+                        plan | {"B": {"host": "192.168.40.13"}}, {"A": plan["B"], "B": plan["A"]}):
+            with self.assertRaisesRegex(transition_ingress.bridge.BridgeRejected, "serving_endpoint_unbound"):
+                dispatcher.assert_serving_endpoints(changed)
+
+
+    def test_isolated_transport_requires_the_pinned_guest_key_and_different_route(self):
+        bridge = transition_ingress.bridge
+        binding = bridge.Binding(*(letter * 64 for letter in "abcde"))
+
+        def endpoint(host, alias, fingerprint, user="root"):
+            return SshEndpoint(host, 22, user, alias, Path("/key"), "SHA256:" + "A" * 43,
+                               "SHA256:" + fingerprint * 43)
+
+        jump = endpoint("jump.example", "jump", "J", user="operator")
+        guests = {"A": endpoint("192.168.40.11", "guest-a", "A"),
+                  "B": endpoint("192.168.40.12", "guest-b", "B")}
+        dispatcher = GuestSshDispatcher(binding, jump=jump, guests=guests, known_hosts="/hosts",
+                                        launcher_sha256="f" * 64)
+        isolated = replace(guests["A"], host="192.168.41.11")
+        for unbound in (guests["A"], replace(isolated, host_fingerprint=guests["B"].host_fingerprint)):
+            with self.assertRaisesRegex(bridge.BridgeRejected, "isolated_replacement_unbound"):
+                dispatcher.isolated_replacement_preflight("A", endpoint=unbound, known_hosts="/isohosts")
+        other_jump = endpoint("private-jump.example", "private-jump", "K", user="operator")
+        self.assertTrue(callable(dispatcher.isolated_replacement_preflight(
+            "A", endpoint=guests["A"], known_hosts="/isohosts", jump=other_jump, jump_known_hosts="/isojump",
+        )))
+        with self.assertRaisesRegex(bridge.BridgeRejected, "isolated_replacement_unbound"):
+            dispatcher.isolated_replacement_preflight(
+                "A", endpoint=guests["A"], known_hosts="/isohosts", jump=jump, jump_known_hosts="/isojump",
+            )
+        verify = dispatcher.isolated_replacement_preflight("A", endpoint=isolated, known_hosts="/isohosts")
+        request = bridge.Request(binding, "A", bridge.GUEST_PREFLIGHT_REPLACEMENT, 2, "1"*64, {})
+        with patch.object(GuestSshDispatcher, "preflight_replacement_standby", autospec=True, return_value=True) as call:
+            self.assertTrue(verify(request, 90))
+            connection, sent, deadline = call.call_args.args
+            self.assertIsNot(connection, dispatcher)
+            self.assertEqual((connection.binding, connection.guests["A"], sent, deadline),
+                             (binding, isolated, request, 90))
+            with self.assertRaisesRegex(bridge.BridgeRejected, "isolated_replacement_unbound"):
+                verify(replace(request, node="B"), 90)
+
+
+class TransitionIngressTests(unittest.TestCase):
+    def test_observer_and_apps_precede_external_route_switch(self):
+        from ha_runtime.seven_capture import encoded
+
+        generation = ServingGeneration("B", 2, 2, 2)
+        observed_generation = replace(generation, revision=6)
+        pg_nodes = {"A": {"host": "192.168.40.11"}, "B": {"host": "192.168.40.12"}}
+        candidate = encoded({"generation": 2, "node": "A", "source_lease_close_required": True,
+                             "pg_nodes": pg_nodes})
+        steps = []
+        execution = MagicMock()
+        execution.publish_observer_runtime.side_effect = lambda **_: steps.append("runtime") or {"runtime": True}
+        execution.spec = {"plan_sha256": "a"*64, "attempt_id": "b"*64}
+        controller = {"plan": candidate, "plan_sha256": caddy_runtime._sha(candidate)}
+
+        @contextmanager
+        def open_controller(plan, serving, *, attempt, **options):
+            self.assertEqual(plan, controller)
+            self.assertEqual(serving, observed_generation)
+            self.assertEqual(attempt, execution.spec["attempt_id"])
+            steps.append("controller")
+            self.assertEqual(options["publish_handoff"](serving, "5"*64, 50), "6"*64)
+            steps.append("lease")
+            yield MagicMock(), MagicMock()
+
+        def guest(request, deadline, *, assert_windows_current):
+            steps.append("guest")
+            self.assertEqual(request.verb, transition_ingress.bridge.GUEST_ACTIVATE_GENERATION)
+            self.assertEqual(request.sequence, 7)
+            self.assertEqual(request.args, {"generation_handoff_sha256": "6"*64, "effects_plan_sha256": "3"*64})
+            self.assertTrue(callable(assert_windows_current))
+            raise RuntimeError("guest failed")
+
+        args = dict(
+            previous_runtime_sha256="c"*64, legacy_plan="d"*64, legacy_attempt="e"*64,
+            expected_mtls_sha256="f"*64, previous_callback=b"callback", previous_callback_sha256="1"*64,
+            replacement_vm={"installation_id": "a"*64, "node": "A"}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50,
+                    "stage_sha256": "1"*64, "manifest_sha256": "2"*64},
+            assert_legacy_closed=MagicMock(),
+            controller_setup={"deadline": 50, "starter": MagicMock(),
+                              "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
+            replacement_manifest_sha256="4"*64,
+            generation_handoff_pins=lambda _: {"pins": SimpleNamespace(plan_sha256="2"*64), "postgres": None,
+                "activation": SimpleNamespace(primary_runtime_receipt_sha256="a"*64)},
+            stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
+                                                                        "action": "ha-transition",
+                                                                        "authority_kind": "installed-runtime"}),
+                           "close_previous_service": lambda *_: steps.append("close-prior") or "4"*64,
+                           "preflight_path": "fixture", "scm_verifier_path": "fixture"},
+            isolated_replacement={"endpoint": "isolated", "known_hosts": "fixture"},
+            attach_replacement_network=MagicMock(side_effect=lambda *_a, **_kw: steps.append("attach") or True),
+            guests=SimpleNamespace(assert_serving_endpoints=MagicMock(return_value=True),
+                                   isolated_replacement_preflight=MagicMock(return_value=MagicMock(return_value=True)),
+                                   verify_prepared_transition_target=MagicMock(return_value=True),
+                                   preflight_replacement_standby=MagicMock(
+                                       side_effect=lambda *_: steps.append("serving-preflight") or True),
+                                   publish_generation_handoff=MagicMock(return_value="6"*64),
+                                   activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
+            target_request=SimpleNamespace(binding=MagicMock(**execution.spec, **{"fields.return_value":execution.spec}), sequence=1),
+        )
+        isolated_probe = args["guests"].isolated_replacement_preflight.return_value
+        args["attach_replacement_network"].preflight.return_value = True
+        stage = "7"*64
+        handoff = transition_ingress.bridge.Request(
+            args["target_request"].binding, "B", transition_ingress.bridge.GUEST_PUBLISH_GENERATION, 6, "5"*64,
+            {"generation_handoff_sha256": "6"*64, "effects_plan_sha256": "3"*64},
+        )
+        routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
+                  SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
+        check_stage = MagicMock(side_effect=lambda _: steps.append("fence-proof") or stage)
+        prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
+        def switch_routes(*_args, **kwargs):
+            self.assertEqual(kwargs["verify_guest"](observed_generation, "target"), "9"*64)
+            steps.append("ingress")
+            return None, None, {}
+
+        with patch.object(transition_ingress, "validate_generation_handoff_identity"), \
+                patch.object(transition_ingress, "generation_handoff_request", return_value=handoff), \
+                patch.object(transition_ingress, "validate_transition_approval") as validate_approval, \
+                patch.object(transition_ingress, "fixed_script"), \
+                patch.object(transition_ingress, "stage_approved_transition_service",
+                          side_effect=lambda *_a, **_kw: steps.append("stage") or prepared) as stage_service, \
+                patch.object(transition_ingress, "prepare_staged_transition_service",
+                             side_effect=lambda *_a, **_kw: steps.append("verify") or prepared), \
+                patch.object(transition_ingress.caddy, "_write"), \
+                patch.object(transition_ingress.caddy, "_sync_dir"), \
+                patch.object(transition_ingress, "_bind_rejoin_controller"), \
+                patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, 8, check_stage, MagicMock())), \
+                patch.object(transition_ingress, "_rejoin_replacement",
+                             side_effect=lambda *_: steps.append("rejoin") or observed_generation.revision), \
+                patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \
+                patch.object(transition_ingress, "observer_callback_config", return_value={}), \
+                patch.object(transition_ingress, "prepare_transition_observer_plan",
+                             side_effect=lambda **_: steps.append("observer") or controller), \
+                patch.object(transition_ingress, "switch_ingress", side_effect=switch_routes) as switch:
+            endpoint_check = args["guests"].assert_serving_endpoints
+            endpoint_check.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "guest_endpoints_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            endpoint_check.assert_called_once_with(pg_nodes)
+            args["guests"].verify_prepared_transition_target.assert_not_called()
+            stage_service.assert_not_called()
+            endpoint_check.return_value = True
+            args["guests"].verify_prepared_transition_target.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, [])
+            args["guests"].verify_prepared_transition_target.return_value = True
+            args["attach_replacement_network"].preflight.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            isolated_probe.assert_not_called()
+            stage_service.assert_not_called()
+            args["attach_replacement_network"].preflight.return_value = True
+            isolated_probe.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_scope_invalid"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, [])
+            stage_service.assert_not_called()
+            isolated_probe.return_value = True
+            validate_approval.side_effect = TransitionBlocked("approval invalid")
+            with self.assertRaisesRegex(TransitionBlocked, "approval invalid"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer"])
+            stage_service.assert_not_called()
+            steps.clear()
+            validate_approval.side_effect = None
+            stage_service.side_effect = TransitionBlocked("publication unconfirmed")
+            with self.assertRaisesRegex(TransitionBlocked, "publication unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer", "close-prior"])
+            switch.assert_not_called()
+            steps.clear()
+            stage_service.side_effect = lambda *_a, **_kw: steps.append("stage") or prepared
+            attach = args["attach_replacement_network"]
+            attached = attach.side_effect
+            attach.side_effect = None
+            attach.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "fence-proof"])
+            switch.assert_not_called()
+            self.assertIs(attach.call_args.kwargs["assert_fenced"], check_stage)
+            attach.side_effect = attached
+            steps.clear()
+            serving_preflight = args["guests"].preflight_replacement_standby
+            observe = serving_preflight.side_effect
+            serving_preflight.side_effect = None
+            serving_preflight.return_value = False
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify",
+                                     "fence-proof", "attach", "fence-proof"])
+            isolated_request = isolated_probe.call_args.args[0]
+            serving_request, deadline = serving_preflight.call_args.args
+            self.assertEqual(deadline, 50)
+            self.assertNotEqual(serving_request.nonce, isolated_request.nonce)
+            self.assertEqual(replace(serving_request, nonce=isolated_request.nonce), isolated_request)
+            serving_preflight.side_effect = observe
+            steps.clear()
+            with self.assertRaisesRegex(RuntimeError, "guest failed"):
+                transition_ingress.switch_with_observer(*routes, **args)
+            switch.assert_not_called()
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "fence-proof", "attach", "fence-proof", "serving-preflight", "rejoin", "controller", "lease", "guest"])
+            steps.clear()
+            args["guests"].activate_generation = lambda *_a, **_kw: steps.append("guest") or transition_ingress.bridge.Receipt("PASS", "5"*64)
+            outcome = transition_ingress.switch_with_observer(*routes, **args)
+            self.assertEqual(outcome.activation_sha256, "5"*64)
+            self.assertEqual(outcome.generation, observed_generation)
+            verified = args["guests"].verify_live_generation.call_args.args[0]
+            self.assertEqual(verified.verb, transition_ingress.bridge.GUEST_VERIFY_GENERATION)
+            self.assertEqual(verified.sequence, 9)
+            self.assertEqual(verified.args["activation_receipt_sha256"], outcome.activation_sha256)
+            self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "fence-proof", "attach", "fence-proof", "serving-preflight", "rejoin", "controller", "lease", "guest", "ingress"])
+
+    def test_preparing_generation_refreshes_closed_windows_proof_per_boundary(self):
+        from ha_control.native_guest_activation import ActivationPins
+
+        switcher = transition_ingress
+        bridge = switcher.bridge
+        binding = bridge.Binding(*(item*64 for item in "abcde"))
+        generation = ServingGeneration("B", 2, 2, 3)
+        stage = "f"*64
+        activation = ActivationPins(*(item*64 for item in "123456"))
+        pins = {"pins": generation, "postgres": generation, "activation": activation}
+        settled = {"rejoin_stage_sha256": stage, "source_fence_wal": "0000000000000008",
+                   "standby_rejoined": True, "authority_opened": False, "revision": generation.revision}
+        sync = MagicMock(return_value=settled)
+        legacy = MagicMock()
+        guests = MagicMock()
+        proof_digests = []
+
+        def prepare(request, serving, reported_stage, floor, deadline, *, assert_rejoin):
+            self.assertEqual(request.verb, bridge.GUEST_PREPARE_GENERATION)
+            self.assertEqual(request.args["source_fence_wal"], "0000000000000008")
+            for boundary in bridge.PREPARATION_BOUNDARIES:
+                proof_digests.append(assert_rejoin("1"*64, boundary, deadline))
+            return "7"*64
+
+        guests.prepare_generation_runtime.side_effect = prepare
+        result = switcher._prepare_target_generation(
+            guests, binding, 4, generation, pins, stage, 8, float("inf"),
+            check_sync=sync, assert_legacy_closed=legacy,
+        )
+        self.assertEqual(result["activation"].primary_runtime_receipt_sha256, "7"*64)
+        self.assertEqual(len(set(proof_digests)), 4)
+        self.assertEqual(sync.call_count, 4)
+        self.assertEqual(legacy.call_count, 4)
+        for changed in ({"authority_opened": True}, {"revision": generation.revision + 1}):
+            sync.return_value = settled | changed
+            with self.assertRaisesRegex(TransitionBlocked, "replacement_replication_unconfirmed"):
+                switcher._prepare_target_generation(
+                    guests, binding, 4, generation, pins, stage, 8, float("inf"),
+                    check_sync=sync, assert_legacy_closed=legacy,
+                )
+
+        guests.reset_mock()
+        guests.prepare_generation_runtime.side_effect = OSError("response lost")
+        sync.return_value = settled
+
+        def readback(request, deadline, *, assert_rejoin):
+            self.assertEqual(request.verb, bridge.GUEST_OBSERVE_PREPARATION)
+            self.assertEqual(request.sequence, 5)
+            for boundary in bridge.PREPARATION_OBSERVATION_BOUNDARIES:
+                self.assertTrue(bridge._hash(assert_rejoin("2"*64, boundary, deadline)))
+            return "9"*64
+
+        guests.observe_generation_preparation.side_effect = readback
+        recovered = switcher._prepare_target_generation(
+            guests, binding, 4, generation, pins, stage, 8, float("inf"),
+            check_sync=sync, assert_legacy_closed=legacy,
+        )
+        self.assertEqual(recovered["activation"].primary_runtime_receipt_sha256, "9"*64)
+        guests.prepare_generation_runtime.assert_called_once()
+        guests.observe_generation_preparation.assert_called_once()
+
+    def test_lost_activation_is_followed_only_by_fresh_readback(self):
+        bridge = transition_ingress.bridge
+        guests = MagicMock()
+        guests.activate_generation.side_effect = OSError("response lost")
+        recorded = bridge.Receipt("PASS", "c"*64)
+        guests.observe_generation_activation.return_value = recorded
+        binding = bridge.Binding(*(character*64 for character in "abcde"))
+        request = bridge.Request(binding, "B", bridge.GUEST_ACTIVATE_GENERATION, 7, "6"*64,
+                                 {"generation_handoff_sha256": "7"*64, "effects_plan_sha256": "8"*64})
+        live, guard = MagicMock(), MagicMock()
+        deadline = float("inf")
+        result = transition_ingress._activate_or_observe_generation(
+            guests, request, deadline, assert_guard=guard, guest_boundary=live,
+        )
+        self.assertIs(result, recorded)
+        guests.activate_generation.assert_called_once_with(request, deadline, assert_windows_current=live)
+        guests.observe_generation_activation.assert_called_once()
+        observed, limit = guests.observe_generation_activation.call_args.args
+        self.assertEqual(observed.verb, bridge.GUEST_OBSERVE_GENERATION)
+        self.assertEqual(observed.sequence, request.sequence + 1)
+        self.assertNotEqual(observed.nonce, request.nonce)
+        self.assertEqual(observed.args, request.args)
+        self.assertEqual(limit, deadline)
+        self.assertIs(guests.observe_generation_activation.call_args.kwargs["assert_guard"], guard)
+
+    def test_initial_roundtrip_supplies_both_verified_routes_before_dispatch(self):
+        main, car = MagicMock(), MagicMock()
+        caddy_inputs, relay_inputs = {"intent_sha256": "a"*64}, {"route_sha256": "b"*64}
+        options = dict(caddy_directory="/private/caddy", caddy_inputs=caddy_inputs,
+                       relay_path="/private/relay/Caddyfile", relay_inputs=relay_inputs,
+                       failover={}, prepare_return=MagicMock())
+        with patch.object(transition_ingress, "switch_roundtrip") as switch:
+            car.observe_initial.side_effect = TransitionBlocked("car_relay_initial_unconfirmed")
+            with self.assertRaisesRegex(TransitionBlocked, "car_relay_initial_unconfirmed"):
+                transition_ingress.switch_initial_roundtrip(main, car, **options)
+            switch.assert_not_called()
+            car.observe_initial.side_effect = None
+            outcome = transition_ingress.switch_initial_roundtrip(main, car, **options)
+            main.observe_initial_ingress.assert_called_with(options["caddy_directory"], **caddy_inputs)
+            car.observe_initial.assert_called_with(main.observe_initial_ingress.return_value, options["relay_path"],
+                                                 **relay_inputs)
+            switch.assert_called_once_with(main, car, main.observe_initial_ingress.return_value,
+                                           car.observe_initial.return_value,
+                                           failover=options["failover"], prepare_return=options["prepare_return"])
+            self.assertIs(outcome, switch.return_value)
+
+    def test_roundtrip_uses_verified_b_service_routes_and_closure_for_return(self):
+        switcher = transition_ingress
+        gen_b, gen_a = ServingGeneration("B", 2, 2, 3), ServingGeneration("A", 3, 3, 4)
+        windows = object()
+        starter = SimpleNamespace(windows=windows, start_sha256="e"*64)
+        next_starter = SimpleNamespace(windows=windows, start_sha256="e"*64, attempted=False)
+        prior = {"starter": starter, "root": "prior-root", "live_sha256": "c"*64, "old_vm_id": "prior-old-vm"}
+        observer_binding = {"runtime_sha256": "f"*64, "callback_config": b"callback",
+                            "callback_config_sha256": "1"*64}
+        first = switcher.CompletedTransition(
+            "B-route", "B-relay", {}, {"plan": b"B"}, {"PlanSha256": "d"*64}, replace(gen_b, revision=5), observer_binding,
+        )
+        second = switcher.CompletedTransition(
+            "A-route", "A-relay", {}, {}, {}, replace(gen_a, revision=7), observer_binding,
+        )
+        failover = {"execution": SimpleNamespace(spec={"attempt_id": "a"*64}), "controller_setup": prior,
+                    "generation": gen_b, "target": "B", "previous_runtime_sha256": "0"*64,
+                    "legacy_plan": "2"*64, "legacy_attempt": "3"*64}
+        returning = {"execution": SimpleNamespace(spec={"attempt_id": "b"*64}),
+                     "controller_setup": prior | {"starter": next_starter},
+                     "generation": gen_a, "target": "A", "previous_runtime_sha256": "0"*64,
+                     "legacy_plan": "2"*64, "legacy_attempt": "3"*64,
+                     "previous_callback": b"callback", "previous_callback_sha256": "1"*64,
+                     "stage_service": {"approval": MagicMock(), "preflight_path": "pf", "scm_verifier_path": "scm"}}
+        prepare = MagicMock(return_value=returning)
+        main = caddy_runtime.CaddyRuntime(ROOT, "personal-server", run=MagicMock())
+
+        def return_leg(**options):
+            return_main = options["main"]
+            self.assertIsNot(return_main, main)
+            self.assertEqual((return_main.root, return_main.project), (main.root, main.project))
+            self.assertIs(return_main.run, main.run)
+            self.assertFalse(return_main.attempted)
+            self.assertEqual((options["previous"], options["relay"]), (first.active, first.relay))
+            planned_return = replace(gen_a, revision=first.generation.revision + 1)
+            self.assertEqual(options["generation"], planned_return)
+            options["stage_service"]["close_previous_service"](second.controller, planned_return, 90)
+            return second
+
+        with patch.object(switcher, "switch_with_observer", side_effect=[first, second]) as run, \
+                patch.object(switcher, "close_previous_transition_service") as close:
+            def run_leg(**options):
+                if options["generation"] == gen_b:
+                    self.assertIs(options["main"], main)
+                    main.attempted = True
+                    return first
+                return return_leg(**options)
+
+            run.side_effect = run_leg
+            self.assertEqual(switcher.switch_roundtrip(main, None, "A-route", "A-relay",
+                                                      failover=failover, prepare_return=prepare), (first, second))
+        prepare.assert_called_once_with(first)
+        close.assert_called_once_with(starter, first.controller, first.parameters, first.generation, second.controller,
+                                      replace(gen_a, revision=first.generation.revision + 1),
+                                      previous_root="prior-root", previous_attempt="a"*64, previous_old_vm_id="prior-old-vm",
+                                      live_sha256="c"*64, deadline=90)
+
+        for unverified in (first, replace(second, observer_binding=None),
+                           replace(second, generation=replace(gen_a, revision=first.generation.revision)), None):
+            with self.subTest(unverified=unverified), \
+                    patch.object(switcher, "switch_with_observer", side_effect=[first, unverified]):
+                with self.assertRaisesRegex(TransitionBlocked, "transition_roundtrip_unbound"):
+                    fresh_main = caddy_runtime.CaddyRuntime(ROOT, "personal-server")
+                    switcher.switch_roundtrip(fresh_main, None, "A-route", "A-relay",
+                                              failover=failover, prepare_return=prepare)
+
+    def test_rejoin_resume_matches_exact_recorded_controller_and_parameters(self):
+        controller = {"plan_sha256": "c"*64}
+        parameters = {"PlanSha256": "c"*64, "ApprovalSha256": "d"*64}
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            execution = SimpleNamespace(directory=Path(directory).resolve(),
+                                        spec={"plan_sha256": "a"*64, "attempt_id": "b"*64})
+            bind = transition_ingress._bind_rejoin_controller
+            bind(execution, controller, parameters, resume=False)
+            bind(execution, controller, parameters, resume=True)
+            with self.assertRaisesRegex(TransitionBlocked, "controller_unbound"):
+                bind(execution, controller, parameters | {"ApprovalSha256": "f"*64}, resume=True)
+            with self.assertRaisesRegex(TransitionBlocked, "controller_unbound"):
+                bind(execution, {"plan_sha256": "e"*64}, parameters | {"PlanSha256": "e"*64}, resume=True)
+
+    def test_windows_rejoin_resume_never_dispatches_stage_rejoin(self):
+        starter = MagicMock()
+        stage = {"rejoin_stage_sha256": "f"*64, "source_fence_wal": "0000000000000008"}
+        starter.run_rejoin.return_value = stage
+        controller, parameters = {"plan": b"fixture"}, {"PlanSha256": "a"*64}
+        for resume, first_mode in ((False, "stage-rejoin"), (True, "observe-rejoin-stage")):
+            starter.reset_mock()
+            pin, floor, current, synchronized = transition_ingress._windows_rejoin(
+                starter, controller, parameters, live_sha256="b"*64, root="fixture", deadline=90, resume=resume,
+            )
+            self.assertEqual(pin, stage["rejoin_stage_sha256"])
+            self.assertEqual(floor, 8)
+            self.assertEqual(current(80), pin)
+            self.assertEqual(synchronized(70), stage)
+            expected = [first_mode, "observe-rejoin-stage", "check-rejoin"]
+            if not resume:
+                expected.insert(0, "initialize")
+            self.assertEqual([call.args[2] for call in starter.run_rejoin.call_args_list], expected)
+            self.assertEqual(len({call.args[3] for call in starter.run_rejoin.call_args_list}), len(expected))
+            if resume:
+                self.assertEqual(starter.mock_calls[0][0], "rejoin_stage_intent_present")
+                starter.restore_rejoin_args.assert_called_once()
+            else:
+                starter.restore_rejoin_args.assert_not_called()
+
+    def test_crash_source_record_binds_prior_runtime_and_all_write_proof_code(self):
+        from ha_runtime.seven_capture import SERVICES, encoded
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp).resolve()
+            owner = {"pid": 1, "start": 1, "process": "d"*64}
+            attempt = "a"*64
+            previous = "b"*64
+            active = directory / attempt / "ingress"
+            active.parent.mkdir(mode=0o700)
+            active.mkdir(mode=0o700)
+            prior = directory / previous
+            prior.mkdir(mode=0o700)
+            last = encoded({"schema_version": 1, "writer_baseline": {}, "attempt_id": previous,
+                            "plan_sha256": "e"*64})
+            (prior / "runtime.json").write_bytes(last)
+            (prior / "runtime.json").chmod(0o400)
+            execution = transition_execution.TransitionExecution.__new__(transition_execution.TransitionExecution)
+            execution.directory = active
+            execution.spec = {"directory": str(active), "attempt_id": attempt, "plan_sha256": "f"*64,
+                              "project": "personal-server", "coordinator": owner}
+            scope = {"attempt_id": attempt, "legacy_attempt": previous, "legacy_plan": "e"*64,
+                     "previous_runtime_sha256": sha256(last).hexdigest(), "source_vm_id": "fixture",
+                     "source_node": "A", "next_generation": 2, "next_timeline": 2}
+            pg = {"cluster": "fixture", "system_id": "1", "source": "A", "standby": "B", "generation": 1,
+                  "timeline": 1, "sync_peer": "ha_b", "replay_lsn": "0/20", "fsync": True, "full_page_writes": True}
+            runtime = ROOT / "infra/k8s/ha_runtime"
+            def pin(name):
+                return sha256((runtime / name).read_bytes()).hexdigest()
+            executables = {service: {"image_sha256": "c"*64, "db.py": pin("db.py"), "proof.py": pin("proof.py")}
+                           for service in SERVICES}
+            executables["ha-broker"] = {"image_sha256": "d"*64, "effects.py": pin("effects.py")}
+            proof = {"schema_version": 1, "scope": scope, "postgres": pg, "executables": executables}
+            path = active / "crash-source.json"
+            def case(record):
+                if path.exists():
+                    path.unlink()
+                raw = encoded(record)
+                path.write_bytes(raw)
+                path.chmod(0o400)
+                return {"cluster": "fixture", "system_id": "1", "timeline": 1, "required_replay_lsn": "0/20",
+                        "crash_source_sha256": sha256(raw).hexdigest()}
+            with patch.object(caddy_runtime, "_private_dir", side_effect=Path):
+                plan = case(proof)
+                self.assertEqual(execution.verify_crash_source_record(scope, plan, float("inf")), plan["crash_source_sha256"])
+                for invalid in (proof | {"postgres": pg | {"source": "B"}},
+                                proof | {"executables": executables | {"ha-broker": executables["ha-broker"] |
+                                                                        {"effects.py": "a"*64}}}):
+                    blocked = case(invalid)
+                    with self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+                        execution.verify_crash_source_record(scope, blocked, float("inf"))
+                plan = case(proof)
+                path.chmod(0o600)
+                with self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+                    execution.verify_crash_source_record(scope, plan, float("inf"))
+
+    def test_crash_mode_requires_plan_bound_readiness_verification(self):
+        choose = transition_ingress._transition_wal_key
+        plan = {"source_lease_close_required": False, "crash_source_sha256": "a"*64}
+        scope = {"source_vm_id": "exact-vm", "source_node": "A"}
+        deadline = float("inf")
+        verify = MagicMock(return_value="a"*64)
+        off = MagicMock(return_value=True)
+        self.assertEqual(choose(plan, verify, scope, deadline, assert_source_off=off), "replica_fence_wal")
+        off.assert_called_once_with("exact-vm", deadline)
+        with self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+            choose(plan, verify, scope, deadline, assert_source_off=lambda *_: False)
+        verify.assert_called_once_with(scope, deadline)
+        self.assertEqual(choose({"source_lease_close_required": True}, None, scope, deadline), "source_fence_wal")
+        for template, verifier in (
+            (plan, None), (plan, lambda *_: "b"*64),
+            ({"source_lease_close_required": False}, verify),
+            ({"source_lease_close_required": True, "crash_source_sha256": "a"*64}, None),
+        ):
+            with self.subTest(template=template), self.assertRaisesRegex(TransitionBlocked, "crash_source_unconfirmed"):
+                choose(template, verifier, scope, deadline, assert_source_off=off)
+
+    def test_replica_wal_type_survives_windows_readback_and_guest_preparation(self):
+        from ha_control.native_guest_activation import ActivationPins
+
+        bridge = transition_ingress.bridge
+        starter = MagicMock()
+        stage = "f"*64
+        generation = ServingGeneration("B", 2, 2, 3)
+        wal = "0000000000000031"
+        response = {"rejoin_stage_sha256": stage, "replica_fence_wal": wal}
+        starter.run_rejoin.return_value = response
+        with self.assertRaisesRegex(TransitionBlocked, "transition_source_fence_wal_unconfirmed"):
+            transition_ingress._windows_rejoin(
+                starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90, resume=False, wal_key="unknown",
+            )
+        starter.run_rejoin.assert_not_called()
+        pin, floor, current, sync = transition_ingress._windows_rejoin(
+            starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90, resume=False,
+            wal_key="replica_fence_wal",
+        )
+        self.assertEqual((pin, floor, current(80), sync(70)), (stage, 0x31, stage, response))
+        starter.run_rejoin.return_value = {"rejoin_stage_sha256": stage, "source_fence_wal": wal}
+        with self.assertRaisesRegex(TransitionBlocked, "transition_source_fence_wal_unconfirmed"):
+            sync(70)
+
+        guests = MagicMock()
+        binding = bridge.Binding(*(item*64 for item in "abcde"))
+        pins = {"pins": generation, "postgres": generation, "activation": ActivationPins(*(item*64 for item in "123456"))}
+        observed = response | {"standby_rejoined": True, "authority_opened": False, "revision": generation.revision}
+        def prepare(request, serving, stage_pin, floor, deadline, *, assert_rejoin):
+            self.assertEqual(bridge.rejoin_wal_evidence(request.args, "invalid"), {"replica_fence_wal": wal})
+            bridge._args(request.verb, request.node, dict(request.args))
+            with self.assertRaisesRegex(bridge.BridgeRejected, "bridge_args_rejected"):
+                bridge._args(request.verb, request.node, dict(request.args) | {"source_fence_wal": wal})
+            assert_rejoin("1"*64, bridge.PREPARATION_BOUNDARIES[0], deadline)
+            return "7"*64
+        guests.prepare_generation_runtime.side_effect = prepare
+        result = transition_ingress._prepare_target_generation(
+            guests, binding, 4, generation, pins, stage, floor, float("inf"),
+            check_sync=lambda _limit: observed, assert_legacy_closed=lambda: None, wal_key="replica_fence_wal",
+        )
+        self.assertEqual(result["activation"].primary_runtime_receipt_sha256, "7"*64)
+
+    def test_network_attachment_resume_requires_recorded_windows_stage(self):
+        starter = MagicMock()
+        starter.rejoin_stage_intent_present.return_value = False
+        with self.assertRaisesRegex(TransitionBlocked, "replacement_network_unconfirmed"):
+            transition_ingress._windows_rejoin(
+                starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90,
+                resume=True, stage_required=True,
+            )
+        starter.restore_rejoin_args.assert_not_called()
+        starter.run_rejoin.assert_not_called()
+
+    def test_windows_rejoin_rejects_changed_source_wal_on_either_read(self):
+        starter = MagicMock()
+        stage = {"rejoin_stage_sha256": "f"*64, "source_fence_wal": "0000000000000008"}
+        starter.run_rejoin.return_value = stage
+        _, _, current, synchronized = transition_ingress._windows_rejoin(
+            starter, {}, {}, live_sha256="b"*64, root="fixture", deadline=90, resume=False,
+        )
+        starter.run_rejoin.return_value = stage | {"source_fence_wal": "0000000000000007"}
+        for observe in (current, synchronized):
+            with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_unconfirmed"):
+                observe(80)
+
+    def test_rejoin_resume_before_stage_restores_initialize_without_replaying_it(self):
+        starter = MagicMock()
+        starter.rejoin_stage_intent_present.return_value = False
+        starter.run_rejoin.return_value = {"rejoin_stage_sha256": "f"*64, "source_fence_wal": "0000000000000008"}
+        controller, parameters = {"plan": b"fixture"}, {"PlanSha256": "a"*64}
+        transition_ingress._windows_rejoin(
+            starter, controller, parameters, live_sha256="b"*64, root="fixture", deadline=90, resume=True,
+        )
+        self.assertEqual([call[0] for call in starter.mock_calls],
+                         ["rejoin_stage_intent_present", "restore_rejoin_args", "run_rejoin"])
+        self.assertEqual(starter.restore_rejoin_args.call_args.args[2], "initialize")
+        self.assertEqual(starter.run_rejoin.call_args.args[2], "stage-rejoin")
+
+    def test_replacement_unknown_start_reconciles_without_replay(self):
+        bridge = transition_ingress.bridge
+        binding = bridge.Binding(*(character * 64 for character in "abcde"))
+        pin = "1" * 64
+        args = {"bootstrap_manifest_sha256": "2" * 64, "rejoin_stage_sha256": pin}
+        target = bridge.Request(binding, "B", bridge.GUEST_TRANSITION_TARGET, 1, "3" * 64, {})
+        start = bridge.Request(binding, "A", bridge.GUEST_START_REPLACEMENT, 3, "4" * 64, args)
+        observe = bridge.Request(binding, "A", bridge.GUEST_OBSERVE_REPLACEMENT, 4, "5" * 64, args)
+        guests = MagicMock()
+        guests.start_replacement_standby.side_effect = OSError("connection interrupted")
+        guests.confirm_replacement_rejoin.side_effect = [
+            bridge.BridgeRejected("rejoin not yet visible"), (bridge.Receipt("PASS", "6" * 64), 5),
+        ]
+        stage, sync = MagicMock(return_value=pin), MagicMock()
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            execution = SimpleNamespace(directory=Path(directory).resolve(), spec=binding.fields())
+            call = (execution, guests, ServingGeneration("B", 2, 2, 2), target, start, observe, "a"*64, stage, sync, 90)
+            with self.assertRaisesRegex(bridge.BridgeRejected, "rejoin not yet visible"):
+                transition_ingress._rejoin_replacement(*call)
+            self.assertTrue((execution.directory / "replacement-start-intent.json").is_file())
+            fresh_target = replace(target, sequence=5, nonce="7" * 64)
+            fresh_start = replace(start, sequence=7, nonce="8" * 64)
+            fresh_observe = replace(observe, sequence=8, nonce="9" * 64)
+            self.assertEqual(transition_ingress._rejoin_replacement(
+                execution, guests, call[2], fresh_target, fresh_start, fresh_observe, "a"*64, stage, sync, 90,
+            ), 5)
+        guests.publish_replacement_standby.assert_called_once()
+        published = guests.publish_replacement_standby.call_args.args[0]
+        self.assertEqual(published.sequence, start.sequence - 1)
+        self.assertEqual(published.args["installation_id"], "a"*64)
+        guests.start_replacement_standby.assert_called_once_with(start, 90, assert_rejoin_current=stage)
+        self.assertEqual(guests.confirm_replacement_rejoin.call_count, 2)
+        guests.confirm_replacement_rejoin.assert_called_with(
+            fresh_observe, 90, assert_rejoin_current=stage, check_synchronized=sync,
+        )
+
+    def test_callback_rotation_preserves_primary_and_legacy_pins_in_both_directions(self):
+        from ha_runtime.seven_capture import encoded
+
+        a, b, new_a, new_b = (f"{i:08x}-1111-1111-1111-111111111111" for i in range(1, 5))
+        base = {
+            "installation_id": "a"*64, "vm_a": a, "vm_b": b,
+            "a_disk_paths_sha256": "1"*64, "b_disk_paths_sha256": "2"*64,
+            "driver_path": "driver", "driver_sha256": "3"*64, "reactivation_plan_path": "reactivation",
+            "runtime_path": "legacy", "runtime_sha256": "4"*64, "source_loader_sha256": "5"*64,
+            "source_manifest_path": "manifest", "source_manifest_sha256": "6"*64, "source_root": "source",
+            "vm_observer_path": "observer", "vm_observer_sha256": "7"*64, "wsl_uid": 1000,
+        }
+        release_commit = "a"*40
+        source_base = f"/home/operator/.local/state/n100-ha/cutover-source-{release_commit}"
+        release = {
+            "vm_observer_path": rf"C:\ProgramData\N100HA-InitialCutover\{release_commit}\new-observer.ps1",
+            "vm_observer_sha256": "a"*64, "source_loader_sha256": "b"*64, "source_manifest_sha256": "c"*64,
+            "source_root": source_base + "/infra/k8s", "source_manifest_path": source_base + ".manifest.json",
+        }
+        runtime_b = {"runtime_path": "phase-b", "runtime_sha256": "8"*64}
+        runtime_a = {"runtime_path": "phase-a", "runtime_sha256": "9"*64}
+        next_a = {"node": "A", "vm_id": new_a, "installation_id": "b"*64, "disk_paths_sha256": "c"*64}
+        next_b = {"node": "B", "vm_id": new_b, "installation_id": "d"*64, "disk_paths_sha256": "e"*64}
+
+        def rotate(previous, runtime, primary, replacement, code=release):
+            return transition_execution.observer_callback_config(
+                previous, caddy_runtime._sha(previous), runtime, primary, replacement, code,
+            )
+
+        raw = encoded(base)
+        after_b = rotate(raw, runtime_b, "B", next_a)
+        expected_b = base | release | runtime_b | {
+            "vm_a": new_a, "installation_id": "b"*64, "vm_b_installation_id": "a"*64,
+            "a_disk_paths_sha256": "c"*64,
+        }
+        self.assertEqual(json.loads(after_b["callback_config"]), expected_b)
+        self.assertEqual(caddy_runtime._sha(after_b["callback_config"]), after_b["callback_config_sha256"])
+        after_a = rotate(after_b["callback_config"], runtime_a, "A", next_b)
+        self.assertEqual(json.loads(after_a["callback_config"]), expected_b | runtime_a | {
+            "vm_b": new_b, "vm_b_installation_id": "d"*64, "b_disk_paths_sha256": "e"*64,
+        })
+        for rejected in (next_a | {"vm_id": a}, next_a | {"vm_id": b}, next_a | {"node": "B"},
+                         next_a | {"installation_id": "a"*64}):
+            with self.subTest(rejected=rejected), self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
+                rotate(raw, runtime_b, "B", rejected)
+        with self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
+            transition_execution.observer_callback_config(raw, "0"*64, runtime_b, "B", next_a, release)
+
+        for invalid in ({}, release | {"driver_sha256": "d"*64},
+                        release | {"vm_observer_path": r"C:\Elsewhere\observer.ps1"},
+                        release | {"source_manifest_path": source_base + "/wrong.json"}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
+                rotate(raw, runtime_b, "B", next_a, invalid)
+
+    def test_observer_runtime_publishes_exact_prior_baseline_and_new_command_scope(self):
+        import os
+        import time
+
+        from ha_runtime.seven_capture import encoded
+
+        caddy = caddy_runtime
+        legacy_plan, prior_attempt, next_attempt = "a"*64, "b"*64, "c"*64
+        owner = {"pid": os.getpid(), "start": 100, "process": "d"*64}
+        with tempfile.TemporaryDirectory() as temp, patch.object(caddy, "_private_dir", side_effect=Path):
+            root = Path(temp).resolve()
+            prior = root/prior_attempt
+            next_dir = root/next_attempt
+            ingress = next_dir/"ingress"
+            for directory in (prior, next_dir, ingress):
+                directory.mkdir(mode=0o700)
+            raw = encoded({"schema_version": 1, "plan_sha256": legacy_plan, "attempt_id": prior_attempt,
+                           "writer_baseline": {"writers": ["original"]}, "coordinator": {"pid": 99}})
+            caddy._write(prior/"runtime.json", raw, 0o600)
+            spec = {"directory": str(ingress), "plan_sha256": "e"*64, "attempt_id": next_attempt,
+                    "project": "personal-server", "coordinator": owner}
+            execution = transition_execution.TransitionExecution(spec)
+            closed = MagicMock()
+            with patch.object(caddy.CaddyExecution, "identity", return_value=owner), patch.object(
+                caddy, "_lock_held_by", return_value=True,
+            ):
+                binding = execution.publish_observer_runtime(previous_sha256=caddy._sha(raw), legacy_plan=legacy_plan,
+                                                            legacy_attempt=prior_attempt, assert_legacy_closed=closed)
+            self.assertEqual(closed.call_count, 2)
+            active = next_dir/"runtime.json"
+            self.assertEqual(caddy._sha(active.read_bytes()), binding["runtime_sha256"])
+            data = json.loads(active.read_bytes())
+            self.assertEqual(data["ingress_execution"], spec)
+            self.assertNotIn("coordinator", data)
+            mount = MagicMock()
+            mount.read_bytes.return_value = b"boot"
+            with patch.object(wsl_writer_proof, "BOOT_ID", mount), patch.object(
+                wsl_writer_proof, "observe_closed", return_value="f"*64,
+            ) as observer, patch.object(wsl_writer_proof, "_recovery_settled", return_value="1"*64):
+                options = {"wsl_boot_sha256": caddy._sha(b"boot"), "challenge": "2"*64, "deadline": time.monotonic()+2}
+                wsl_writer_proof.prove_runtime(**binding, **options)
+                self.assertEqual(observer.call_args.args[0], {"writers": ["original"]})
+                forged = encoded(data | {"writer_baseline": {"writers": []}})
+                active.unlink()
+                caddy._write(active, forged, 0o400)
+                with self.assertRaisesRegex(TransitionBlocked, "ingress_observer_runtime_unbound"):
+                    wsl_writer_proof.prove_runtime(**(binding | {"runtime_sha256": caddy._sha(forged)}), **options)
+                observer.assert_called_once()
+
+    def test_writer_observer_permits_only_exact_locked_ingress_commands(self):
+        import fcntl
+        import os
+
+        from ha_runtime.seven_capture import encoded
+
+        caddy = caddy_runtime
+        pid = os.getpid()
+        coordinator = (1, 100, [b"python", b"coordinator"], b"/usr/bin/python3")
+        owner = {"pid": pid, "start": 100, "process": caddy._sha(b"\0".join([coordinator[3], *coordinator[2]]))}
+        with tempfile.TemporaryDirectory() as temp, patch.object(caddy, "_private_dir", side_effect=Path):
+            directory = Path(temp).resolve()
+            for name in ("main", "relay"):
+                (directory/name).mkdir(mode=0o700)
+            spec = {"directory": str(directory), "plan_sha256": "a"*64, "attempt_id": "b"*64,
+                    "project": "personal-server", "coordinator": owner}
+            raw, container, guest = b"candidate", "c"*64, "192.168.100.3"
+            outer = {"plan_sha256": spec["plan_sha256"], "attempt_id": spec["attempt_id"],
+                     "old_caddy_sha256": "d"*64, "caddy_candidate_sha256": "e"*64, "overlay_sha256": "f"*64,
+                     "old_relay_sha256": caddy._sha(container.encode()), "car_route_sha256": "1"*64,
+                     "target_sha256": caddy._sha(guest.encode())}
+            main_intent = {"original_container_sha256": outer["old_caddy_sha256"],
+                           "candidate_sha256": outer["caddy_candidate_sha256"],
+                           "overlay_sha256": outer["overlay_sha256"], "isolated_sha256": caddy._sha(raw)}
+            relay_intent = {"previous_container_sha256": outer["old_relay_sha256"],
+                            "route_pin": outer["car_route_sha256"], "guest": guest}
+            for filename, data in (("ingress-switch-intent.json", outer), ("main/caddy-apply-intent.json", main_intent),
+                                   ("relay/car-relay-replacement-intent.json", relay_intent)):
+                caddy._write(directory/filename, encoded(data), 0o600)
+            main = [part.encode() for part in caddy._execution_command(spec["project"])]
+            stop = [part.encode() for part in (*caddy.DOCKER, "stop", "--time", "5", container)]
+            foreign_stop = [*stop[:-1], b"9"*64]
+            processes = {pid: coordinator, 101: (pid, 101, main, main[0]), 102: (pid, 102, stop, stop[0]),
+                         103: (pid, 102, foreign_stop, stop[0])}
+
+            def locked(path, candidate):
+                if candidate != pid:
+                    return False
+                try:
+                    with path.open("rb") as stream:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                return False
+
+            execution = transition_execution.TransitionExecution(spec)
+            first, relay = MagicMock(project=spec["project"], execution=None), MagicMock(execution=None)
+            allowed = transition_execution.authorized
+            with patch.object(caddy, "_process", side_effect=processes.__getitem__), patch.object(
+                caddy, "_lock_held_by", side_effect=locked,
+            ), execution.guard(first, relay):
+                self.assertFalse(allowed(Path("/proc/102"), stop, spec))
+                with execution.stop_relay(directory/"relay", container):
+                    self.assertTrue(allowed(Path("/proc/102"), stop, spec))
+                    self.assertFalse(allowed(Path("/proc/103"), foreign_stop, spec))
+                self.assertFalse(allowed(Path("/proc/102"), stop, spec))
+                with self.assertRaises(FileExistsError):
+                    with execution.stop_relay(directory/"relay", container):
+                        self.fail("unsettled relay stop was replayed")
+                with execution.stop_relay(directory/"relay", container, settled=True):
+                    self.assertTrue(allowed(Path("/proc/102"), stop, spec))
+                with execution.open(directory/"main", spec["project"], raw):
+                    self.assertTrue(allowed(Path("/proc/101"), main, spec))
+                    self.assertFalse(allowed(Path("/proc/101"), main, spec | {"attempt_id": "2"*64}))
+                override = os.fsencode(directory/"main"/"caddy-ha-compose.json")
+                read = [main[0], *wsl_writer_proof.CADDY_COMPOSE_GLOBALS, b"personal-server",
+                        b"--project-directory", wsl_writer_proof.CADDY_ROOT,
+                        b"--env-file", wsl_writer_proof.CADDY_ROOT + b"/.env"]
+                for path in (*wsl_writer_proof.CADDY_BASE_FILES, override):
+                    read.extend([b"-f", path])
+                read.extend([b"config", b"--format", b"json"])
+                self.assertIsNone(wsl_writer_proof._recovery_command_reason(read, main[0], spec))
+                self.assertEqual(wsl_writer_proof._recovery_command_reason(read, main[0]),
+                                 "legacy_recovery_linux_compose_command")
+                self.assertEqual(wsl_writer_proof._recovery_command_reason(read[:-3] + [b"up"], main[0], spec),
+                                 "legacy_recovery_linux_compose_command")
+
+    def test_relay_first_then_caddy_and_readback_after_unknown_response(self):
+        old_ip, new_ip = "192.168.100.2", "192.168.100.3"
+        old_main = {"container_sha256": "a"*64}
+        new_main = {"container_sha256": "b"*64, "candidate_sha256": "c"*64, "live_sha256": "d"*64}
+        car_receipt = {"container_sha256": "e"*64, "candidate_sha256": "f"*64, "public_proof_sha256": []}
+        main, car, public, guard = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        guest = MagicMock(return_value="1"*64)
+        generation = ServingGeneration("B", 2, 2, 3)
+        order = []
+        with tempfile.TemporaryDirectory() as temp, patch.object(transition_ingress.caddy, "_private_dir", side_effect=Path):
+            root = Path(temp).resolve()
+            old_prepared = caddy_runtime.PreparedCaddy({}, root/"previous.json", root/"previous.caddy", "", "", "", "")
+            active = caddy_runtime.ActiveCaddy(old_prepared, old_main, b"fixed source", old_ip, "2"*64)
+            relay = car_callback_runtime.Relay("2"*64, "sha256:"+"3"*64, "4"*64, "192.168.100.4",
+                                               root/"relay.caddy", old_ip, "5"*64, "6"*64, "7"*64)
+            (root/"main").mkdir()
+            prepared = caddy_runtime.PreparedCaddy({}, root/"main"/"caddy-ha-compose.json",
+                                                   root/"main"/"Caddyfile", "", "c"*64, "", "")
+            main.prepare.return_value = prepared
+            car.replace.side_effect = lambda *args, **kwargs: order.append("relay") or car_receipt
+
+            def uncertain_main(*args):
+                self.assertTrue((root/transition_ingress.INTENT).is_file())
+                order.append("main")
+                (root/"main"/"caddy-apply-intent.json").touch()
+                raise TransitionBlocked("caddy_reconciliation_required")
+
+            route = "8"*64
+            main.apply.side_effect = uncertain_main
+            with self.assertRaisesRegex(TransitionBlocked, "caddy_reconciliation_required"):
+                transition_ingress.switch_ingress(main, car, active, relay, generation, new_ip, route, root,
+                                                   expected_mtls_sha256={}, assert_guard=guard, verify_guest=guest,
+                                                   plan_sha256="a"*64, attempt_id="b"*64,
+                                                   verify_public=public)
+            self.assertEqual(order, ["relay", "main"])
+            public.assert_not_called()
+            main.observe_applied.return_value, car.observe.return_value = new_main, car_receipt
+            with self.assertRaisesRegex(TransitionBlocked, "docker_not_settled"):
+                transition_ingress.resume_ingress(
+                    main, car, active, relay, prepared, generation, new_ip, route, root,
+                    assert_guard=guard, assert_settled=MagicMock(side_effect=TransitionBlocked("docker_not_settled")),
+                    verify_guest=guest, verify_public=public, plan_sha256="a"*64, attempt_id="b"*64,
+                )
+            main.observe_applied.assert_not_called()
+            current, new_relay, receipt = transition_ingress.resume_ingress(
+                main, car, active, relay, prepared, generation, new_ip, route, root,
+                assert_guard=guard, assert_settled=MagicMock(), verify_guest=guest, verify_public=public,
+                plan_sha256="a"*64, attempt_id="b"*64,
+            )
+            main.apply.assert_called_once()
+            car.replace.assert_called_once()
+            public.assert_called_once_with(3)
+            self.assertEqual((current.primary_ip, new_relay.guest), (new_ip, new_ip))
+            self.assertEqual(current.relay_container_sha256, new_relay.container_sha256)
+            self.assertTrue((root/transition_ingress.RECEIPT).is_file())
+            self.assertEqual(json.loads((root/transition_ingress.RECEIPT).read_bytes()), receipt)
+            main.adopt_unapplied.assert_not_called()
+            car.resume.assert_not_called()
 
 
 class CarCallbackOriginTests(unittest.TestCase):
+    def test_retarget_requires_exact_existing_route_and_fresh_marker(self):
+        render, retarget = car_callback_ingress.render, car_callback_ingress.retarget
+        a, b, old_pin, new_pin = "192.168.100.2", "192.168.100.3", "a" * 64, "b" * 64
+        active = render(a, route_pin=old_pin)
+        candidate = retarget(active, a, old_pin, b, new_pin)
+        self.assertEqual(candidate, render(b, route_pin=new_pin))
+        self.assertNotIn(old_pin.encode(), candidate)
+        for current, host, marker in ((active + b"\n", b, new_pin), (active, a, new_pin), (active, b, old_pin)):
+            with self.assertRaises(TransitionBlocked):
+                retarget(current, a, old_pin, host, marker)
+
+    def test_independent_relay_reconciles_unknown_run_without_second_mutation(self):
+        relay = car_callback_runtime
+        caddy = relay.caddy
+        a, b = '192.168.100.2', '192.168.100.3'
+        old_pin, new_pin = 'a' * 64, 'b' * 64
+        old_id, new_id, network = '1' * 64, '2' * 64, '3' * 64
+        image, address = 'sha256:' + '4' * 64, '172.20.0.4'
+        calls = []
+        volume = {'Mountpoint': '/fixture/mtls'}
+        fingerprints = dict.fromkeys(caddy.TLS_FILES, 'f' * 64)
+        tls_output = ''.join(f'{pin}  {caddy.MOUNT}/{name}\n' for name, pin in fingerprints.items()).encode()
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory).resolve()
+            old_path = root / 'old'
+            old_path.write_bytes(car_callback_ingress.render(a, route_pin=old_pin))
+            previous = relay.Relay(caddy._sha(old_id.encode()), image, network, address, old_path, a, old_pin,
+                                  caddy._pin(volume), caddy._pin(fingerprints))
+            current = {'id': old_id, 'path': old_path, 'running': True, 'labels': {}}
+
+            def inspect():
+                return {
+                    'Id': current['id'], 'Name': '/' + relay.NAME, 'Image': image,
+                    'State': {'Running': current['running'], 'Status': 'running' if current['running'] else 'exited',
+                              'StartedAt': 'fixture-start'},
+                    'Config': {'User': '10001:10001', 'Entrypoint': ['/usr/bin/caddy'], 'Labels': current['labels'],
+                               'Cmd': ['run', '--config', caddy.CONFIG, '--adapter', 'caddyfile']},
+                    'HostConfig': {'ReadonlyRootfs': True, 'Privileged': False, 'LogConfig': {'Type': 'none'},
+                                   'PortBindings': {}, 'CapDrop': ['ALL'], 'CapAdd': ['CAP_NET_BIND_SERVICE'],
+                                   'SecurityOpt': ['no-new-privileges'], 'RestartPolicy': {'Name': 'unless-stopped'}},
+                    'Mounts': [
+                        {'Destination': caddy.CONFIG, 'Type': 'bind', 'Source': str(current['path']), 'RW': False},
+                        {'Destination': caddy.MOUNT, 'Type': 'volume', 'Name': caddy.MTLS_VOLUME, 'RW': False,
+                         'Source': volume['Mountpoint']},
+                    ],
+                    'NetworkSettings': {'Networks': {'test': {'NetworkID': network, 'IPAddress': address}}},
+                }
+
+            def docker(*args, **options):
+                calls.append(args)
+                if args[0] == 'ps':
+                    return (current['id'] or '').encode()
+                if args[0] == 'inspect':
+                    self.assertEqual(args[1], current['id'])
+                    return json.dumps([inspect()]).encode()
+                if args[:2] == ('network', 'inspect'):
+                    return json.dumps([{'Id': network, 'Driver': 'bridge', 'Scope': 'local',
+                                        'Containers': {current['id']: {}} if current['running'] else {}}]).encode()
+                if args[:2] == ('volume', 'inspect'):
+                    return json.dumps([volume]).encode()
+                if args[0] == 'exec':
+                    return current['path'].read_bytes() if args[2] == '/bin/cat' else tls_output
+                if args[:2] == ('run', '--rm'):
+                    return tls_output
+                if args[0] == 'stop':
+                    self.assertTrue((root / relay.INTENT).exists())
+                    self.assertEqual(args[-1], old_id)
+                    current['running'] = False
+                    raise TransitionBlocked('fixture_ambiguous_stop')
+                if args[0] == 'rm':
+                    self.assertEqual(args, ('rm', old_id))
+                    self.assertFalse(current['running'])
+                    current['id'] = None
+                if args[:2] == ('run', '--detach'):
+                    labels = dict(args[index + 1].split('=', 1) for index, value in enumerate(args) if value == '--label')
+                    self.assertEqual(labels, relay.LABELS | {'n100-ha.car-relay-route': new_pin})
+                    current.update(id=new_id, path=root / 'Caddyfile', running=True, labels=labels)
+                    raise TransitionBlocked('fixture_ambiguous_run')
+                return b''
+
+            instance = relay.CallbackRuntime(docker)
+            active = caddy.ActiveCaddy(SimpleNamespace(baseline={'image': image},
+                                                       mtls_volume_sha256=caddy._pin(volume),
+                                                       mtls_files_sha256=caddy._pin(fingerprints)),
+                                       {}, b'', a, previous.container_sha256)
+            pins = dict(route_pin=old_pin, route_sha256=caddy._sha(old_path.read_bytes()),
+                        started_sha256=caddy._sha(b'fixture-start'), network=network, address=address)
+            self.assertEqual(instance.observe_initial(active, old_path, **pins), previous)
+            for rule in ('route_sha256', 'started_sha256'):
+                with self.assertRaisesRegex(TransitionBlocked, 'car_relay_initial_unconfirmed'):
+                    instance.observe_initial(active, old_path, **(pins | {rule: '0'*64}))
+            for moved in ({'network': '9'*64}, {'address': '172.20.0.5'}):
+                with self.assertRaisesRegex(TransitionBlocked, 'car_relay_network_unconfirmed'):
+                    instance.observe_initial(active, old_path, **(pins | moved))
+            self.assertTrue(all(args[0] in {'ps', 'inspect', 'network', 'volume', 'exec'} for args in calls))
+            proof = MagicMock(side_effect=['5' * 64, '6' * 64, '7' * 64])
+            with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
+                instance.replace(previous, b, new_pin, root, assert_guard=MagicMock(), verify_origin=proof)
+            self.assertEqual(instance.status(previous, root, assert_guard=MagicMock()), 'old_stopped')
+            with self.assertRaisesRegex(TransitionBlocked, 'fixture_daemon_unsettled'):
+                instance.resume(previous, root, assert_guard=MagicMock(),
+                                assert_settled=MagicMock(side_effect=TransitionBlocked('fixture_daemon_unsettled')))
+            self.assertFalse(any(args[0] == 'rm' for args in calls))
+            with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
+                instance.resume(previous, root, assert_guard=MagicMock(), assert_settled=MagicMock(),
+                                verify_origin=proof)
+            self.assertEqual(instance.status(previous, root, assert_guard=MagicMock()), 'new_running')
+            with patch.object(relay.time, 'sleep') as pause:
+                receipt = instance.observe(previous, root, assert_guard=MagicMock(), verify_origin=proof)
+            self.assertEqual([call.args for call in pause.call_args_list], [(10,), (10,)])
+            self.assertEqual(receipt['container_sha256'], caddy._sha(new_id.encode()))
+            self.assertEqual(proof.call_count, 3)
+            with self.assertRaisesRegex(TransitionBlocked, 'car_relay_reconciliation_required'):
+                instance.replace(previous, b, new_pin, root, assert_guard=MagicMock(), verify_origin=proof)
+            self.assertEqual([args[0] for args in calls if args[0] in {'stop', 'rm'}], ['stop', 'rm'])
+            self.assertEqual(sum(args[:2] == ('run', '--detach') for args in calls), 1)
+
     def test_public_origin_requires_current_marker_and_healthy_upstream(self):
         pin = "a" * 64
         marked = car_callback_ingress.render("192.168.100.2", route_pin=pin)
@@ -64,12 +1710,12 @@ class Backend:
 
     def close(self, state): self.actions.append("close"); self.ready = False
     def fenced(self, state): return self.stopped
-    def fence(self, state):
+    def fence(self, state, *, record_source_wal=None):
         self.actions.append("fence")
         if self.failure != "fence": self.stopped = True
         if self.failure == "fence_unknown": raise OSError("unknown")
     def promoted(self, state): return self.primary
-    def promote(self, state):
+    def promote(self, state, *, record_replica_wal=None):
         self.actions.append("promote")
         self.primary = True
         if self.failure == "promote_unknown": raise OSError("unknown")
@@ -87,6 +1733,9 @@ class Backend:
         if self.failure == "open_unknown": raise OSError("unknown")
     def assert_ready(self, state):
         if not self.ready: raise TransitionBlocked("not_ready")
+    def assert_rejoin_pending(self, state):
+        if not self.primary or not self.stopped or self.ready:
+            raise TransitionBlocked("rejoin_pending_unconfirmed")
 
 
 class ControlTests(unittest.TestCase):
@@ -102,6 +1751,42 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.control.advance()["phase"], "ready")
         self.assertEqual(self.backend.actions, ["close", "fence", "promote", "rejoin", "validate", "open"])
 
+    def test_stage_rejoin_returns_durable_closed_primary_and_reads_on_repeat(self):
+        staged = self.control.advance(stop_at_rejoin=True)
+        self.assertEqual(staged, Journal(self.path).read())
+        self.assertEqual(staged["phase"], "rejoining")
+        self.assertFalse(self.backend.ready)
+        self.assertEqual(self.backend.actions, ["close", "fence", "promote"])
+        self.assertEqual(self.control.advance(stop_at_rejoin=True), staged)
+        self.assertEqual(self.backend.actions, ["close", "fence", "promote"])
+        self.assertEqual(self.control.advance()["phase"], "ready")
+        with self.assertRaisesRegex(TransitionBlocked, "rejoin_staging_phase_invalid"):
+            self.control.advance(stop_at_rejoin=True)
+
+    def test_ready_lease_owner_inherits_both_guards_without_a_gap(self):
+        active = []
+
+        @contextmanager
+        def guard():
+            active.append(True)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        def serve(state):
+            self.assertEqual(state, Journal(self.path).read())
+            self.assertEqual(state["phase"], "ready")
+            self.assertEqual(active, [True])
+            with self.assertRaisesRegex(TransitionBlocked, "controller_lock_unavailable"):
+                with exclusive(self.path.with_suffix(".lock")):
+                    self.fail("second controller acquired lock during lease handoff")
+            return "served"
+
+        with patch.object(self.backend, "guard", guard):
+            self.assertEqual(self.control.advance(on_ready=serve), "served")
+        self.assertEqual(active, [])
+
     def test_unconfirmed_fence_never_promotes(self):
         self.backend.failure = "fence"
         with self.assertRaisesRegex(TransitionBlocked, "positive_fence_required"):
@@ -116,11 +1801,49 @@ class ControlTests(unittest.TestCase):
         Controller(self.path, self.backend).advance()
         self.assertEqual(self.backend.actions.count("fence"), 1)
 
+    def test_wal_is_saved_before_stop_and_survives_a_lost_stop_response(self):
+        stop = self.backend.fence
+        self.backend.failure = "fence_unknown"
+
+        def stop_with_record(state, *, record_source_wal):
+            record_source_wal(0x30)
+            record_source_wal(0x20)
+            self.assertEqual(Journal(self.path).read()["source_fence_wal"], 0x30)
+            stop(state)
+
+        with patch.object(self.backend, "fence", side_effect=stop_with_record):
+            with self.assertRaises(TransitionBlocked):
+                self.control.advance()
+        self.backend.failure = None
+        state = Controller(self.path, self.backend).advance()
+        self.assertEqual(state["source_fence_wal"], 0x30)
+        self.assertEqual(self.backend.actions.count("fence"), 1)
+
     def test_unknown_promotion_is_reobserved_without_second_promotion(self):
         self.backend.failure = "promote_unknown"
         with self.assertRaises(TransitionBlocked): self.control.advance()
         self.backend.failure = None
         Controller(self.path, self.backend).advance()
+        self.assertEqual(self.backend.actions.count("promote"), 1)
+
+    def test_replica_wal_is_saved_before_promotion_and_survives_a_lost_response(self):
+        promote = self.backend.promote
+        self.backend.failure = "promote_unknown"
+
+        def promote_with_record(state, *, record_replica_wal):
+            record_replica_wal(0x31)
+            record_replica_wal(0x30)
+            durable = Journal(self.path).read()
+            self.assertEqual(durable["replica_fence_wal"], 0x31)
+            self.assertNotIn("source_fence_wal", durable)
+            promote(state)
+
+        with patch.object(self.backend, "promote", side_effect=promote_with_record):
+            with self.assertRaises(TransitionBlocked):
+                self.control.advance()
+        self.backend.failure = None
+        state = Controller(self.path, self.backend).advance()
+        self.assertEqual(state["replica_fence_wal"], 0x31)
         self.assertEqual(self.backend.actions.count("promote"), 1)
 
     def test_rejoin_or_proof_failure_keeps_writes_closed(self):
@@ -140,10 +1863,29 @@ class ControlTests(unittest.TestCase):
     def test_unknown_open_closes_again_and_reproves_without_new_generation(self):
         self.backend.failure = "open_unknown"
         with self.assertRaises(TransitionBlocked): self.control.advance()
+        self.assertFalse(self.backend.ready)
+        self.assertEqual(self.backend.actions[-2:], ["open", "close"])
         self.backend.failure = None
         state = Controller(self.path, self.backend).advance()
         self.assertEqual(state["generation"], 3)
         self.assertEqual(self.backend.actions[-3:], ["close", "validate", "open"])
+
+    def test_ready_record_failure_revokes_without_starting_lease_service(self):
+        save = self.control.journal.save
+
+        def fail_ready(state):
+            if state["phase"] == "ready":
+                raise TransitionBlocked("controller_journal_not_durable")
+            save(state)
+
+        serve = MagicMock()
+        with patch.object(self.control.journal, "save", fail_ready):
+            with self.assertRaisesRegex(TransitionBlocked, "controller_journal_not_durable"):
+                self.control.advance(on_ready=serve)
+        serve.assert_not_called()
+        self.assertEqual(Journal(self.path).read()["phase"], "validating")
+        self.assertFalse(self.backend.ready)
+        self.assertEqual(self.backend.actions[-2:], ["open", "close"])
 
     def test_three_attempt_bound_survives_controller_restart(self):
         self.backend.failure = "fence"
@@ -189,3 +1931,114 @@ class ControlTests(unittest.TestCase):
             self.assertIn(text, source)
         self.assertNotIn("Restart-Computer", source)
         self.assertNotIn("wsl --shutdown", source)
+
+class WindowsUnpublishedRecoveryTests(unittest.TestCase):
+    """Actual pure PowerShell predicates; no Windows/guest mutation."""
+    def powershell(self, body):
+        runtime = shutil.which('pwsh')
+        self.assertIsNotNone(runtime)
+        script = r'''
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$hashPattern='\A[a-f0-9]{64}\z'
+$e=$null;$t=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:START_SOURCE,[ref]$t,[ref]$e)
+if($e.Count){throw 'parser'}
+foreach($f in $ast.EndBlock.Statements){if($f -is [Management.Automation.Language.FunctionDefinitionAst] -and $f.Name -in @('Get-InitialPredecessorNumbers','Assert-UnpublishedEnvelope','Assert-UnpublishedPrior','Assert-UnpublishedPriorApproval','Assert-UnpublishedPreSeal','Assert-PostbootEnvelope')){. ([scriptblock]::Create($f.Extent.Text))}}
+function Rejected([scriptblock]$Check){try{&$Check;throw 'accepted_negative'}catch{if($_.Exception.Message -eq 'accepted_negative'){throw}}}
+''' + body
+        result = subprocess.run([runtime, '-NoProfile', '-NonInteractive', '-Command', script],
+            env=os.environ | {'START_SOURCE': str(ROOT / 'infra/k8s/ha_control/windows-ha-start-initial-service.ps1')},
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_unpublished_and_typed_postboot_envelopes(self):
+        self.powershell(r'''
+$r=[pscustomobject]@{schema_version=1;attempt_id=('a'*64);predecessor_terminal_sha256=('b'*64);predecessor_args_sha256=('c'*64);predecessor_plan_sha256=('d'*64);predecessor_seal_sha256=('e'*64);closure_mode='windows-offline-v1'}
+Assert-UnpublishedEnvelope $r
+Rejected {Assert-UnpublishedEnvelope ([pscustomobject]@{schema_version=1})}
+$r|Add-Member bogus 'x';Rejected {Assert-UnpublishedEnvelope $r};$r.PSObject.Properties.Remove('bogus')
+$r.closure_mode=@('windows-offline-v1');Rejected {Assert-UnpublishedEnvelope $r};$r.closure_mode='windows-offline-v1'
+$r.predecessor_plan_sha256='';Rejected {Assert-UnpublishedEnvelope $r};$r.predecessor_plan_sha256='d'*64
+$identity=[pscustomobject]@{service_name='owned';service_sid='S-1-5-80-1-2-3-4-5'}
+$plan=[pscustomobject]@{windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('f'*64)};windows_recovery_observers=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64)};windows_enforced=$identity}
+$old=[pscustomobject]@{initial_service_start=[pscustomobject]@{binding_path='C:\old\binding.json';service_image_path_sha256=('c'*64)}}
+$pre=[pscustomobject]@{schema_version=1;windows_boot_sha256=('f'*64);predecessor_terminal_sha256=$r.predecessor_terminal_sha256;predecessor_args_sha256=$r.predecessor_args_sha256;predecessor_plan_sha256=$r.predecessor_plan_sha256;binding_path=$old.initial_service_start.binding_path;binding_absent=$true;guest=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64);app_start_intent_absent=$true};service=[pscustomobject]@{service_name='owned';service_sid=$identity.service_sid;state='Stopped';start_mode='Disabled';process_id=0;service_image_path_sha256=('c'*64)}}
+Assert-UnpublishedPreSeal $plan $old $pre $r
+$pre.guest.hold_sha256=@('b'*64);Rejected {Assert-UnpublishedPreSeal $plan $old $pre $r};$pre.guest.hold_sha256='b'*64
+$pre.service.service_image_path_sha256=@('c'*64);Rejected {Assert-UnpublishedPreSeal $plan $old $pre $r}
+$p=[pscustomobject]@{schema_version=1;attempt_id=('a'*64);predecessor_terminal_sha256=('b'*64);predecessor_binding_sha256=('c'*64);predecessor_args_sha256=('d'*64);predecessor_seal_sha256=('e'*64);previous_windows_boot_sha256=('f'*64);closure_mode='windows-offline-v1'}
+Assert-PostbootEnvelope $p
+$p|Add-Member predecessor_kind 'published-unpublished-recovery-v1';Assert-PostbootEnvelope $p
+$p.predecessor_kind='unknown';Rejected {Assert-PostbootEnvelope $p}
+''')
+
+    def test_only_exact_failed_first_publication_and_same_boot_are_adoptable(self):
+        self.powershell(r'''
+$handoff=[pscustomobject]@{attempt_id=('1'*64);legacy_plan_sha256=('2'*64);restore_receipt_sha256=('3'*64);activation_intent_sha256=('4'*64)}
+$recovery=[pscustomobject]@{attempt_id=('5'*64);predecessor_service_sha256=('6'*64);predecessor_terminal_sha256=('7'*64)}
+$old=[pscustomobject]@{source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115';initial_recovery_rearm=[pscustomobject]@{schema_version=1;attempt_id=('8'*64);closure_mode='windows-offline-v1';predecessor_terminal_sha256=('a'*64);predecessor_binding_sha256=('b'*64);predecessor_args_sha256=('c'*64)};initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('9'*64)};windows_recovery_observers=[pscustomobject]@{guest_boot_sha256=('a'*64);hold_sha256=('b'*64)}}
+$plan=[pscustomobject]@{initial_cutover_handoff=$handoff;initial_cutover_recovery=$recovery;windows_initial_observer=$old.windows_initial_observer;windows_recovery_observers=$old.windows_recovery_observers}
+$old|Add-Member installation_id ('f'*64);$old|Add-Member windows_enforced ([pscustomobject]@{service_name='owned';service_sid='S-1-5-80-1-2-3-4-5';service_image_sha256=('e'*64)});$plan|Add-Member installation_id $old.installation_id;$plan|Add-Member windows_enforced $old.windows_enforced
+$r=[pscustomobject]@{attempt_id=('c'*64);predecessor_plan_sha256=('d'*64)}
+$terminal=[pscustomobject]@{schema_version=1;generation=1;kind='initial-wsl-cutover-rearm';revision=6;sequence=1;phase='local_revoke_observed';failure_code='controller_journal_not_durable';controller_plan_sha256=('d'*64);rearm=$old.initial_recovery_rearm;recovery=$recovery;attempt_id=$handoff.attempt_id;legacy_plan_sha256=$handoff.legacy_plan_sha256;restore_receipt_sha256=$handoff.restore_receipt_sha256;activation_intent_sha256=$handoff.activation_intent_sha256}
+Assert-UnpublishedPrior $plan $old $terminal $r
+foreach($pair in @(@('revision',8),@('sequence',2),@('phase','lease_lost'),@('failure_code','other'))){$key=$pair[0];$prior=$terminal.$key;$terminal.$key=$pair[1];Rejected {Assert-UnpublishedPrior $plan $old $terminal $r};$terminal.$key=$prior}
+$old.source_commit='0'*40;Rejected {Assert-UnpublishedPrior $plan $old $terminal $r};$old.source_commit='7cdb958bd2db88d60be40336d5d7a172a94f4115'
+$plan.windows_initial_observer=[pscustomobject]@{windows_boot_sha256=('0'*64)};Rejected {Assert-UnpublishedPrior $plan $old $terminal $r}
+$plan.windows_initial_observer=$old.windows_initial_observer
+$old.source_commit='87ba9acb55e64c694cce54a5e6458d0e86ce3877';$old.PSObject.Properties.Remove('initial_recovery_rearm')
+$old|Add-Member initial_unpublished_recovery ([pscustomobject]@{schema_version=1;attempt_id=('8'*64);closure_mode='windows-offline-v1';predecessor_terminal_sha256=('a'*64);predecessor_plan_sha256=('b'*64);predecessor_args_sha256=('c'*64);predecessor_seal_sha256=('d'*64)})
+$terminal.PSObject.Properties.Remove('rearm');$terminal|Add-Member unpublished $old.initial_unpublished_recovery
+$terminal.kind='initial-wsl-cutover-unpublished';$terminal.revision=8;$terminal.sequence=0;$terminal.phase='lease_lost';$terminal.failure_code='legacy_pipe_response_timeout_postcommit'
+Assert-UnpublishedPrior $plan $old $terminal $r
+$old|Add-Member initial_recovery_postboot ([pscustomobject]@{});Rejected {Assert-UnpublishedPrior $plan $old $terminal $r}
+
+''')
+
+    def test_raw_predecessor_derives_bounded_numbers_and_rejects_forgery(self):
+        self.powershell(r'''
+function Raw($v){return ,[Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $v -Depth 12 -Compress))}
+function Pin([byte[]]$raw){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($raw)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+$scope=[pscustomobject]@{schema_version=1;attempt_id=('8'*64);closure_mode='windows-offline-v1';predecessor_terminal_sha256=('a'*64);predecessor_plan_sha256=('b'*64);predecessor_args_sha256=('c'*64);predecessor_seal_sha256=('d'*64)}
+$t=[pscustomobject]@{schema_version=1;generation=1;kind='initial-wsl-cutover-unpublished';revision=8;sequence=0;phase='lease_lost';failure_code='legacy_pipe_response_timeout_postcommit';controller_plan_sha256=('e'*64);unpublished=$scope;recovery=[pscustomobject]@{attempt_id=('5'*64);predecessor_service_sha256=('6'*64);predecessor_terminal_sha256=('7'*64)};attempt_id=('1'*64);legacy_plan_sha256=('2'*64);restore_receipt_sha256=('3'*64);activation_intent_sha256=('4'*64)}
+$raw=Raw $t;$pin=Pin $raw;$n=Get-InitialPredecessorNumbers $raw $pin $false
+if($n.closed -ne 9 -or $n.opened -ne 10 -or $n.revoked -ne 11){throw 'derived_numbers'}
+Rejected {Get-InitialPredecessorNumbers $raw ('f'*64) $false}
+Rejected {Get-InitialPredecessorNumbers $raw $pin $true}
+foreach($r in @(9,7,2147483646,$true)){$t.revision=$r;$raw=Raw $t;Rejected {Get-InitialPredecessorNumbers $raw (Pin $raw) $false}}
+$t.revision=8;$t.sequence=1;$t.phase='local_revoke_observed';$t.failure_code='controller_journal_not_durable';$raw=Raw $t
+$n=Get-InitialPredecessorNumbers $raw (Pin $raw) $true;if($n.opened -ne 10){throw 'published_numbers'}
+$t.revision=10;$raw=Raw $t;$n=Get-InitialPredecessorNumbers $raw (Pin $raw) $false;if($n.opened -ne 12){throw 'next_numbers'}
+$t.revision=8;$t|Add-Member caller_revision 12;$raw=Raw $t;Rejected {Get-InitialPredecessorNumbers $raw (Pin $raw) $false};$t.PSObject.Properties.Remove('caller_revision')
+$raw=Raw $t;$text=[Text.UTF8Encoding]::new($false).GetString($raw)
+foreach($replacement in @('"revision":8,"revision":10','"revision":8,"\u0072evision":10')){$duplicate=[Text.UTF8Encoding]::new($false).GetBytes($text.Replace('"revision":8',$replacement));Rejected {Get-InitialPredecessorNumbers $duplicate (Pin $duplicate) $false}}
+$scope.closure_mode=@('windows-offline-v1');$raw=Raw $t;Rejected {Get-InitialPredecessorNumbers $raw (Pin $raw) $false}
+''')
+
+    def test_old_approval_binds_exact_installed_runtime(self):
+        self.powershell(r'''
+$old=[pscustomobject]@{source_commit=('a'*40);installation_id=('b'*64);initial_unpublished_recovery=[pscustomobject]@{}}
+$a=[pscustomobject]@{schema_version=1;action='ha-recover-unpublished-initial-writer';authority_kind='installed-runtime';installation_id=$old.installation_id;source_commit=$old.source_commit;plan_sha256=('c'*64);installed_at='2020-01-01T00:00:00Z'}
+Assert-UnpublishedPriorApproval $old $a ('c'*64)
+foreach($key in @('source_commit','installation_id','plan_sha256','action','authority_kind')){$value=$a.$key;$a.$key='wrong';Rejected {Assert-UnpublishedPriorApproval $old $a ('c'*64)};$a.$key=$value}
+$a.plan_sha256=@('c'*64);Rejected {Assert-UnpublishedPriorApproval $old $a ('c'*64)}
+''')
+
+    def test_both_native_gates_share_exact_raw_derivation(self):
+        start=(ROOT/'infra/k8s/ha_control/windows-ha-start-initial-service.ps1').read_text()
+        live=(ROOT/'infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1').read_text()
+        self.assertEqual(start.split('function Get-InitialPredecessorNumbers',1)[1].split('function Assert-UnpublishedTcbPath',1)[0],
+                         live.split('function Get-InitialPredecessorNumbers',1)[1].split('function Read-Scope',1)[0])
+
+    def test_windows_gate_sources_parse_and_use_fixed_typed_branches(self):
+        runtime=shutil.which('pwsh');self.assertIsNotNone(runtime)
+        for name in ('windows-ha-start-initial-service.ps1','windows-ha-cutover-live-authority.ps1'):
+            path=ROOT/'infra/k8s/ha_control'/name
+            result=subprocess.run([runtime,'-NoProfile','-NonInteractive','-Command',
+                "$e=$null;$t=$null;$null=[Management.Automation.Language.Parser]::ParseFile($env:SOURCE,[ref]$t,[ref]$e);if($e.Count){exit 1}"],
+                env=os.environ|{'SOURCE':str(path)},capture_output=True,text=True,timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr)
+            text=path.read_text()
+            self.assertIn('initial-wsl-cutover-unpublished',text)
+            self.assertIn('initial-wsl-cutover-postboot-unpublished',text)
+            self.assertNotIn('[int]$ExpectedRevision',text)

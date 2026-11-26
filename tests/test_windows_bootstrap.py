@@ -1316,8 +1316,24 @@ function Start-VM {
     $calls.Add($VM.Id.ToString())
     $VM.State = 'Running'
 }
+$fixtureBoot = [datetime]::Parse('2026-11-25T00:00:00Z').ToUniversalTime()
+function Get-CimInstance {
+    [CmdletBinding()] param([string]$ClassName, [int]$OperationTimeoutSec)
+    if ($ClassName -cne 'Win32_OperatingSystem') { throw 'unexpected_cim_class' }
+    [pscustomobject]@{LastBootUpTime=$fixtureBoot}
+}
+$hash = [Security.Cryptography.SHA256]::Create()
+$bootPin = [BitConverter]::ToString($hash.ComputeHash(
+    [Text.Encoding]::UTF8.GetBytes($fixtureBoot.Ticks.ToString()))).Replace('-','').ToLowerInvariant()
+$hash.Dispose()
 $observed = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB | ConvertFrom-Json
 if ($observed.mode -ne 'observe' -or $calls.Count -ne 0) { throw 'observe_must_not_start' }
+try {
+    & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -AttestSavedWindowsBootSha256 $bootPin | Out-Null
+    throw 'cold_guest_was_attested'
+} catch {
+    if ($_.Exception.Message -ne 'n100_boot_saved_pair_unverified') { throw }
+}
 try {
     & $Startup -VmAIdSha256 $PinA -VmBIdSha256 ('0'*64) -StartGuests | Out-Null
     throw 'missing_guest_was_accepted'
@@ -1325,9 +1341,46 @@ try {
     if ($_.Exception.Message -ne 'n100_boot_vm_identity_unverified') { throw }
 }
 if ($calls.Count -ne 0) { throw 'started_before_validating_both_guests' }
-$result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | ConvertFrom-Json
+foreach ($coldIndex in @(0, 1)) {
+    $inventory[0].State = 'Saved'
+    $inventory[1].State = 'Saved'
+    $inventory[$coldIndex].State = 'Off'
+    try {
+        & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | Out-Null
+        throw 'cold_guest_was_accepted'
+    } catch {
+        if ($_.Exception.Message -ne 'n100_boot_saved_guest_missing') { throw }
+    }
+    if ($calls.Count -ne 0) { throw 'started_before_validating_saved_pair' }
+}
+$inventory[0].State = 'Running'
+$inventory[1].State = 'Saved'
+try {
+    & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | Out-Null
+    throw 'active_guest_before_standby_was_accepted'
+} catch {
+    if ($_.Exception.Message -ne 'n100_boot_saved_guest_order_unverified') { throw }
+}
+if ($calls.Count -ne 0) { throw 'started_before_validating_saved_order' }
+$inventory[0].State = 'Saved'
+$inventory[1].State = 'Saved'
+$attested = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -AttestSavedWindowsBootSha256 $bootPin | ConvertFrom-Json
+if ($calls.Count -ne 0) { throw 'attestation_must_not_start' }
+try {
+    & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -AttestSavedWindowsBootSha256 ('0'*64) | Out-Null
+    throw 'wrong_windows_boot_was_attested'
+} catch {
+    if ($_.Exception.Message -ne 'n100_boot_saved_windows_identity_unverified') { throw }
+}
+$result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | ConvertFrom-Json
+& $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests -SavedGuestsOnly | Out-Null
+$savedCalls = @($calls.ToArray())
+$calls.Clear()
+$inventory[0].State = 'Off'
+$inventory[1].State = 'Saved'
 & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | Out-Null
-@{calls=@($calls.ToArray()); unrelated=$inventory[2].State; result=$result}|ConvertTo-Json -Depth 4 -Compress
+@{calls=@($calls.ToArray()); savedCalls=$savedCalls; unrelated=$inventory[2].State; result=$result;
+  attested=$attested; bootPin=$bootPin}|ConvertTo-Json -Depth 4 -Compress
 '''
         pins = [hashlib.sha256(f'00000000-0000-0000-0000-{i:012d}'.encode()).hexdigest()
                 for i in (1, 2)]
@@ -1339,6 +1392,10 @@ $result = & $Startup -VmAIdSha256 $PinA -VmBIdSha256 $PinB -StartGuests | Conver
         self.assertEqual(result.returncode, 0, result.stderr)
         state = json.loads(result.stdout)
         self.assertEqual([x[-1] for x in state['calls']], ['2', '1'])
+        self.assertEqual([x[-1] for x in state['savedCalls']], ['2', '1'])
+        self.assertEqual(state['attested'], {'windows_boot_sha256':state['bootPin'],
+                                             'saved':{'A':'Saved','B':'Saved'},
+                                             'vm_id_sha256':dict(zip(('A','B'), pins))})
         self.assertEqual(state['unrelated'], 'Off')
         self.assertEqual(state['result'], {'a':'Running','b':'Running','mode':'guests_started',
                                           'database_authority':'separate_admission_required'})

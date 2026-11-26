@@ -18,9 +18,14 @@ import time
 
 
 SCOPE = "n100ha-legacy-closure-v1"
+RECOVERY_SCOPE = "n100ha-initial-recovery-v1"
 SHA = re.compile(r"[0-9a-f]{64}")
 SERVICE_SID = re.compile(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}")
 PIPE = re.compile(r"n100ha-lease-proof-[0-9a-f]{32}")
+RECOVERY_PIPE = re.compile(r"n100ha-recovery-proof-[0-9a-f]{32}")
+_RECOVERY_PINS = {"plan_sha256", "attempt_id", "windows_boot_sha256", "guest_boot_sha256",
+                  "predecessor_service_sha256", "predecessor_terminal_sha256", "hold_sha256", "broker_scope_sha256", "resource_set_sha256"}
+_RECOVERY_PURPOSES = {"held_admission", "provider_isolation"}
 RESPONSE_SECONDS = 2.7
 CLIENT_FAILURES = {
     f"failure {stage}\r\n".encode("ascii"): f"legacy_pipe_client_{stage}"
@@ -60,19 +65,54 @@ class ProofPins:
                     service_sid=self.service_sid)
 
 
+@dataclass(frozen=True)
+class RecoveryProofPins:
+    plan_sha256: str
+    attempt_id: str
+    windows_boot_sha256: str
+    guest_boot_sha256: str
+    predecessor_service_sha256: str
+    predecessor_terminal_sha256: str
+    hold_sha256: str
+    broker_scope_sha256: str
+    resource_set_sha256: str
+    service_sid: str
+    purpose: str
+
+    def challenge(self):
+        values = dict(vars(self), scope=RECOVERY_SCOPE, nonce=secrets.token_hex(16), generation=1)
+        _recovery_challenge(values)
+        return values
+
+
+def _recovery_challenge(challenge):
+    _require(set(challenge) == _RECOVERY_PINS | {"scope", "nonce", "generation", "service_sid", "purpose"}
+             and challenge["scope"] == RECOVERY_SCOPE
+             and type(challenge["nonce"]) is str and re.fullmatch(r"[0-9a-f]{32}", challenge["nonce"])
+             and type(challenge["generation"]) is int and challenge["generation"] == 1
+             and type(challenge["service_sid"]) is str and SERVICE_SID.fullmatch(challenge["service_sid"])
+             and type(challenge["purpose"]) is str and challenge["purpose"] in _RECOVERY_PURPOSES
+             and all(type(challenge[key]) is str and SHA.fullmatch(challenge[key]) for key in _RECOVERY_PINS))
+
+
 def verify_response(frame, challenge, deadline, *, key, monotonic=time.monotonic):
     """Authenticate the response before evaluating its bound closure facts."""
     _require(monotonic() < deadline and type(frame) is bytes and 0 < len(frame) <= 4096)
     _require(frame.endswith(b"\n") and frame.count(b"\n") == 1)
     _require(type(key) is bytearray and len(key) == 32)
+    _require(type(challenge) is dict and challenge.get("scope") in (SCOPE, RECOVERY_SCOPE))
+    recovery = challenge["scope"] == RECOVERY_SCOPE
+    if recovery:
+        _recovery_challenge(challenge)
     try:
         envelope = json.loads(frame.decode("ascii"), object_pairs_hook=_unique)
         _require(type(envelope) is dict and set(envelope) == {"body", "mac"})
         _require(type(envelope["body"]) is str and type(envelope["mac"]) is str
                  and SHA.fullmatch(envelope["mac"]))
         body = base64.b64decode(envelope["body"], validate=True)
+        mac_input = RECOVERY_SCOPE.encode("ascii") + b"\0" + body if recovery else body
         _require(0 < len(body) <= 2048 and hmac.compare_digest(
-            envelope["mac"], hmac.digest(key, body, "sha256").hex()))
+            envelope["mac"], hmac.digest(key, mac_input, "sha256").hex()))
         response = json.loads(body.decode("utf-8"), object_pairs_hook=_unique)
     except (ValueError, UnicodeError, RecursionError):
         raise ValueError("legacy_pipe_proof_rejected") from None
@@ -105,7 +145,10 @@ class PersistentLeaseProofClient:
     def __init__(self, *, pins, pipe_name, server_pid, key_path, key_sha256, powershell, client,
                  client_sha256, compiler_root, startup_timeout=15, monotonic=time.monotonic):
         _require(sys.platform == "win32")
-        _require(type(pipe_name) is str and PIPE.fullmatch(pipe_name))
+        _require(type(pins) in (ProofPins, RecoveryProofPins))
+        recovery = type(pins) is RecoveryProofPins
+        pipe_pattern = RECOVERY_PIPE if recovery else PIPE
+        _require(type(pipe_name) is str and pipe_pattern.fullmatch(pipe_name))
         _require(type(server_pid) is int and 0 < server_pid < 2**32)
         _require(type(startup_timeout) in (int, float) and 0 < startup_timeout <= 30)
         _require(type(client_sha256) is str and SHA.fullmatch(client_sha256))
@@ -142,7 +185,7 @@ class PersistentLeaseProofClient:
                 self._process = subprocess.Popen(
                     [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned",
                      "-File", str(client), "-PipeName", pipe_name, "-ServerPid", str(server_pid),
-                     "-ServiceSid", pins.service_sid],
+                     "-ServiceSid", pins.service_sid] + (["-ProofScope", RECOVERY_SCOPE] if recovery else []),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     env=os.environ | {"TEMP": scratch, "TMP": scratch},
@@ -185,6 +228,14 @@ class PersistentLeaseProofClient:
 
     def request(self, deadline):
         """Return the fresh observation SHA using the original caller monotonic deadline."""
+        return self._request(deadline)
+
+    def request_marker(self, deadline, marker_sha256):
+        """Read the protected marker through the legacy-closure broker."""
+        _require(type(self.pins) is ProofPins and type(marker_sha256) is str and SHA.fullmatch(marker_sha256))
+        return self._request(deadline, marker_sha256=marker_sha256)
+
+    def _request(self, deadline, *, marker_sha256=None):
         _require(self._lock.acquire(blocking=False))
         stage = "legacy_pipe_client_unavailable"
         try:
@@ -192,6 +243,8 @@ class PersistentLeaseProofClient:
             deadline = min(deadline, self.monotonic() + RESPONSE_SECONDS)
             stage = "legacy_pipe_request_rejected"
             challenge = self.pins.challenge()
+            if marker_sha256 is not None:
+                challenge['marker_sha256'] = marker_sha256
             raw = json.dumps(challenge, separators=(",", ":"), sort_keys=True).encode("ascii")
             budget = int((deadline - self.monotonic()) * 1000)
             _require(budget > 0)

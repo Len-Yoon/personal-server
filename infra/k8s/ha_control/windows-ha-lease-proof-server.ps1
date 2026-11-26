@@ -17,6 +17,8 @@ param(
     [string]$KeyPath,
     [string]$KeySha256,
     [string]$ReadyPath,
+    [string]$RecoveryProtocolPath,
+    [string]$RecoveryProtocolSha256,
     [int]$RecentNonces = 1024,
     [switch]$Go
 )
@@ -32,6 +34,10 @@ $clock = $null
 $mac = $null
 $outcome = @{ recorded = $false }
 $scope = 'n100ha-legacy-closure-v1'
+$markerProofEnabled = $false
+$recovering = $PSBoundParameters.ContainsKey('RecoveryProtocolPath') -or
+    $PSBoundParameters.ContainsKey('RecoveryProtocolSha256')
+if ($recovering) { $scope = 'n100ha-initial-recovery-v1' }
 $servicePattern = '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z'
 $sidPattern = '\AS-1-(?:[0-9]{1,10}-){1,14}[0-9]{1,10}\z'
 $hashPattern = '\A[a-f0-9]{64}\z'
@@ -239,6 +245,7 @@ function Read-Request {
 }
 
 function New-Challenge([string]$Raw) {
+    if ($recovering) { return (Read-HaRecoveryChallenge $Raw $recoveryPins) }
     $fields = ConvertFrom-Json -InputObject $Raw
     if ($fields.nonce -isnot [string] -or $fields.nonce -cnotmatch '\A[a-f0-9]{32}\z') {
         throw 'lease_proof_nonce'
@@ -248,6 +255,13 @@ function New-Challenge([string]$Raw) {
         attempt_id=$AttemptId; collector_sha256=$CollectorSha256; generation=$Generation
         nonce=$fields.nonce; plan_sha256=$PlanSha256; scope=$scope; service_sid=$ServiceSid
         windows_boot_sha256=$WindowsBootSha256; wsl_boot_sha256=$WslBootSha256
+    }
+    if ('marker_sha256' -cin $fields.PSObject.Properties.Name) {
+        if (-not $markerProofEnabled -or $fields.marker_sha256 -isnot [string] -or
+            $fields.marker_sha256 -cne $MarkerSha256) {
+            throw 'lease_proof_binding'
+        }
+        $expected.Insert(3, 'marker_sha256', $MarkerSha256)
     }
     if ((ConvertTo-Json -InputObject $expected -Compress) -cne $Raw) { throw 'lease_proof_binding' }
     return $expected
@@ -278,6 +292,14 @@ function Invoke-ObservedClosure($Challenge, $Progress) {
         if ($worker.HadErrors -or $rows.Count -ne 1) { throw 'lease_proof_observation' }
         $fact = $rows[0]
         $names = @($fact.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+        if ($Challenge.Contains('marker_sha256')) {
+            if (($names -join ',') -cne 'marker_sha256,nonce,observation_sha256' -or
+                $fact.nonce -cne $Challenge.nonce -or $fact.marker_sha256 -cne $MarkerSha256 -or
+                $fact.observation_sha256 -isnot [string] -or $fact.observation_sha256 -cnotmatch $hashPattern) {
+                throw 'lease_proof_observation'
+            }
+            return $fact.observation_sha256
+        }
         $expectedNames = @('collector_sha256','generation','marker_sha256','nonce','observation_sha256',
             'reactivation_plan_sha256','recovery_commands_settled','windows_boot_sha256','windows_reactivation_closed',
             'wsl_boot_sha256','wsl_writers_closed')
@@ -297,15 +319,45 @@ function Invoke-ObservedClosure($Challenge, $Progress) {
     } finally { $worker.Dispose() }
 }
 
+function Invoke-RecoveryObservation([string]$Raw) {
+    $worker = [PowerShell]::Create()
+    $worker.Runspace = $runspace
+    try {
+        $deadline = [Diagnostics.Stopwatch]::GetTimestamp() +
+            [long]((Remaining) * [Diagnostics.Stopwatch]::Frequency / 1000)
+        $null = $worker.AddCommand('Get-HaBoundRecoveryObservation').AddArgument($Raw).AddArgument($deadline).
+            AddArgument($recoveryPredecessor)
+        $pending = $worker.BeginInvoke()
+        $left = 2500 - [int][Math]::Ceiling($clock.Elapsed.TotalMilliseconds)
+        if ($left -le 0 -or -not $pending.AsyncWaitHandle.WaitOne($left)) {
+            Write-ProofOutcome 'observation_timeout'
+            [Environment]::Exit(1)
+        }
+        $rows = $worker.EndInvoke($pending)
+        if ($worker.HadErrors -or $rows.Count -ne 1) { throw 'recovery_proof_observation' }
+        $null = Remaining
+        return $rows[0]
+    } finally { $worker.Dispose() }
+}
+
 try {
+    $pipePattern = if ($recovering) { '\An100ha-recovery-proof-[a-f0-9]{32}\z' }
+        else { '\An100ha-lease-proof-[a-f0-9]{32}\z' }
     if (-not $Go -or $PSVersionTable.PSEdition -cne 'Desktop' -or -not [Environment]::Is64BitProcess -or
         [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
-        $PipeName -cnotmatch '\An100ha-lease-proof-[a-f0-9]{32}\z' -or
+        $PipeName -cnotmatch $pipePattern -or
         $OperatorSid -cnotmatch $sidPattern -or $OperatorSid -cin @('S-1-5-18','S-1-5-32-544') -or
         $ServiceSid -cnotmatch $servicePattern -or $OperatorSid -ceq $ServiceSid -or
         $Generation -lt 1 -or $RecentNonces -lt 1 -or $RecentNonces -gt 4096) { throw 'lease_proof_context' }
-    foreach ($pin in @($PlanSha256,$AttemptId,$WindowsBootSha256,$WslBootSha256,$CollectorSha256,
-                      $ReactivationPlanSha256,$MarkerSha256,$CallbackSha256,$CallbackConfigSha256,$KeySha256)) {
+    $pins = @($PlanSha256,$AttemptId,$WindowsBootSha256,$CallbackSha256,$CallbackConfigSha256,$KeySha256)
+    $legacyPins = @($WslBootSha256,$CollectorSha256,$ReactivationPlanSha256,$MarkerSha256)
+    if ($recovering) {
+        if ($Generation -ne 1 -or @($legacyPins | Where-Object { $_ }).Count -ne 0) {
+            throw 'recovery_proof_context'
+        }
+        $pins += $RecoveryProtocolSha256
+    } else { $pins += $legacyPins }
+    foreach ($pin in $pins) {
         if ($pin -cnotmatch $hashPattern) { throw 'lease_proof_pin' }
     }
     $operator = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -316,57 +368,137 @@ try {
     $mac = Open-ProofMac
     $callback = Read-ProtectedText $CallbackPath $CallbackSha256
     $inputConfig = ConvertFrom-Json -InputObject (Read-ProtectedText $CallbackConfigPath $CallbackConfigSha256)
-    $planText = Read-ProtectedText $inputConfig.reactivation_plan_path $ReactivationPlanSha256
-    $nativePlan = ConvertFrom-Json -InputObject $planText
-    if ($PlanSha256 -cne $ReactivationPlanSha256 -and
-        ((@($nativePlan.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
-           'deployment_attempt_id,deployment_plan_sha256,windows_driver_sha256,windows_reactivation' -or
-         $inputConfig.reactivation_plan_sha256 -cne $ReactivationPlanSha256 -or
-         $nativePlan.deployment_plan_sha256 -cne $PlanSha256 -or $nativePlan.deployment_attempt_id -cne $AttemptId)) {
-        throw 'lease_proof_reactivation_plan_binding'
+    if ($recovering) {
+        $transportFields = @('guest_vm_id','guest_vsock_port','predecessor_installation_id',
+            'predecessor_service_path','predecessor_terminal_path',
+            'predecessor_scm_path','predecessor_scm_sha256')
+        $configNames = @($inputConfig.PSObject.Properties.Name)
+        if('postboot_attempt_id' -cin $configNames -or 'postboot_stopped_receipt_sha256' -cin $configNames -or
+           'postboot_carryover_receipt_sha256' -cin $configNames){
+            if($inputConfig.purpose -cne 'held_admission' -or $inputConfig.postboot_attempt_id -isnot [string] -or
+               $inputConfig.postboot_attempt_id -cnotmatch $hashPattern -or $inputConfig.postboot_stopped_receipt_sha256 -isnot [string] -or
+               $inputConfig.postboot_stopped_receipt_sha256 -cnotmatch $hashPattern){throw 'recovery_postboot_config'}
+            $transportFields+=@('postboot_attempt_id','postboot_stopped_receipt_sha256')
+            if('postboot_carryover_receipt_sha256' -cin $configNames){
+                if($inputConfig.postboot_carryover_receipt_sha256 -isnot [string] -or
+                   $inputConfig.postboot_carryover_receipt_sha256 -cnotmatch $hashPattern){
+                    throw 'recovery_postboot_config'
+                }
+                $transportFields+='postboot_carryover_receipt_sha256'
+            }
+        }
+        $transportCount = @($configNames | Where-Object { $_ -cin $transportFields }).Count
+        $protocolNames = @($configNames | Where-Object { $_ -cnotin $transportFields } | Sort-Object -CaseSensitive)
+        if ($transportCount -ne $transportFields.Count -or ($protocolNames -join ',') -cne
+                'attempt_id,broker_scope_sha256,guest_boot_sha256,hold_sha256,plan_sha256,predecessor_service_sha256,predecessor_terminal_sha256,purpose,resource_set_sha256,service_sid,windows_boot_sha256' -or
+            $inputConfig.plan_sha256 -cne $PlanSha256 -or $inputConfig.attempt_id -cne $AttemptId -or
+            $inputConfig.windows_boot_sha256 -cne $WindowsBootSha256 -or $inputConfig.service_sid -cne $ServiceSid) {
+            throw 'recovery_proof_config'
+        }
+        $recoveryPins = [ordered]@{}
+        foreach ($name in $protocolNames) {
+            $recoveryPins.Add($name, $inputConfig.$name)
+        }
+        $protocol = Read-ProtectedText $RecoveryProtocolPath $RecoveryProtocolSha256
+        . ([scriptblock]::Create($protocol))
+        Assert-HaRecoveryPins $recoveryPins
+        if ($inputConfig.predecessor_scm_sha256 -isnot [string] -or
+            $inputConfig.predecessor_scm_sha256 -cnotmatch $hashPattern -or
+            'TrustedStoppedV1.Native' -as [type]) { throw 'recovery_proof_config' }
+        Add-Type -TypeDefinition (Read-ProtectedText $inputConfig.predecessor_scm_path $inputConfig.predecessor_scm_sha256)
+        $oldBinding = ConvertFrom-Json -InputObject (
+            Read-ProtectedText $inputConfig.predecessor_service_path $inputConfig.predecessor_service_sha256)
+        $oldTerminal = ConvertFrom-Json -InputObject (
+            Read-ProtectedText $inputConfig.predecessor_terminal_path $inputConfig.predecessor_terminal_sha256)
+        $recoveryPredecessor = New-HaRecoveryPredecessorScope $oldBinding $oldTerminal (
+            $inputConfig.predecessor_installation_id) $recoveryPins
+        $runspace = [RunspaceFactory]::CreateRunspace()
+        $runspace.ThreadOptions = 'ReuseThread'
+        $runspace.Open()
+        $init = [PowerShell]::Create()
+        $init.Runspace = $runspace
+        try {
+            $null = $init.AddScript($protocol, $false).AddStatement()
+            $null = $init.AddScript($callback, $false).AddStatement()
+            $null = $init.AddCommand('Initialize-HaRecoveryObservation').AddArgument($inputConfig)
+            $null = $init.AddStatement().AddCommand('Get-Command').
+                AddParameter('Name', 'Get-HaRecoveryObservation').AddParameter('CommandType', 'Function')
+            $output = $init.Invoke()
+            if ($init.HadErrors -or $output.Count -ne 1 -or
+                $output[0].PSObject.BaseObject -isnot [Management.Automation.FunctionInfo] -or
+                $output[0].Name -cne 'Get-HaRecoveryObservation') { throw 'recovery_proof_callback' }
+        } finally { $init.Dispose() }
+    } else {
+        if ('recovery_marker_attempt_id' -cin $inputConfig.PSObject.Properties.Name) {
+            $markerAttempt = $inputConfig.recovery_marker_attempt_id
+            if ($markerAttempt -isnot [string] -or $markerAttempt -cnotmatch $hashPattern -or
+                $markerAttempt -ceq $AttemptId) { throw 'lease_proof_binding' }
+            $markerService = 'N100HA_' + $markerAttempt.Substring(0,24) + '_controller'
+            $markerSid = [Security.Principal.NTAccount]::new('NT SERVICE',$markerService).
+                Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($markerSid -cne $ServiceSid) { throw 'lease_proof_binding' }
+            $markerProofEnabled = $true
+        }
+        if ('closure_mode' -cin $inputConfig.PSObject.Properties.Name -and (
+            $inputConfig.closure_mode -isnot [string] -or
+            $inputConfig.closure_mode -cne 'windows-offline-v1' -or $CollectorSha256 -cne $CallbackSha256)) {
+            throw 'lease_proof_callback_pin'
+        }
+        $planText = Read-ProtectedText $inputConfig.reactivation_plan_path $ReactivationPlanSha256
+        $nativePlan = ConvertFrom-Json -InputObject $planText
+        if ($PlanSha256 -cne $ReactivationPlanSha256 -and
+            ((@($nativePlan.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+               'deployment_attempt_id,deployment_plan_sha256,windows_driver_sha256,windows_reactivation' -or
+             $inputConfig.reactivation_plan_sha256 -cne $ReactivationPlanSha256 -or
+             $nativePlan.deployment_plan_sha256 -cne $PlanSha256 -or $nativePlan.deployment_attempt_id -cne $AttemptId)) {
+            throw 'lease_proof_reactivation_plan_binding'
+        }
+        $driverText = Read-ProtectedText $inputConfig.driver_path $inputConfig.driver_sha256
+        $vmObserverText = Read-ProtectedText $inputConfig.vm_observer_path $inputConfig.vm_observer_sha256
+        if ($inputConfig.driver_sha256 -cne $nativePlan.windows_driver_sha256) {
+            throw 'lease_proof_callback_pin'
+        }
+        $runspace = [RunspaceFactory]::CreateRunspace()
+        $runspace.ThreadOptions = 'ReuseThread'
+        $runspace.Open()
+        $vmRunspace = [RunspaceFactory]::CreateRunspace()
+        $vmRunspace.ThreadOptions = 'ReuseThread'
+        $vmRunspace.Open()
+        $vmInit = [PowerShell]::Create()
+        $vmInit.Runspace = $vmRunspace
+        try {
+            $null = $vmInit.AddScript('Import-Module Hyper-V -Global -ErrorAction Stop', $false).AddStatement()
+            $null = $vmInit.AddScript($vmObserverText, $false).AddStatement()
+            $null = $vmInit.AddCommand('Get-FixedVmObserverSnapshot').
+                AddArgument($inputConfig.installation_id).AddArgument([guid]$inputConfig.vm_a).AddArgument([guid]$inputConfig.vm_b)
+            if ('vm_b_installation_id' -cin $inputConfig.PSObject.Properties.Name) {
+                $null = $vmInit.AddParameter('InstallationB', $inputConfig.vm_b_installation_id)
+            }
+            $warm = $vmInit.Invoke()
+            if ($vmInit.HadErrors -or $warm.Count -ne 1) { throw 'lease_proof_vm_init' }
+        } finally { $vmInit.Dispose() }
+        $processRunspace = [RunspaceFactory]::CreateRunspace()
+        $processRunspace.ThreadOptions = 'ReuseThread'
+        $processRunspace.Open()
+        $processInit = [PowerShell]::Create()
+        $processInit.Runspace = $processRunspace
+        try {
+            $null = $processInit.AddScript($driverText, $false).AddStatement()
+            $null = $processInit.AddCommand('Assert-HaReactivationProcessesClosed')
+            $warm = $processInit.Invoke()
+            if ($processInit.HadErrors -or $warm.Count -ne 0) { throw 'lease_proof_process_init' }
+        } finally { $processInit.Dispose() }
+        $init = [PowerShell]::Create()
+        $init.Runspace = $runspace
+        try {
+            $null = $init.AddScript($driverText, $false).AddStatement()
+            $null = $init.AddScript($callback, $false).AddStatement()
+            $null = $init.AddCommand('Initialize-HaLeaseObservation').AddArgument($inputConfig).AddArgument($planText).
+                AddArgument($MarkerSha256).AddArgument($WindowsBootSha256).AddArgument($CollectorSha256)
+            $output = $init.Invoke()
+            if ($init.HadErrors -or $output.Count -ne 0) { throw 'lease_proof_callback' }
+        } finally { $init.Dispose() }
     }
-    $driverText = Read-ProtectedText $inputConfig.driver_path $inputConfig.driver_sha256
-    $vmObserverText = Read-ProtectedText $inputConfig.vm_observer_path $inputConfig.vm_observer_sha256
-    if ($inputConfig.driver_sha256 -cne $nativePlan.windows_driver_sha256) {
-        throw 'lease_proof_callback_pin'
-    }
-    $runspace = [RunspaceFactory]::CreateRunspace()
-    $runspace.ThreadOptions = 'ReuseThread'
-    $runspace.Open()
-    $vmRunspace = [RunspaceFactory]::CreateRunspace()
-    $vmRunspace.ThreadOptions = 'ReuseThread'
-    $vmRunspace.Open()
-    $vmInit = [PowerShell]::Create()
-    $vmInit.Runspace = $vmRunspace
-    try {
-        $null = $vmInit.AddScript('Import-Module Hyper-V -Global -ErrorAction Stop', $false).AddStatement()
-        $null = $vmInit.AddScript($vmObserverText, $false).AddStatement()
-        $null = $vmInit.AddCommand('Get-FixedVmObserverSnapshot').
-            AddArgument($inputConfig.installation_id).AddArgument([guid]$inputConfig.vm_a).AddArgument([guid]$inputConfig.vm_b)
-        $warm = $vmInit.Invoke()
-        if ($vmInit.HadErrors -or $warm.Count -ne 1) { throw 'lease_proof_vm_init' }
-    } finally { $vmInit.Dispose() }
-    $processRunspace = [RunspaceFactory]::CreateRunspace()
-    $processRunspace.ThreadOptions = 'ReuseThread'
-    $processRunspace.Open()
-    $processInit = [PowerShell]::Create()
-    $processInit.Runspace = $processRunspace
-    try {
-        $null = $processInit.AddScript($driverText, $false).AddStatement()
-        $null = $processInit.AddCommand('Assert-HaReactivationProcessesClosed')
-        $warm = $processInit.Invoke()
-        if ($processInit.HadErrors -or $warm.Count -ne 0) { throw 'lease_proof_process_init' }
-    } finally { $processInit.Dispose() }
-    $init = [PowerShell]::Create()
-    $init.Runspace = $runspace
-    try {
-        $null = $init.AddScript($driverText, $false).AddStatement()
-        $null = $init.AddScript($callback, $false).AddStatement()
-        $null = $init.AddCommand('Initialize-HaLeaseObservation').AddArgument($inputConfig).AddArgument($planText).
-            AddArgument($MarkerSha256).AddArgument($WindowsBootSha256).AddArgument($CollectorSha256)
-        $output = $init.Invoke()
-        if ($init.HadErrors -or $output.Count -ne 0) { throw 'lease_proof_callback' }
-    } finally { $init.Dispose() }
 
     $pipe = New-ProofPipe
     $process = [Diagnostics.Process]::GetCurrentProcess()
@@ -384,7 +516,8 @@ try {
         $progress = $null
         try {
             $clock = [Diagnostics.Stopwatch]::StartNew()
-            $challenge = New-Challenge (Read-Request)
+            $raw = Read-Request
+            $challenge = New-Challenge $raw
             $phase = 'client_identity'
             $pipe.RunAsClient([IO.Pipes.PipeStreamImpersonationWorker]{
                 $client = [Security.Principal.WindowsIdentity]::GetCurrent($true)
@@ -398,14 +531,20 @@ try {
             if ($order.Count -gt $RecentNonces) { $null = $seen.Remove($order.Dequeue()) }
             $phase = 'observation'
             $progress = [hashtable]::Synchronized(@{step='dispatch';vm_step='dispatch'})
-            $digest = Invoke-ObservedClosure $challenge $progress
-            $phase = 'response'
-            $challenge.Add('closed', $true)
-            $challenge.Add('observation_sha256', $digest)
-            $body = $encoding.GetBytes((ConvertTo-Json -InputObject $challenge -Compress))
-            $tag = [BitConverter]::ToString($mac.ComputeHash($body)).Replace('-', '').ToLowerInvariant()
-            $envelope = [ordered]@{body=[Convert]::ToBase64String($body); mac=$tag}
-            $bytes = $encoding.GetBytes((ConvertTo-Json -InputObject $envelope -Compress) + "`n")
+            if ($recovering) {
+                $fact = Invoke-RecoveryObservation $raw
+                $phase = 'response'
+                $bytes = $encoding.GetBytes((New-HaRecoveryProofFrame $raw $recoveryPins $fact $mac))
+            } else {
+                $digest = Invoke-ObservedClosure $challenge $progress
+                $phase = 'response'
+                $challenge.Add('closed', $true)
+                $challenge.Add('observation_sha256', $digest)
+                $body = $encoding.GetBytes((ConvertTo-Json -InputObject $challenge -Compress))
+                $tag = [BitConverter]::ToString($mac.ComputeHash($body)).Replace('-', '').ToLowerInvariant()
+                $envelope = [ordered]@{body=[Convert]::ToBase64String($body); mac=$tag}
+                $bytes = $encoding.GetBytes((ConvertTo-Json -InputObject $envelope -Compress) + "`n")
+            }
             Send-ProofResponse $pipe $bytes
             # Keep the peer handle associated until the client finishes its
             # post-read PID check. The proof has already been sent within

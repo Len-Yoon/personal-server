@@ -1,5 +1,7 @@
 param([string]$Manifest,[string]$ManifestPath,[string]$ManifestSha256,
-      [string]$OwnedProfile,[string]$OwnedProfileSha256,[switch]$Go)
+      [string]$OwnedProfile,[string]$OwnedProfileSha256,[string]$RecoveryAttemptId,
+      [string]$RecoveryReservationSha256,[string]$RearmAttemptId,[string]$RearmPredecessorArgsSha256,
+      [switch]$IncomingRecoveryRuntime,[switch]$Go)
 # Stage code only into a new private directory. No SCM, policy, VM or credential installer.
 $ErrorActionPreference='Stop'
 $WarningPreference='SilentlyContinue'
@@ -9,6 +11,8 @@ $DebugPreference='SilentlyContinue'
 Set-StrictMode -Version Latest
 $script:RuntimeOwnedSpec=$null
 $script:RuntimeOwnedRoot=''
+$script:RuntimeRecoverySpec=$null
+$script:RuntimeRecoveryRoot=''
 $script:RuntimeStageSource=@'
 using System;
 using System.IO;
@@ -59,7 +63,7 @@ namespace HaRuntimeStageV1 {
   }
  }
  public sealed class FileSpec {public string Filename,Hash,Component;public long Bytes;}
- public sealed class Spec {public string SourceCommit,InstallationId,ArchiveHash,ServiceName,ServiceSid;public long ArchiveBytes,TotalBytes;public bool HostStaged;public Dictionary<string,FileSpec> Files;public HashSet<string> Directories;}
+ public sealed class Spec {public string SourceCommit,InstallationId,ArchiveHash,ServiceName,ServiceSid,RecoveryAttempt,ReservationHash;public long ArchiveBytes,TotalBytes;public bool HostStaged;public Dictionary<string,FileSpec> Files;public HashSet<string> Directories;}
  public static class Rules {
   public static void Need(bool value){if(!value)throw new InvalidOperationException("runtime_stage_input_rejected");}
   public static bool Match(string value,string pattern){return value!=null&&Regex.IsMatch(value,"\\A(?:"+pattern+")\\z",RegexOptions.CultureInvariant);}
@@ -78,9 +82,14 @@ namespace HaRuntimeStageV1 {
    return name;
   }
   public static Spec Manifest(string text){
-   var v=Json.Object(text,2097152);Keys(v,new[]{"schema_version","source_commit","installation_id","archive_sha256","archive_bytes","service_name","service_sid","files"});Need(Number(v,"schema_version")==1);
+   var v=Json.Object(text,2097152);long schema=Number(v,"schema_version");Need(schema==1||schema==2);
+   var keys=new List<string>(new[]{"schema_version","source_commit","installation_id","archive_sha256","archive_bytes","service_name","service_sid","files"});
+   if(schema==2){keys.Add("recovery_attempt_id");keys.Add("reservation_receipt_sha256");}
+   Keys(v,keys.ToArray());
    var s=new Spec();s.SourceCommit=Text(v,"source_commit");s.InstallationId=Text(v,"installation_id");s.ArchiveHash=Text(v,"archive_sha256");s.ArchiveBytes=Number(v,"archive_bytes");s.ServiceName=Text(v,"service_name");s.ServiceSid=Text(v,"service_sid");
-   Need(Match(s.SourceCommit,"[0-9a-f]{40}")&&Match(s.InstallationId,"[0-9a-f]{64}")&&Match(s.ArchiveHash,"[0-9a-f]{64}")&&s.ArchiveBytes>=22&&s.ArchiveBytes<=1073741824&&s.ServiceName==ServiceName(s.InstallationId)&&s.ServiceSid==ServiceSid(s.ServiceName));
+   string expected=ServiceName(s.InstallationId);
+   if(schema==2){s.RecoveryAttempt=Text(v,"recovery_attempt_id");s.ReservationHash=Text(v,"reservation_receipt_sha256");string recovery=ServiceName(s.RecoveryAttempt);Need(recovery!=expected&&Match(s.ReservationHash,"[0-9a-f]{64}"));expected=recovery;}
+   Need(Match(s.SourceCommit,"[0-9a-f]{40}")&&Match(s.ArchiveHash,"[0-9a-f]{64}")&&s.ArchiveBytes>=22&&s.ArchiveBytes<=1073741824&&s.ServiceName==expected&&s.ServiceSid==ServiceSid(s.ServiceName));
    var files=v["files"] as Dictionary<string,object>;Need(files!=null&&files.Count>=776&&files.Count<=8192);s.Files=new Dictionary<string,FileSpec>(StringComparer.Ordinal);var folded=new HashSet<string>(StringComparer.OrdinalIgnoreCase);int python=0,controller=0,host=0;
    foreach(var pair in files){string name=Name(pair.Key);Need(folded.Add(name));var f=pair.Value as Dictionary<string,object>;Need(f!=null);Keys(f,new[]{"filename","sha256","bytes","component"});var item=new FileSpec{Filename=Text(f,"filename"),Hash=Text(f,"sha256"),Bytes=Number(f,"bytes"),Component=Text(f,"component")};Need(item.Filename==name&&Match(item.Hash,"[0-9a-f]{64}")&&item.Bytes>=0&&item.Bytes<=67108864);
     if(item.Component=="python-runtime"){Need(name.StartsWith("python/",StringComparison.Ordinal));python++;}
@@ -88,7 +97,7 @@ namespace HaRuntimeStageV1 {
     else{Need(item.Component=="service-host"&&(name=="host/windows-service-host.exe"||name=="host/service.args"));host++;}
     s.TotalBytes+=item.Bytes;Need(s.TotalBytes<=536870912);s.Files.Add(name,item);
    }
-   Need(python==776&&controller>0&&(host==0||host==2));s.HostStaged=host==2;
+   Need(python==776&&controller>0&&(host==0||schema==1&&host==2));s.HostStaged=host==2;
    foreach(string name in new[]{"python/python.exe","python/python313.dll","python/python313.zip","python/python313._pth","python/Lib/site-packages/psycopg/__init__.py","python/Lib/site-packages/psycopg_binary/__init__.py","python/Lib/site-packages/tzdata/__init__.py","controller/source-manifest.json","controller/files/ha_control/launcher.py"})Need(s.Files.ContainsKey(name));
    s.Directories=new HashSet<string>(StringComparer.Ordinal);var directoryCase=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);foreach(string name in s.Files.Keys){string prefix=name;while(prefix.LastIndexOf('/')>=0){prefix=prefix.Substring(0,prefix.LastIndexOf('/'));Need(!folded.Contains(prefix));string existing;if(directoryCase.TryGetValue(prefix,out existing))Need(existing==prefix);else directoryCase.Add(prefix,prefix);s.Directories.Add(prefix);Need(s.Directories.Count<=8192);}}
    return s;
@@ -191,6 +200,278 @@ function Assert-RuntimeStageParentManifest($Stage,$Spec,$Owned){
     Assert-GuestOwnedDeclaration ([pscustomobject]$Stage) ''
     if([HaRuntimeStageV1.Rules]::Text($Stage,'source_commit') -cnotmatch '^[0-9a-f]{40}$'){throw 'runtime_stage_guest_origin_rejected'}
 }
+function Assert-RecoveryRuntimeRoot([string]$Root,$Spec){
+    $acl=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $Root -ErrorAction Stop).Sddl)
+    $expected=@{'S-1-5-18'=2032127;'S-1-5-32-544'=2032127}
+    $expected.Add($Spec.ServiceSid,131232)
+    if ($acl.Owner.Value -cnotin @('S-1-5-18','S-1-5-32-544') -or ($acl.ControlFlags -band 0x1004) -ne 0x1004 -or
+        $acl.DiscretionaryAcl.Count -ne 3){throw 'runtime_stage_recovery_root_acl'}
+    foreach($ace in $acl.DiscretionaryAcl){
+        if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
+            $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed){throw 'runtime_stage_recovery_root_acl'}
+        $id=$ace.SecurityIdentifier.Value
+        $flags=if($id -ceq $Spec.ServiceSid){0}else{3}
+        if (-not $expected.ContainsKey($id) -or $ace.AccessMask -ne $expected[$id] -or [int]$ace.AceFlags -ne $flags){
+            throw 'runtime_stage_recovery_root_acl'
+        }
+        $expected.Remove($id)
+    }
+}
+function Assert-RecoveryRuntimeReceipt($Receipt,$Spec){
+    if ([HaRuntimeStageV1.Rules]::Text($Receipt,'format') -cne 'fresh-recovery-service-reservation-receipt-v1' -or
+        [HaRuntimeStageV1.Rules]::Text($Receipt,'installation_id') -cne $Spec.InstallationId -or
+        [HaRuntimeStageV1.Rules]::Text($Receipt,'recovery_attempt_id') -cne $Spec.RecoveryAttempt){
+        throw 'runtime_stage_recovery_receipt'
+    }
+    foreach($name in @('ready_to_start','args_present','runtime_authority_issued','service_started','namespace_changed')){
+        if ($Receipt[$name] -isnot [bool] -or $Receipt[$name]){throw 'runtime_stage_recovery_receipt'}
+    }
+}
+function Assert-RecoveryRuntimeStopped([string]$Root,$Spec){
+    $service=@(Get-CimInstance Win32_Service -Filter ("Name='"+$Spec.ServiceName+"'") -OperationTimeoutSec 5 -ErrorAction Stop)
+    $exe=Join-Path $Root 'host\windows-service-host.exe'
+    if($service.Count -ne 1 -or $service[0].Name -cne $Spec.ServiceName -or
+        $service[0].State -cne 'Stopped' -or $service[0].StartMode -cne 'Manual' -or $service[0].ProcessId -ne 0 -or
+        $service[0].StartName -ine ('NT SERVICE\'+$Spec.ServiceName) -or $service[0].ServiceType -cne 'Own Process' -or
+        $service[0].DesktopInteract -or $service[0].PathName -cne ('"'+$exe+'"') -or
+        (Test-Path -LiteralPath (Join-Path $Root 'host\service.args'))){throw 'runtime_stage_recovery_service'}
+}
+function Test-RuntimeRearmMode([bool]$RecoveryMode,[string]$Attempt,[string]$ArgsSha,[string]$OriginalAttempt){
+    if([bool]$Attempt -ne [bool]$ArgsSha -or
+       ($Attempt -and (-not $RecoveryMode -or $Attempt -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $ArgsSha -cnotmatch '\A[a-f0-9]{64}\z' -or $Attempt -ceq $OriginalAttempt))){throw 'runtime_stage_rearm_scope'}
+    return [bool]$Attempt
+}
+function Get-IncomingRecoveryRuntimeLayout([bool]$Rearming,[string]$ManifestPath,[string]$ManifestHash,[string]$RecoveryRoot){
+    if(-not $Rearming -or -not $ManifestPath -or -not $RecoveryRoot -or $ManifestHash -cnotmatch '\A[a-f0-9]{64}\z'){
+        throw 'runtime_stage_incoming_scope'
+    }
+    $directory=Join-Path $RecoveryRoot ('incoming-runtime-'+$ManifestHash.Substring(0,24))
+    $expected=Join-Path $directory 'runtime-manifest.json'
+    if($ManifestPath -cne $expected){throw 'runtime_stage_incoming_path'}
+    return [pscustomobject]@{Root=$RecoveryRoot;Directory=$directory;Manifest=$expected;Archive=(Join-Path $directory 'runtime.zip')}
+}
+function Assert-IncomingRecoveryRuntimeInputs($Layout,$Inputs,[string]$ManifestHash,$Spec){
+    Assert-RuntimeStagePath $Layout.Directory $Layout.Directory
+    foreach($entry in @(@{Path=$Layout.Manifest;Identity=$Inputs.ManifestIdentity;Stream=$Inputs.Manifest;Pin=$ManifestHash},
+                       @{Path=$Layout.Archive;Identity=$Inputs.ArchiveIdentity;Stream=$Inputs.Archive;Pin=$Spec.ArchiveHash})){
+        Assert-RuntimeStagePath $entry.Path $Layout.Directory '' $true
+        if([HaRuntimeStageV1.Native]::Identity($entry.Path) -cne $entry.Identity){throw 'runtime_stage_incoming_changed'}
+        $entry.Stream.Position=0
+        if([HaRuntimeStageV1.Rules]::StreamHash($entry.Stream) -cne $entry.Pin){throw 'runtime_stage_incoming_changed'}
+        $entry.Stream.Position=0
+    }
+}
+function Read-RearmRuntimeService([string]$Root,$Spec){
+    $service=@(Get-CimInstance Win32_Service -Filter ("Name='"+$Spec.ServiceName+"'") -OperationTimeoutSec 5 -ErrorAction Stop)
+    $pattern='\A"'+[regex]::Escape($Root)+'\\(?:(?:rearm|postboot)-[a-f0-9]{64}\\)?host\\windows-service-host\.exe"\z'
+    if($service.Count -ne 1 -or $service[0].Name -cne $Spec.ServiceName -or
+       $service[0].State -cne 'Stopped' -or $service[0].StartMode -cnotin @('Manual','Disabled') -or
+       $service[0].ProcessId -ne 0 -or $service[0].StartName -ine ('NT SERVICE\'+$Spec.ServiceName) -or
+       $service[0].ServiceType -cne 'Own Process' -or $service[0].DesktopInteract -isnot [bool] -or
+       $service[0].DesktopInteract -or $service[0].PathName -isnot [string] -or $service[0].PathName -cnotmatch $pattern){
+        throw 'runtime_stage_rearm_service'
+    }
+    $value=$service[0]
+    return [pscustomobject][ordered]@{Name=$value.Name;State=$value.State;StartMode=$value.StartMode;
+        ProcessId=$value.ProcessId;StartName=$value.StartName;ServiceType=$value.ServiceType;
+        DesktopInteract=$value.DesktopInteract;PathName=$value.PathName}
+}
+function Open-RearmRuntimeInput([string]$Path,[string]$Root,[string]$Sid,[long]$Maximum){
+    Assert-RuntimeStagePath $Path $Root $Sid $true
+    $identity=[HaRuntimeStageV1.Native]::Identity($Path)
+    $file=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try{
+        if($file.Length -lt 1 -or $file.Length -gt $Maximum -or
+           [HaRuntimeStageV1.Native]::Identity($Path) -cne $identity){throw 'runtime_stage_rearm_input'}
+        return [pscustomobject]@{Path=$Path;Identity=$identity;Stream=$file}
+    }catch{$file.Dispose();throw}
+}
+function Read-RearmRuntimeLineagePlan([string]$Path,[string]$Hash,[string]$PrivateRoot,$Spec,$Opened,$Lineage){
+    if($Hash -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+    $heldPlan=Open-RearmRuntimeInput $Path $PrivateRoot $Spec.ServiceSid 65536
+    $Opened.Add($heldPlan.Stream)
+    if([HaRuntimeStageV1.Rules]::StreamHash($heldPlan.Stream) -cne $Hash){throw 'runtime_stage_rearm_lineage'}
+    $heldPlan.Stream.Position=0
+    $reader=[IO.StreamReader]::new($heldPlan.Stream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
+    try{$plan=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),65536)}finally{$reader.Dispose()}
+    $heldPlan.Stream.Position=0
+    $Lineage.Add([pscustomobject]@{Path=$heldPlan.Path;Identity=$heldPlan.Identity;Stream=$heldPlan.Stream;Hash=$Hash;Root=$PrivateRoot})
+    return ,$plan
+}
+function Assert-RearmRuntimeLineageScope($Plan,$Spec,$Baseline=$null,[string]$ExpectedBoot=''){
+    foreach($field in @('windows_enforced','initial_service_start','initial_cutover_handoff','initial_cutover_recovery','windows_initial_observer')){
+        if($Plan[$field] -isnot [Collections.Generic.Dictionary[string,object]]){throw 'runtime_stage_rearm_lineage'}
+    }
+    $identity=$Plan['windows_enforced'];$start=$Plan['initial_service_start']
+    $recovery=$Plan['initial_cutover_recovery'];$handoff=$Plan['initial_cutover_handoff']
+    [HaRuntimeStageV1.Rules]::Keys($recovery,@('attempt_id','predecessor_service_sha256','predecessor_terminal_sha256'))
+    [HaRuntimeStageV1.Rules]::Keys($handoff,@('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256'))
+    if([HaRuntimeStageV1.Rules]::Text($Plan,'installation_id') -cne $Spec.InstallationId -or
+       [HaRuntimeStageV1.Rules]::Text($identity,'service_name') -cne $Spec.ServiceName -or
+       [HaRuntimeStageV1.Rules]::Text($identity,'service_sid') -cne $Spec.ServiceSid -or
+       [HaRuntimeStageV1.Rules]::Text($identity,'service_image_sha256') -cnotmatch '\A[a-f0-9]{64}\z' -or
+       [HaRuntimeStageV1.Rules]::Text($start,'reservation_receipt_sha256') -cne $Spec.ReservationHash -or
+       [HaRuntimeStageV1.Rules]::Text($recovery,'attempt_id') -cne $Spec.RecoveryAttempt){throw 'runtime_stage_rearm_lineage'}
+    foreach($field in @('predecessor_service_sha256','predecessor_terminal_sha256')){
+        if([HaRuntimeStageV1.Rules]::Text($recovery,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+    }
+    foreach($field in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
+        if([HaRuntimeStageV1.Rules]::Text($handoff,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+    }
+    if($handoff['attempt_id'] -ceq $recovery['attempt_id'] -or
+       [HaRuntimeStageV1.Rules]::Text($Plan['windows_initial_observer'],'windows_boot_sha256') -cnotmatch '\A[a-f0-9]{64}\z'){
+        throw 'runtime_stage_rearm_lineage'
+    }
+    if($null -ne $Baseline){
+        foreach($field in @('predecessor_service_sha256','predecessor_terminal_sha256')){
+            if($recovery[$field] -cne $Baseline['initial_cutover_recovery'][$field]){throw 'runtime_stage_rearm_lineage'}
+        }
+        foreach($field in @('attempt_id','legacy_plan_sha256','restore_receipt_sha256','activation_intent_sha256')){
+            if($handoff[$field] -cne $Baseline['initial_cutover_handoff'][$field]){throw 'runtime_stage_rearm_lineage'}
+        }
+        if(-not $ExpectedBoot){$ExpectedBoot=$Baseline['windows_initial_observer']['windows_boot_sha256']}
+        if($Plan['windows_initial_observer']['windows_boot_sha256'] -cne $ExpectedBoot){
+            throw 'runtime_stage_rearm_lineage'
+        }
+    }
+}
+function Open-RearmRuntimeImageLineage([string]$Root,$Spec,$Settings,$Service,[string]$ActualHostSha,$Ownership,$Opened){
+    # Current service.args is already pinned by ArgsSha. It supplies the current
+    # plan pin, never a caller-selected lineage list. Every archive path below
+    # is derived from the hash-bound native same-boot envelope.
+    $lineage=[Collections.Generic.List[object]]::new()
+    $planPath=$Settings.plan_path;$planHash=$Settings.plan_sha256
+    if($planPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z'){
+        throw 'runtime_stage_rearm_lineage'
+    }
+    $privateRoot=[IO.Path]::GetDirectoryName($planPath)
+    $plan=Read-RearmRuntimeLineagePlan $planPath $planHash $privateRoot $Spec $Opened $lineage
+    Assert-RearmRuntimeLineageScope $plan $Spec
+    $baseline=$plan
+    foreach($field in @('predecessor_service_sha256','predecessor_terminal_sha256')){
+        if($baseline['initial_cutover_recovery'][$field] -cne $Ownership[$field]){throw 'runtime_stage_rearm_lineage'}
+    }
+    $OriginalHostSha=$Ownership['service_image_sha256']
+    $pathHash=[HaRuntimeStageV1.Rules]::Hash([Text.Encoding]::UTF8.GetBytes($Service.PathName))
+    if($plan['windows_enforced']['service_image_sha256'] -cne $ActualHostSha -or
+       $plan['initial_service_start']['service_image_path_sha256'] -cne $pathHash){throw 'runtime_stage_rearm_lineage'}
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $null=$seen.Add($planHash)
+    for($depth=0;$depth -lt 32;$depth++){
+        $post=$plan['initial_recovery_postboot']
+        if($post -isnot [Collections.Generic.Dictionary[string,object]]){throw 'runtime_stage_rearm_lineage'}
+        $fields=@('schema_version','attempt_id','predecessor_terminal_sha256','predecessor_binding_sha256',
+            'predecessor_args_sha256','predecessor_seal_sha256','previous_windows_boot_sha256','closure_mode',
+            'predecessor_kind','predecessor_plan_sha256','stopped_attempt_id','stopped_receipt_sha256','carryover_receipt_sha256',
+            'previous_service_image_sha256','successor_service_image_sha256','successor_service_image_path_sha256')
+        [HaRuntimeStageV1.Rules]::Keys($post,$fields)
+        if([HaRuntimeStageV1.Rules]::Number($post,'schema_version') -ne 1 -or
+           $post['predecessor_kind'] -cnotin @('published-postboot-sameboot-v1','published-postboot-saved-reboot-v1') -or
+           $post['closure_mode'] -cne 'windows-offline-v1'){throw 'runtime_stage_rearm_lineage'}
+        foreach($field in $fields|Where-Object{$_ -notin @('schema_version','predecessor_kind','closure_mode')}){
+            if([HaRuntimeStageV1.Rules]::Text($post,$field) -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_lineage'}
+        }
+        $image=$plan['windows_enforced']['service_image_sha256']
+        $expectedRoot=Join-Path 'C:\ProgramData\N100HA-InitialCutover' $post['attempt_id'].Substring(0,40)
+        $expectedHost=Join-Path $Root ('postboot-'+$post['attempt_id']+'\host\windows-service-host.exe')
+        $expectedPathHash=[HaRuntimeStageV1.Rules]::Hash([Text.Encoding]::UTF8.GetBytes(('"'+$expectedHost+'"')))
+        if(($depth -eq 0 -and $planPath -cne (Join-Path $expectedRoot 'plan.json')) -or
+           $post['attempt_id'] -ceq $post['stopped_attempt_id'] -or $post['attempt_id'] -in @(
+               $Spec.RecoveryAttempt,$baseline['initial_cutover_handoff']['attempt_id']) -or
+           $post['successor_service_image_sha256'] -cne $image -or
+           $post['successor_service_image_sha256'] -ceq $post['previous_service_image_sha256'] -or
+           $post['successor_service_image_path_sha256'] -cne $expectedPathHash -or
+           $plan['initial_service_start']['service_image_path_sha256'] -cne $expectedPathHash -or
+           ($post['predecessor_kind'] -ceq 'published-postboot-sameboot-v1' -and $post['previous_windows_boot_sha256'] -cne $plan['windows_initial_observer']['windows_boot_sha256']) -or
+           ($post['predecessor_kind'] -ceq 'published-postboot-saved-reboot-v1' -and $post['previous_windows_boot_sha256'] -ceq $plan['windows_initial_observer']['windows_boot_sha256'])){
+            throw 'runtime_stage_rearm_lineage'
+        }
+        $nextHash=$post['predecessor_plan_sha256']
+        if(-not $seen.Add($nextHash)){throw 'runtime_stage_rearm_lineage'}
+        $plan=Read-RearmRuntimeLineagePlan (Join-Path $expectedRoot 'postboot-predecessor-plan.json') $nextHash $expectedRoot $Spec $Opened $lineage
+        Assert-RearmRuntimeLineageScope $plan $Spec $baseline $post['previous_windows_boot_sha256']
+        if($plan['windows_enforced']['service_image_sha256'] -cne $post['previous_service_image_sha256']){
+            throw 'runtime_stage_rearm_lineage'
+        }
+        if($plan['windows_enforced']['service_image_sha256'] -ceq $OriginalHostSha){return ,$lineage.ToArray()}
+    }
+    throw 'runtime_stage_rearm_lineage'
+}
+function Open-RearmRuntimeStopped([string]$Root,$Spec,[string]$ArgsSha,[string]$OwnershipSha){
+    $opened=[Collections.Generic.List[IDisposable]]::new()
+    try{
+        $service=Read-RearmRuntimeService $Root $Spec
+        $hostPath=$service.PathName.Trim('"')
+        $hostInput=Open-RearmRuntimeInput $hostPath $Root $Spec.ServiceSid 67108864
+        $opened.Add($hostInput.Stream)
+        $argsPath=Join-Path ([IO.Path]::GetDirectoryName($hostPath)) 'service.args'
+        $arguments=Open-RearmRuntimeInput $argsPath $Root $Spec.ServiceSid 16384
+        $opened.Add($arguments.Stream)
+        if([HaRuntimeStageV1.Rules]::StreamHash($arguments.Stream) -cne $ArgsSha){throw 'runtime_stage_rearm_args'}
+        $arguments.Stream.Position=0
+        $reader=[IO.StreamReader]::new($arguments.Stream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
+        try{$text=$reader.ReadToEnd()}finally{$reader.Dispose()}
+        $rows=$text.Split([char]10)
+        $keys=@('format','service_name','service_sid','python_path','python_sha256','launcher_path','launcher_sha256',
+                'plan_path','plan_sha256','approval_path','approval_sha256','mode','host_sha256')
+        if($rows.Count -ne 14 -or $rows[-1] -cne '' -or $text.Contains([char]13) -or $text.Contains([char]0)){throw 'runtime_stage_rearm_args'}
+        $settings=@{}
+        for($i=0;$i -lt $keys.Count;$i++){
+            $prefix=$keys[$i]+'='
+            if(-not $rows[$i].StartsWith($prefix,[StringComparison]::Ordinal)){throw 'runtime_stage_rearm_args'}
+            $settings[$keys[$i]]=$rows[$i].Substring($prefix.Length)
+        }
+        if($settings.format -cne 'enforced-service-v1' -or $settings.mode -cne 'serve' -or
+           $settings.service_name -cne $Spec.ServiceName -or $settings.service_sid -cne $Spec.ServiceSid -or
+           $settings.plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_args'}
+        $owner=Open-RearmRuntimeInput (Join-Path $Root 'namespace-service-ownership.json') $Root $Spec.ServiceSid 32768
+        $opened.Add($owner.Stream)
+        if($OwnershipSha -cnotmatch '\A[a-f0-9]{64}\z' -or [HaRuntimeStageV1.Rules]::StreamHash($owner.Stream) -cne $OwnershipSha){throw 'runtime_stage_rearm_host'}
+        $owner.Stream.Position=0
+        $reader=[IO.StreamReader]::new($owner.Stream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
+        try{$ownership=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),32768)}finally{$reader.Dispose()}
+        foreach($key in @('service_name','service_sid','installation_id','recovery_attempt_id','service_image_sha256')){
+            $null=[HaRuntimeStageV1.Rules]::Text($ownership,$key)
+        }
+        if($ownership['format'] -cne 'ha-owned-recovery-service-v1' -or
+           $ownership['service_name'] -cne $Spec.ServiceName -or $ownership['service_sid'] -cne $Spec.ServiceSid -or
+           $ownership['installation_id'] -cne $Spec.InstallationId -or $ownership['recovery_attempt_id'] -cne $Spec.RecoveryAttempt -or
+           $ownership['service_image_sha256'] -cnotmatch '\A[a-f0-9]{64}\z'){throw 'runtime_stage_rearm_host'}
+        $actualHostSha=[HaRuntimeStageV1.Rules]::StreamHash($hostInput.Stream)
+        if($settings.host_sha256 -cne $actualHostSha){throw 'runtime_stage_rearm_host'}
+        $lineage=@()
+        if($actualHostSha -cne $ownership['service_image_sha256']){
+            $lineage=Open-RearmRuntimeImageLineage $Root $Spec $settings $service $actualHostSha $ownership $opened
+        }
+        $lease=[pscustomobject]@{Service=$service;Arguments=$arguments;Host=$hostInput;Ownership=$owner;
+            Opened=$opened;ArgsSha=$ArgsSha;HostSha=$actualHostSha;OwnershipSha=$OwnershipSha;Lineage=$lineage}
+        Assert-RearmRuntimeStopped $Root $Spec $lease
+        return $lease
+    }catch{foreach($file in $opened){$file.Dispose()};throw}
+}
+function Assert-RearmRuntimeStopped([string]$Root,$Spec,$Lease){
+    $current=Read-RearmRuntimeService $Root $Spec
+    foreach($key in @('Name','State','StartMode','ProcessId','StartName','ServiceType','DesktopInteract','PathName')){
+        if($current.$key -cne $Lease.Service.$key){throw 'runtime_stage_rearm_service_changed'}
+    }
+    foreach($item in @($Lease.Arguments,$Lease.Host,$Lease.Ownership)){
+        if([HaRuntimeStageV1.Native]::Identity($item.Path) -cne $item.Identity){throw 'runtime_stage_rearm_input'}
+    }
+    foreach($item in $Lease.Lineage){
+        Assert-RuntimeStagePath $item.Path $item.Root $Spec.ServiceSid $true
+        if([HaRuntimeStageV1.Native]::Identity($item.Path) -cne $item.Identity){throw 'runtime_stage_rearm_input'}
+        $item.Stream.Position=0
+        if([HaRuntimeStageV1.Rules]::StreamHash($item.Stream) -cne $item.Hash){throw 'runtime_stage_rearm_input'}
+        $item.Stream.Position=0
+    }
+    $Lease.Arguments.Stream.Position=0
+    $Lease.Host.Stream.Position=0
+    $Lease.Ownership.Stream.Position=0
+    if([HaRuntimeStageV1.Rules]::StreamHash($Lease.Arguments.Stream) -cne $Lease.ArgsSha -or
+       [HaRuntimeStageV1.Rules]::StreamHash($Lease.Host.Stream) -cne $Lease.HostSha -or
+       [HaRuntimeStageV1.Rules]::StreamHash($Lease.Ownership.Stream) -cne $Lease.OwnershipSha){throw 'runtime_stage_rearm_input'}
+}
 function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$ReaderSid='',[bool]$InputFile=$false){
     if($Path -cnotmatch '^[A-Za-z]:\\' -or $Path.Substring(2).Contains(':') -or $Path.Contains('/') -or $Path -match '(^|\\)\.\.?($|\\)' -or $Path -match '[ .](\\|$)'){throw 'runtime_stage_path_rejected'}
     $allowed=@('S-1-5-18','S-1-5-32-544');if($InputFile){$allowed+=@(Get-RuntimeStageCaller)}
@@ -198,6 +479,11 @@ function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$Rea
     $osRoot=[IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
     while($null -ne $entry){
         if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'runtime_stage_reparse_rejected'}
+        if($null -ne $script:RuntimeRecoverySpec -and $entry.FullName -ieq $script:RuntimeRecoveryRoot){
+            Assert-RecoveryRuntimeRoot $entry.FullName $script:RuntimeRecoverySpec
+            $entry=Get-RuntimeStageParent $entry
+            continue
+        }
         if($null -ne $script:RuntimeOwnedSpec -and $entry.FullName -ieq $script:RuntimeOwnedRoot){
             Assert-GuestOwnedRootAcl $entry.FullName $script:RuntimeOwnedSpec
             $entry=Get-RuntimeStageParent $entry
@@ -274,11 +560,24 @@ function Invoke-RuntimeStage {
     if($ManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or ([bool]$Manifest -eq [bool]$ManifestPath)){throw 'runtime_stage_manifest_pin_required'}
     $script:RuntimeFailureStage='initialize'
     Initialize-RuntimeStage
-    $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null;$ownedLease=$null;$owned=$null
+    $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null;$ownedLease=$null;$owned=$null;$rearmLease=$null
+    $incomingLayout=$null;$incomingInputs=$null
     try{
         $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
         $script:RuntimeFailureStage='owned_profile'
         if([bool]$OwnedProfile -ne [bool]$OwnedProfileSha256){throw 'runtime_stage_owned_profile_pin_required'}
+        if([bool]$RecoveryAttemptId -ne [bool]$RecoveryReservationSha256 -or
+            ($RecoveryAttemptId -and ($OwnedProfile -or $RecoveryAttemptId -cnotmatch '\A[a-f0-9]{64}\z' -or
+             $RecoveryReservationSha256 -cnotmatch '\A[a-f0-9]{64}\z'))){throw 'runtime_stage_recovery_scope'}
+        $rearming=Test-RuntimeRearmMode ([bool]$RecoveryAttemptId) $RearmAttemptId $RearmPredecessorArgsSha256 $RecoveryAttemptId
+        if($RecoveryAttemptId){
+            $identityName=[HaRuntimeStageV1.Rules]::ServiceName($RecoveryAttemptId)
+            $script:RuntimeRecoverySpec=[pscustomobject]@{ServiceSid=[HaRuntimeStageV1.Rules]::ServiceSid($identityName)}
+            $script:RuntimeRecoveryRoot=Join-Path $parent ('N100HA_'+$RecoveryAttemptId.Substring(0,24))
+        }
+        if($IncomingRecoveryRuntime){
+            $incomingLayout=Get-IncomingRecoveryRuntimeLayout $rearming $ManifestPath $ManifestSha256 $script:RuntimeRecoveryRoot
+        }
         if($OwnedProfile){
             . (Import-RuntimeOwnedSupport)
             $scriptHash=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($PSCommandPath))
@@ -290,32 +589,63 @@ function Invoke-RuntimeStage {
         }
         $script:RuntimeFailureStage='manifest'
         if($ManifestPath){
-            $prefix=[IO.Path]::GetDirectoryName($ManifestPath)
-            if([IO.Path]::GetFileName($ManifestPath) -cne 'runtime-manifest.json' -or [IO.Path]::GetDirectoryName($prefix) -ine $parent -or [IO.Path]::GetFileName($prefix) -cnotmatch '^N100HA_[0-9a-f]{24}$'){throw 'runtime_stage_manifest_path_rejected'}
+            if($null -ne $incomingLayout){
+                $prefix=$incomingLayout.Root;$inputRoot=$incomingLayout.Directory
+                $incomingInputs=[pscustomobject]@{ManifestIdentity=[HaRuntimeStageV1.Native]::Identity($ManifestPath);
+                    ArchiveIdentity='';Manifest=$null;Archive=$null}
+            }else{
+                $prefix=[IO.Path]::GetDirectoryName($ManifestPath);$inputRoot=$prefix
+                if([IO.Path]::GetFileName($ManifestPath) -cne 'runtime-manifest.json' -or [IO.Path]::GetDirectoryName($prefix) -ine $parent -or [IO.Path]::GetFileName($prefix) -cnotmatch '^N100HA_[0-9a-f]{24}$'){throw 'runtime_stage_manifest_path_rejected'}
+            }
             if($null -ne $owned -and $prefix -ine $script:RuntimeOwnedRoot){throw 'runtime_stage_owned_root_changed'}
-            $manifestFile=Read-RuntimeStageInput $ManifestPath $prefix 2097152
+            if($RecoveryAttemptId -and $prefix -ine $script:RuntimeRecoveryRoot){throw 'runtime_stage_recovery_scope'}
+            $manifestFile=Read-RuntimeStageInput $ManifestPath $inputRoot 2097152
+            if($null -ne $incomingInputs){$incomingInputs.Manifest=$manifestFile}
             $raw=New-Object byte[] ([int]$manifestFile.Length);$offset=0
             while($offset -lt $raw.Length){$read=$manifestFile.Read($raw,$offset,$raw.Length-$offset);if($read -le 0){throw 'runtime_stage_manifest_read_failed'};$offset+=$read}
         }else{if($Manifest.Length -gt 2796204){throw 'runtime_stage_manifest_limit'};$raw=[Convert]::FromBase64String($Manifest);if($raw.Length -gt 2097152){throw 'runtime_stage_manifest_limit'}}
         if(([HaRuntimeStageV1.Rules]::Hash($raw)) -cne $ManifestSha256){throw 'runtime_stage_manifest_changed'}
         $spec=[HaRuntimeStageV1.Rules]::Manifest(([Text.UTF8Encoding]::new($false,$true)).GetString($raw))
         if($null -ne $owned -and ($spec.InstallationId -cne $owned.installation_id -or $spec.SourceCommit -cne $owned.runtime_source_commit -or $spec.HostStaged)){throw 'runtime_stage_owned_source_or_host_changed'}
+        $recovering=$null -ne $spec.RecoveryAttempt
+        if($recovering -ne [bool]$RecoveryAttemptId -or ($recovering -and
+            ($null -ne $owned -or $RecoveryAttemptId -cne $spec.RecoveryAttempt -or
+             $RecoveryReservationSha256 -cne $spec.ReservationHash))){
+            throw 'runtime_stage_recovery_scope'
+        }
         $script:RuntimeFailureStage='service_identity'
         if(-not [HaRuntimeStageV1.Native]::ServiceIdentity($spec.ServiceName,$spec.ServiceSid)){throw 'runtime_stage_native_sid_mismatch'}
-        $root=Join-Path $parent ('N100HA_'+$spec.InstallationId.Substring(0,24));Assert-RuntimeStagePath $root $root
+        $scope=if($recovering){$spec.RecoveryAttempt}else{$spec.InstallationId}
+        $root=Join-Path $parent ('N100HA_'+$scope.Substring(0,24))
+        if($recovering){$script:RuntimeRecoverySpec=$spec;$script:RuntimeRecoveryRoot=$root}
+        Assert-RuntimeStagePath $root $root
         if($ManifestPath -and $prefix -ine $root){throw 'runtime_stage_installation_path_mismatch'}
         # Bind the full installation identity, not just its directory prefix.
         $script:RuntimeFailureStage='parent_manifest'
-        $stageFile=Read-RuntimeStageInput (Join-Path $root 'stage-manifest.json') $root 32768
+        $stageName=if($recovering){'reservation-receipt.json'}else{'stage-manifest.json'}
+        $stageFile=Read-RuntimeStageInput (Join-Path $root $stageName) $root 32768
         if($null -ne $owned){
             if([HaRuntimeStageV1.Rules]::StreamHash($stageFile) -cne $owned.guest_stage_manifest_sha256){throw 'runtime_stage_guest_stage_pin_changed'}
             $stageFile.Position=0
         }
+        if($recovering){
+            if([HaRuntimeStageV1.Rules]::StreamHash($stageFile) -cne $RecoveryReservationSha256){throw 'runtime_stage_recovery_receipt'}
+            $stageFile.Position=0
+        }
         $reader=[IO.StreamReader]::new($stageFile,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
         try{$stage=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),32768)}finally{$reader.Dispose()}
-        Assert-RuntimeStageParentManifest $stage $spec $owned
+        if($recovering){
+            Assert-RecoveryRuntimeReceipt $stage $spec
+            if($rearming){$rearmLease=Open-RearmRuntimeStopped $root $spec $RearmPredecessorArgsSha256 ([HaRuntimeStageV1.Rules]::Text($stage,'ownership_receipt_sha256'))}
+            else{Assert-RecoveryRuntimeStopped $root $spec}
+        }else{Assert-RuntimeStageParentManifest $stage $spec $owned}
         $script:RuntimeFailureStage='archive'
-        $zipPath=Join-Path $root 'runtime.zip';$zipFile=Read-RuntimeStageInput $zipPath $root 1073741824
+        if($null -ne $incomingLayout){
+            $zipPath=$incomingLayout.Archive;$zipRoot=$incomingLayout.Directory
+            $incomingInputs.ArchiveIdentity=[HaRuntimeStageV1.Native]::Identity($zipPath)
+        }else{$zipPath=Join-Path $root 'runtime.zip';$zipRoot=$root}
+        $zipFile=Read-RuntimeStageInput $zipPath $zipRoot 1073741824
+        if($null -ne $incomingInputs){$incomingInputs.Archive=$zipFile}
         if($zipFile.Length -ne $spec.ArchiveBytes -or ([HaRuntimeStageV1.Rules]::StreamHash($zipFile)) -cne $spec.ArchiveHash){throw 'runtime_stage_archive_changed'};$zipFile.Position=0
         $archive=[IO.Compression.ZipArchive]::new($zipFile,[IO.Compression.ZipArchiveMode]::Read,$true)
         [HaRuntimeStageV1.Rules]::Zip($archive,$spec)
@@ -326,6 +656,9 @@ function Invoke-RuntimeStage {
         foreach($entry in $archive.Entries){$null=[HaRuntimeStageV1.Engine]::Destination($target,$entry.FullName)}
         $intent=@{manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;runtime_id=$id}
         if($null -ne $owned){$ownedLease.AssertCurrent();$intent.owned_profile_sha256=$OwnedProfileSha256;$intent.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256}
+        if($recovering){$intent.recovery_attempt_id=$spec.RecoveryAttempt;$intent.reservation_receipt_sha256=$spec.ReservationHash}
+        if($rearming){$intent.rearm_attempt_id=$RearmAttemptId;$intent.predecessor_args_sha256=$RearmPredecessorArgsSha256}
+        if($null -ne $incomingLayout){Assert-IncomingRecoveryRuntimeInputs $incomingLayout $incomingInputs $ManifestSha256 $spec}
         $script:RuntimeFailureStage='journal'
         Write-RuntimeStageEvent $journal 'intent' $intent $true
         $script:RuntimeFailureStage='extract'
@@ -352,11 +685,21 @@ function Invoke-RuntimeStage {
         $script:RuntimeFailureStage='receipt'
         $receipt=[ordered]@{scope='private_code_stage_only';schema_version=1;native_stage=$true;inventory_version=1;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;runtime_id=$id;file_count=$count;readonly=$true;native_imports_verified=$true;python_version='3.13.17';psycopg_version='3.3.8';tzdata_version='2026.2';host_staged=$spec.HostStaged;SCM_registered=$false;group_changed=$false;namespace_changed=$false;VM_changed=$false;authority_issued=$false}
         if($null -ne $owned){$ownedLease.AssertCurrent();$receipt.schema_version=2;$receipt.owned_profile_sha256=$OwnedProfileSha256;$receipt.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256;$receipt.reservation_receipt_sha256=$owned.reservation_receipt_sha256}
+        if($recovering){
+            if($rearming){Assert-RearmRuntimeStopped $root $spec $rearmLease}
+            else{Assert-RecoveryRuntimeStopped $root $spec}
+            $receipt.schema_version=3;$receipt.recovery_attempt_id=$spec.RecoveryAttempt
+            $receipt.reservation_receipt_sha256=$spec.ReservationHash
+            if($rearming){$receipt.schema_version=4;$receipt.rearm_attempt_id=$RearmAttemptId;$receipt.predecessor_args_sha256=$RearmPredecessorArgsSha256}
+        }
+        if($null -ne $incomingLayout){Assert-IncomingRecoveryRuntimeInputs $incomingLayout $incomingInputs $ManifestSha256 $spec}
         Write-RuntimeStageEvent $journal 'sealed_code_stage' @{file_count=$count;native_code_only=$true;SCM_registered=$false;authority_issued=$false}
         $receipt|ConvertTo-Json -Compress
     }finally{
+        if($null -ne $rearmLease){foreach($file in $rearmLease.Opened){$file.Dispose()}}
         if($null -ne $archive){$archive.Dispose()};if($null -ne $zipFile){$zipFile.Dispose()};if($null -ne $stageFile){$stageFile.Dispose()};if($null -ne $manifestFile){$manifestFile.Dispose()}
         if($null -ne $ownedLease){$ownedLease.Dispose()};$script:RuntimeOwnedSpec=$null;$script:RuntimeOwnedRoot=''
+        $script:RuntimeRecoverySpec=$null;$script:RuntimeRecoveryRoot=''
     }
 }
 if($MyInvocation.InvocationName -ne '.'){

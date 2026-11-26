@@ -21,6 +21,8 @@ DESTINATIONS = {
 }
 TABLE = 18461
 NAME = "n100_news_relay"
+GUARD_NAME = "n100_news_relay_guard"
+GUARD_CHAINS = {"deny_direct_relay": "output", "deny_forwarded_relay": "forward"}
 BROKER_UID = 10002
 BEGIN = b"# BEGIN N100 NEWS RELAY\n"
 END = b"# END N100 NEWS RELAY\n"
@@ -55,7 +57,7 @@ def policy(config):
     upstream = ", ".join(address for address, _ in routes)
     nft = f"""table ip {NAME} {{
   chain redirect_tls {{
-    type nat hook output priority dstnat; policy accept;
+    type nat hook output priority -100; policy accept;
 {nat_rules}
   }}
   chain protect_relay {{
@@ -66,6 +68,88 @@ def policy(config):
 }}
 """
     return BEGIN + entries + END, routes, nft
+
+
+def guard_policy(config):
+    """Deny direct relay connections before the later, broker-only DNAT hook.
+
+    This independent table has no allow state and survives apply/remove. A boot
+    installer must execute ``guard`` successfully before enabling networking;
+    merely installing this helper does not provide that ordering.
+    """
+    policy(config)
+    rules = "\n".join(
+        f"    ip daddr {config['relay']} tcp dport {port} reject with tcp reset"
+        for port in DESTINATIONS.values()
+    )
+    chains = "".join(f"""  chain {name} {{
+    type filter hook {hook} priority -110; policy accept;
+{rules}
+  }}
+""" for name, hook in GUARD_CHAINS.items())
+    return f"table ip {GUARD_NAME} {{\n{chains}}}\n"
+
+
+def guard_expected(config):
+    table = {"family": "ip", "name": GUARD_NAME}
+    rows = [{"table": table}]
+    for name, hook in GUARD_CHAINS.items():
+        rows.append({"chain": {"family": "ip", "table": GUARD_NAME, "name": name,
+                              "type": "filter", "hook": hook, "prio": -110, "policy": "accept"}})
+        for port in DESTINATIONS.values():
+            rows.append({"rule": {
+                "family": "ip", "table": GUARD_NAME, "chain": name,
+                "expr": [
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}},
+                               "right": config["relay"]}},
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}},
+                               "right": port}},
+                    {"reject": {"type": "tcp reset"}},
+                ],
+            }})
+    return rows
+
+
+def guard_present(config):
+    result = run(("nft", "-j", "list", "table", "ip", GUARD_NAME), check=False)
+    if result.returncode:
+        if nft_table_present(GUARD_NAME):
+            raise RuntimeError("relay_guard_query_failed")
+        return False
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict) or set(value) != {"nftables"} or not isinstance(value["nftables"], list):
+        raise RuntimeError("relay_guard_unexpected_state")
+    rows = []
+    for row in value["nftables"]:
+        if not isinstance(row, dict) or len(row) != 1:
+            raise RuntimeError("relay_guard_unexpected_state")
+        kind, data = next(iter(row.items()))
+        if kind == "metainfo":
+            continue
+        if not isinstance(data, dict):
+            raise RuntimeError("relay_guard_unexpected_state")
+        rows.append({kind: {key: item for key, item in data.items() if key != "handle"}})
+    # Every owned rule is an unconditional exact-endpoint reject, so row order
+    # cannot change its effect. nft versions may enumerate chains differently.
+    def canonical(row):
+        return json.dumps(row, sort_keys=True)
+
+    if sorted(rows, key=canonical) != sorted(guard_expected(config), key=canonical):
+        raise RuntimeError("relay_guard_unexpected_state")
+    return True
+
+
+def apply_guard(config):
+    script = guard_policy(config)
+    if guard_present(config):
+        return
+    # create, rather than add/flush, refuses an unknown table or a concurrent
+    # creation without altering it. Both statements commit as one nft batch.
+    script = f"create table ip {GUARD_NAME}\n" + script
+    run(("nft", "--check", "-f", "-"), input_text=script)
+    run(("nft", "-f", "-"), input_text=script)
+    if not guard_present(config):
+        raise RuntimeError("relay_guard_readback_failed")
 
 
 def run(command, *, input_text=None, check=True):
@@ -103,6 +187,24 @@ def write_hosts(previous, data, mode):
             path.unlink(missing_ok=True)
 
 
+def nft_table_present(name):
+    value = json.loads(run(("nft", "-j", "list", "tables")).stdout)
+    if not isinstance(value, dict) or set(value) != {"nftables"} or not isinstance(value["nftables"], list):
+        raise RuntimeError("relay_nft_inventory_invalid")
+    found = False
+    for row in value["nftables"]:
+        if not isinstance(row, dict) or len(row) != 1:
+            raise RuntimeError("relay_nft_inventory_invalid")
+        if "metainfo" in row:
+            continue
+        table = row.get("table")
+        if (not isinstance(table, dict) or not isinstance(table.get("family"), str)
+                or not isinstance(table.get("name"), str)):
+            raise RuntimeError("relay_nft_inventory_invalid")
+        found = found or (table["family"] == "ip" and table["name"] == name)
+    return found
+
+
 def route_state(config, block):
     if hashlib.sha256(BOOT_ID.read_bytes()).hexdigest() != config["boot_sha256"]:
         raise RuntimeError("relay_boot_changed")
@@ -112,17 +214,30 @@ def route_state(config, block):
     if len(live) != 1 or live[0].get("dev") != config["interface"] or live[0].get("prefsrc") != config["guest"] or live[0].get("gateway"):
         raise RuntimeError("unexpected_relay_link")
     hosts, mode = read_hosts()
-    has_rules = any(row.get("priority") == TABLE or str(row.get("table")) == str(TABLE)
-                    for row in json.loads(run(("ip", "-j", "-4", "rule", "list")).stdout))
-    has_table = run(("nft", "list", "table", "ip", NAME), check=False).returncode == 0
-    routes = run(("ip", "-j", "-4", "route", "show", "table", str(TABLE)), check=False)
-    has_routes = routes.returncode == 0 and bool(json.loads(routes.stdout))
+    rules = json.loads(run(("ip", "-N", "-j", "-4", "rule", "list")).stdout)
+    # Listing an absent FIB table exits nonzero, which cannot safely be treated
+    # as absence after a crash. A successful complete inventory proves absence.
+    routes = json.loads(run(("ip", "-N", "-j", "-4", "route", "show", "table", "all")).stdout)
+    if any(not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)
+           for rows in (rules, routes)):
+        raise RuntimeError("relay_route_inventory_invalid")
+    if any("table" in row and not re.fullmatch(r"[0-9]+", str(row["table"])) for row in routes):
+        raise RuntimeError("relay_route_inventory_invalid")
+    has_rules = any(row.get("priority") == TABLE or str(row.get("table")) == str(TABLE) for row in rules)
+    has_table = nft_table_present(NAME)
+    has_routes = any(str(row.get("table")) == str(TABLE) for row in routes)
     return hosts, mode, (block in hosts, has_rules, has_table, has_routes)
 
 
 def apply(config):
     block, addresses, nft = policy(config)
+    apply_guard(config)
     hosts, mode, state = route_state(config, block)
+    previous_hosts = hosts
+    stale = exact_stale_hosts(hosts, block, state)
+    if stale:
+        hosts = hosts.replace(block, b"", 1)
+        state = (False, False, False, False)
     if any(state) or BEGIN in hosts or END in hosts:
         raise RuntimeError("relay_already_present")
     existing = {token for line in hosts.splitlines() for token in line.split(b"#", 1)[0].split()[1:]}
@@ -131,6 +246,8 @@ def apply(config):
     if hosts and not hosts.endswith(b"\n"):
         raise RuntimeError("hosts_missing_final_newline")
     run(("nft", "--check", "-f", "-"), input_text=nft)
+    if stale:
+        write_hosts(previous_hosts, hosts, mode)
     uidrange = f"{BROKER_UID}-{BROKER_UID}"
     priority = str(TABLE)
     cleanup = []
@@ -159,10 +276,18 @@ def apply(config):
 
 def remove(config):
     block, addresses, _ = policy(config)
+    apply_guard(config)
     hosts, mode, state = route_state(config, block)
-    if not any(state):
+    if exact_stale_hosts(hosts, block, state):
+        write_hosts(hosts, hosts.replace(block, b"", 1), mode)
+        if any(route_state(config, block)[2]):
+            raise RuntimeError("relay_remove_readback_failed")
         return
-    if state != (True, True, True, True) or hosts.count(block) != 1:
+    if not any(state):
+        if BEGIN in hosts or END in hosts:
+            raise RuntimeError("relay_mixed_state_manual_reconciliation")
+        return
+    if state != (True, True, True, True) or not exact_hosts_marker(hosts, block):
         raise RuntimeError("relay_mixed_state_manual_reconciliation")
     priority = str(TABLE)
     run(("ip", "-4", "rule", "del", "pref", priority, "uidrange", f"{BROKER_UID}-{BROKER_UID}", "lookup", priority))
@@ -174,9 +299,21 @@ def remove(config):
         raise RuntimeError("relay_remove_readback_failed")
 
 
+def exact_hosts_marker(hosts, block):
+    start = hosts.find(block)
+    return (hosts.count(block) == 1 and hosts.count(BEGIN) == 1 and hosts.count(END) == 1
+            and (start == 0 or hosts[start - 1:start] == b"\n"))
+
+
+def exact_stale_hosts(hosts, block, state):
+    # A reboot clears nft/routes/rules but leaves this exact hosts block. Do not
+    # reconcile partial, changed or duplicated markers or any surviving allow.
+    return state == (True, False, False, False) and exact_hosts_marker(hosts, block)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check", "apply", "remove"))
+    parser.add_argument("mode", choices=("check", "guard", "apply", "remove"))
     args = parser.parse_args()
     try:
         config = json.load(sys.stdin)
@@ -186,6 +323,10 @@ def main():
         else:
             if os.geteuid() != 0:
                 raise RuntimeError("root_required")
+            if args.mode == "guard":
+                apply_guard(config)
+                print(json.dumps({"relay_deny_guard": True}))
+                return
             (apply if args.mode == "apply" else remove)(config)
         state = route_state(config, block)[2]
         print(json.dumps(dict(zip(("host_entries", "uid_rule", "nft_table", "routes"), state))))

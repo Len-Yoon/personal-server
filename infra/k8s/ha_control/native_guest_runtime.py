@@ -1,6 +1,7 @@
 """Prepare the exact VM guest app and broker containers in the stopped state."""
 
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import secrets
 import ssl
 import stat
 import subprocess
+import tempfile
 
 from ha_runtime.config import SERVICES
 from ha_runtime.seven_capture import stamp
@@ -17,7 +19,8 @@ from ha_runtime.seven_capture import stamp
 from . import native_guest_config as config
 from .legacy_writers import TransitionBlocked, _need
 from .native_guest_restore import BOOT_ID, INSTALLATION, SHA, _directory, _docker, _fsync_directory, _inventory
-from .native_guest_restore import _json_bytes, active_postgres, inventory_sha256
+from .native_guest_restore import _json_bytes, _lsn, _pg, active_postgres, inventory_sha256
+from .native_stdio_bridge import Binding
 
 
 ROOT = Path("/etc/n100-ha")
@@ -58,6 +61,8 @@ class RuntimePins:
     broker_instance: str
     postgres_id: str | None = None
     retained_postgres_id: str | None = None
+    primary_node: str = "A"
+    generation: int = 1
 
     def validate(self):
         digests = (self.boot_sha256, self.installation_id, self.protected_inventory_sha256, self.engine_id_sha256,
@@ -70,6 +75,8 @@ class RuntimePins:
                    (_match(SHA, self.retained_postgres_id) and self.postgres_id is not None
                     and self.retained_postgres_id != self.postgres_id)), "guest_runtime_postgres_pins_invalid")
         config._guest_identity(self.cluster, self.release, self.plan_sha256, self.node, self.installation_id, self.system_id)
+        _need(type(self.primary_node) is str, "guest_runtime_pins_invalid")
+        config._partner(self.primary_node, self.generation)
 
 
 def _match(pattern, value):
@@ -125,7 +132,7 @@ def _traversable(path, groups):
           "guest_runtime_mount_inaccessible")
 
 
-def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False):
+def _collect_inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False):
     digests = {}
 
     def read(path, uid=0, *, private=False, gids=None):
@@ -165,7 +172,8 @@ def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False)
 
     clients = {}
     identity = dict(cluster=pins.cluster, release=pins.release, plan_sha256=pins.plan_sha256,
-                    node=pins.node, installation_id=pins.installation_id, system_id=pins.system_id)
+                    node=pins.node, installation_id=pins.installation_id, system_id=pins.system_id,
+                    primary_node=pins.primary_node, generation=pins.generation)
     for service in sorted(SERVICES):
         root = ROOT / "apps" / service
         groups = {APP_UID, INGRESS_UID}
@@ -191,8 +199,13 @@ def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False)
         if service == "homeops-executor":
             _need(read(root / "runtime-ownership.conf", gids=groups) == runtime_ownership.encode(),
                   "guest_runtime_ownership_config_mismatch")
+    return digests, (identity, clients, ingress_certificate, broker_passfile)
+
+
+def _inputs(pins, renderer, spec, haproxy, runtime_ownership, *, prepared=False):
+    digests, inputs = _collect_inputs(pins, renderer, spec, haproxy, runtime_ownership, prepared=prepared)
     _need(_digest(_json_bytes(digests)) == pins.inputs_sha256, "guest_runtime_inputs_pin_mismatch")
-    return identity, clients, ingress_certificate, broker_passfile
+    return inputs
 
 
 def _environment(rows):
@@ -298,6 +311,9 @@ def _guard(pins, assert_guard):
         "frozen_transfer_sha256": pins.frozen_transfer_sha256, "restore_receipt_sha256": pins.restore_receipt_sha256,
         "legacy_writers_closed": True, "target_writes_closed": True, "frozen_transfer_closed": True,
     }
+    if pins.generation > 1:
+        expected.update(primary_node=pins.primary_node, generation=pins.generation, previous_primary_fenced=True,
+                        target_replay_verified=True)
     actual = assert_guard()
     _need(type(actual) is dict and actual.keys() == expected.keys()
           and all(type(actual[key]) is type(value) and actual[key] == value for key, value in expected.items()),
@@ -371,7 +387,7 @@ def _created(pins, project, layouts, images, previous=None):
     return owned
 
 
-def _preflight(pins, stage, *, prepared=False):
+def _preflight_environment(pins, stage, *, prepared=False):
     _directory(stage, 0)
     _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_runtime_boot_changed")
     identity = json.loads(_read(INSTALLATION, 0, {0o400, 0o600}))
@@ -398,7 +414,14 @@ def _preflight(pins, stage, *, prepared=False):
           "guest_runtime_engine_socket_mismatch")
     engine_id = _docker("info", "--format", "{{.ID}}").decode().strip()
     _need(_digest(engine_id.encode()) == pins.engine_id_sha256, "guest_runtime_engine_changed")
-    inputs = _inputs(pins, renderer, spec, haproxy, review["runtime_ownership_file"], prepared=prepared)
+    return renderer, spec, compose, images, engine_id, haproxy, review["runtime_ownership_file"]
+
+
+def _preflight(pins, stage, *, prepared=False):
+    renderer, spec, compose, images, engine_id, haproxy, ownership = _preflight_environment(
+        pins, stage, prepared=prepared,
+    )
+    inputs = _inputs(pins, renderer, spec, haproxy, ownership, prepared=prepared)
     return renderer, spec, compose, images, engine_id, inputs
 
 
@@ -417,15 +440,20 @@ def preflight_runtime(pins, stage):
 
 
 def _runtime_identity(pins):
-    return {"node": pins.node, "installation_id": pins.installation_id, "attempt_id": pins.attempt_id,
-            "cluster": pins.cluster, "system_id_sha256": _digest(pins.system_id.encode()),
-            "source_commit": pins.release["source_commit"], "release_id": pins.release["release_id"],
-            "source_files_sha256": pins.release["source_files_sha256"], "plan_sha256": pins.plan_sha256,
-            "manifest_sha256": pins.manifest_sha256, "frozen_transfer_sha256": pins.frozen_transfer_sha256,
-            "restore_receipt_sha256": pins.restore_receipt_sha256, "boot_sha256": pins.boot_sha256,
-            "engine_id_sha256": pins.engine_id_sha256, "protected_inventory_sha256": pins.protected_inventory_sha256,
-            "renderer_sha256": pins.renderer_sha256, "spec_sha256": pins.spec_sha256,
-            "inputs_sha256": pins.inputs_sha256, "broker_instance": pins.broker_instance}
+    identity = {
+        "node": pins.node, "installation_id": pins.installation_id, "attempt_id": pins.attempt_id,
+        "cluster": pins.cluster, "system_id_sha256": _digest(pins.system_id.encode()),
+        "source_commit": pins.release["source_commit"], "release_id": pins.release["release_id"],
+        "source_files_sha256": pins.release["source_files_sha256"], "plan_sha256": pins.plan_sha256,
+        "manifest_sha256": pins.manifest_sha256, "frozen_transfer_sha256": pins.frozen_transfer_sha256,
+        "restore_receipt_sha256": pins.restore_receipt_sha256, "boot_sha256": pins.boot_sha256,
+        "engine_id_sha256": pins.engine_id_sha256, "protected_inventory_sha256": pins.protected_inventory_sha256,
+        "renderer_sha256": pins.renderer_sha256, "spec_sha256": pins.spec_sha256,
+        "inputs_sha256": pins.inputs_sha256, "broker_instance": pins.broker_instance,
+    }
+    if pins.generation > 1:
+        identity.update(primary_node=pins.primary_node, generation=pins.generation)
+    return identity
 
 
 def _runtime_intent(pins):
@@ -488,6 +516,448 @@ def _inspect_prepared(pins, stage, intent, prepared):
     return _digest(receipt)
 
 
+def _assert_initial_standby_closed(pins, postgres, error):
+    standby = _pg(postgres, INITIAL_STANDBY_CLOSED)
+    expected = ["ha_B", pins.system_id, True, pins.cluster, 1, "A", "B", 1, 1, False, False, True]
+    _need(type(standby) is list and len(standby) == len(expected) + 1
+          and all(type(actual) is type(wanted) and actual == wanted
+                  for actual, wanted in zip(standby[:-1], expected, strict=True))
+          and _lsn(standby[-1]) > 0, error)
+
+
+def _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error):
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == "B" and pins.primary_node == "A" and pins.generation == 1
+          and _match(SHA, runtime_receipt_sha256) and callable(assert_no_activation)
+          and pins.release["source_commit"] == postgres.source_commit
+          and all(getattr(pins, field) == getattr(postgres, field) for field in (
+              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "cluster",
+              "system_id", "postgres_id", "retained_postgres_id",
+          )) and postgres.attempt_id == (pins.attempt_id if pins.retained_postgres_id else None), error)
+
+
+def observe_initial_standby_retirement(pins, postgres, stage, *, runtime_receipt_sha256, assert_no_activation):
+    """Observe a retirement plan while the caller holds the guest mutation lock."""
+    error = "guest_initial_standby_retirement_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    stage = Path(stage)
+    prepared = stage / "runtime-prepared.json"
+    try:
+        assert_no_activation()
+        raw = _read(prepared, 0, {0o600})
+        _need(_digest(raw) == _inspect_prepared(pins, stage, stage / "runtime-intent.json", prepared)
+              == runtime_receipt_sha256, error)
+        receipt = json.loads(raw)
+        roles = SERVICES | {"ha-broker"}
+        _need(set(receipt["containers"]) == roles and receipt["status"] == "PREPARED"
+              and receipt["applications_started"] is False and receipt["writer_authority_issued"] is False, error)
+        objects = _inventory()
+        active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
+        owned = {}
+        for role, pins_for_role in receipt["containers"].items():
+            identifier = pins_for_role["container_id"]
+            item = objects[identifier]
+            state = item["State"]
+            labels = item["Config"]["Labels"]
+            _need(_match(SHA, identifier) and identifier not in owned and item["Id"] == identifier
+                  and item["Image"] == pins_for_role["image_id"] and _service(item) == role
+                  and labels.get(ATTEMPT_LABEL) == pins.attempt_id and state["Status"] == "created"
+                  and state["Running"] is False and state["Pid"] == 0 and item["RestartCount"] == 0
+                  and state["StartedAt"] == state["FinishedAt"] == "0001-01-01T00:00:00Z"
+                  and state["ExitCode"] == 0
+                  and all(state[key] is False for key in ("Paused", "Restarting", "Dead", "OOMKilled"))
+                  and item["HostConfig"]["RestartPolicy"]["Name"] == "no", error)
+            owned[identifier] = {"role": role, "inspect_sha256": inventory_sha256({identifier: item})}
+        protected = {key: value for key, value in objects.items() if key not in owned}
+        _need(not any(_service(item) in roles for item in protected.values())
+              and inventory_sha256(protected) == pins.protected_inventory_sha256, error)
+        _assert_initial_standby_closed(pins, postgres, error)
+        assert_no_activation()
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+        return {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                "runtime_receipt_sha256": runtime_receipt_sha256, "owned": owned,
+                "protected_inventory_sha256": pins.protected_inventory_sha256}
+    except (OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
+        raise TransitionBlocked(error) from None
+
+
+def retire_initial_standby_containers(pins, postgres, stage, *, runtime_receipt_sha256, plan_sha256,
+                                      assert_no_activation):
+    """Remove only the approved, never-started B app containers under the guest mutation lock."""
+    error = "guest_initial_standby_retirement_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256), error)
+    stage = Path(stage)
+    _directory(stage, 0)
+    journal = stage / "initial-standby-retirement"
+    intent = journal / "plan.json"
+    roles = SERVICES | {"ha-broker"}
+    if not os.path.lexists(intent):
+        if os.path.lexists(journal):
+            _directory(journal, 0)
+            _need(not any(journal.iterdir()), error)
+        plan = observe_initial_standby_retirement(
+            pins, postgres, stage, runtime_receipt_sha256=runtime_receipt_sha256,
+            assert_no_activation=assert_no_activation,
+        )
+        raw = _json_bytes(plan)
+        _need(_digest(raw) == plan_sha256, error)
+        if not os.path.lexists(journal):
+            journal.mkdir(mode=0o700)
+            _fsync_directory(stage)
+        _write(intent, raw, 0o400)
+    raw = _read(intent, 0, {0o400})
+    _need(_digest(raw) == plan_sha256, error)
+    plan = json.loads(raw)
+    owned = plan["owned"]
+    _need(plan == {"node": "B", "attempt_id": pins.attempt_id, "installation_id": pins.installation_id,
+                   "protected_inventory_sha256": pins.protected_inventory_sha256,
+                   "runtime_receipt_sha256": runtime_receipt_sha256, "owned": owned}
+          and isinstance(owned, dict) and len(owned) == len(roles)
+          and {entry["role"] for entry in owned.values()} == roles
+          and all(_match(SHA, key) and set(entry) == {"role", "inspect_sha256"}
+                  and _match(SHA, entry["inspect_sha256"]) for key, entry in owned.items()), error)
+
+    def inventory():
+        assert_no_activation()
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+        _assert_initial_standby_closed(pins, postgres, error)
+        objects = _inventory()
+        active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
+        protected = {key: value for key, value in objects.items() if key not in owned}
+        _need(not any(_service(item) in roles for item in protected.values())
+              and inventory_sha256(protected) == pins.protected_inventory_sha256, error)
+        return objects
+
+    for identifier, entry in sorted(owned.items()):
+        objects = inventory()
+        sent = journal / (identifier + ".remove.json")
+        marker = _json_bytes({"plan_sha256": plan_sha256, "container_id": identifier})
+        if os.path.lexists(sent):
+            # A durable dispatch marker with a still-present container is
+            # ambiguous. Require separate settlement evidence before retry.
+            _need(_read(sent, 0, {0o400}) == marker and identifier not in objects,
+                  "guest_initial_standby_removal_unsettled")
+            continue
+        _need(identifier in objects and inventory_sha256({identifier: objects[identifier]}) == entry["inspect_sha256"],
+              error)
+        _write(sent, marker, 0o400)
+        # The daemon must reject a running container. An unknown response is
+        # accepted only through absence readback, never by replaying removal.
+        try:
+            removed = _docker("rm", identifier).decode("ascii").strip()
+        except (TransitionBlocked, OSError, subprocess.TimeoutExpired):
+            removed = None
+        _need(removed in (None, identifier) and identifier not in inventory(),
+              "guest_initial_standby_removal_unsettled")
+    return {"status": "CONTAINERS_RETIRED", "plan_sha256": plan_sha256, "count": len(owned)}
+
+
+def _publish_standby_config(path, raw, *, uid, gid, assert_current):
+    fd, name = tempfile.mkstemp(prefix=".standby-config-", dir=path.parent)
+    pending = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fchown(stream.fileno(), uid, gid)
+            os.fchmod(stream.fileno(), 0o400)
+            os.fsync(stream.fileno())
+        _need(_read(pending, uid, {0o400}) == raw and pending.lstat().st_gid == gid,
+              "guest_initial_standby_config_unconfirmed")
+        assert_current()
+        os.replace(pending, path)
+        _fsync_directory(path.parent)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _initial_retired_guard(pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error):
+    journal = Path(stage) / "initial-standby-retirement"
+    raw = _read(journal / "plan.json", 0, {0o400})
+    _need(_digest(raw) == plan_sha256, error)
+    plan = json.loads(raw)
+    owned = plan["owned"]
+    _need(plan["node"] == "B" and plan["attempt_id"] == pins.attempt_id
+          and plan["installation_id"] == pins.installation_id
+          and plan["runtime_receipt_sha256"] == runtime_receipt_sha256
+          and plan["protected_inventory_sha256"] == pins.protected_inventory_sha256
+          and len(owned) == len(SERVICES) + 1
+          and {entry["role"] for entry in owned.values()} == SERVICES | {"ha-broker"}, error)
+    for identifier in owned:
+        _need(_match(SHA, identifier)
+              and _read(journal / (identifier + ".remove.json"), 0, {0o400})
+              == _json_bytes({"plan_sha256": plan_sha256, "container_id": identifier}), error)
+
+    def guard():
+        assert_no_activation()
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+        _assert_initial_standby_closed(pins, postgres, error)
+        objects = _inventory()
+        active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
+        _need(not any(_service(item) in SERVICES | {"ha-broker"} for item in objects.values())
+              and inventory_sha256(objects) == pins.protected_inventory_sha256, error)
+
+    return journal, guard
+
+
+def rebind_initial_standby_application_configs(pins, postgres, stage, *, runtime_receipt_sha256,
+                                                plan_sha256, assert_no_activation):
+    """Advance only the retired B apps to generation 2 without changing their credentials."""
+    error = "guest_initial_standby_config_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256), error)
+    journal, guard = _initial_retired_guard(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
+    )
+    guard()
+    cert = _cert_digest(_read(ROOT / "broker" / "broker.crt", 0, {0o440, 0o444}))
+    changes = {}
+    for service in sorted(SERVICES):
+        path = ROOT / "apps" / service / "config.json"
+        info = path.lstat()
+        current = _read(path, APP_UID, {0o400})
+        passfile = _read(path.with_name("postgres.pgpass"), APP_UID, {0o400})
+        password = _password(passfile, service.replace("-", "_") + "_b")
+        common = dict(cluster=pins.cluster, release=pins.release, plan_sha256=pins.plan_sha256,
+                      node="B", installation_id=pins.installation_id, system_id=pins.system_id,
+                      service=service, password=password, broker_server_sha256=cert)
+        old, old_passfile = config.application_config(**common, primary_node="A", generation=1)
+        new, new_passfile = config.application_config(**common, primary_node="B", generation=2)
+        _need(passfile == old_passfile == new_passfile, error)
+        target = _json_bytes(new).rstrip(b"\n")
+        backup = journal / (service + ".generation-1-config.json")
+        if os.path.lexists(backup):
+            prior = _read(backup, 0, {0o400})
+            _need(json.loads(prior) == old and current in (prior, target), error)
+        else:
+            _need(json.loads(current) == old, error)
+            prior = current
+        changes[service] = (path, info, current, target, backup, prior)
+
+    digests = {}
+    for service, (path, info, current, target, backup, prior) in changes.items():
+        guard()
+        _need(stamp(path.lstat()) == stamp(info) and _read(path, APP_UID, {0o400}) == current, error)
+        if not os.path.lexists(backup):
+            def assert_backup_absent():
+                _need(not os.path.lexists(backup), error)
+
+            _publish_standby_config(backup, prior, uid=0, gid=journal.lstat().st_gid,
+                                    assert_current=assert_backup_absent)
+        _need(_read(backup, 0, {0o400}) == prior, error)
+        if current != target:
+            def assert_config_current():
+                _need(stamp(path.lstat()) == stamp(info) and path.lstat().st_gid == info.st_gid, error)
+
+            _publish_standby_config(path, target, uid=info.st_uid, gid=info.st_gid,
+                                    assert_current=assert_config_current)
+        _need(_read(path, APP_UID, {0o400}) == target, error)
+        digests[service] = _digest(target)
+    guard()
+    return {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_sha256, "node": "B", "generation": 2,
+            "config_sha256": digests}
+
+
+def clean_initial_standby_runtime_paths(pins, postgres, stage, *, runtime_receipt_sha256,
+                                        plan_sha256, rebind_receipt, assert_no_activation):
+    """Archive the original broker file and remove only the approved empty ingress directories."""
+    error = "guest_initial_standby_paths_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(_match(SHA, plan_sha256) and type(rebind_receipt) is dict, error)
+    configs = rebind_receipt.get("config_sha256")
+    _need(type(configs) is dict and set(configs) == SERVICES
+          and all(_match(SHA, pin) for pin in configs.values())
+          and rebind_receipt == {"status": "APP_CONFIGS_REBOUND", "plan_sha256": plan_sha256, "node": "B",
+                                 "generation": 2, "config_sha256": configs}, error)
+    journal, guard = _initial_retired_guard(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
+    )
+    guard()
+    for service, pin in configs.items():
+        raw_config = _read(ROOT / "apps" / service / "config.json", APP_UID, {0o400})
+        app = json.loads(raw_config)
+        _need(_digest(raw_config) == pin and type(app.get("generation")) is int
+              and (app.get("node"), app.get("service"), app.get("generation"), app.get("primary_node"))
+              == ("B", service, 2, "B") and app["primary"]["host"] == "ha-b"
+              and app["partner"]["host"] == "ha-a", error)
+
+    runtime_raw = _read(Path(stage) / "runtime-prepared.json", 0, {0o600})
+    _need(_digest(runtime_raw) == runtime_receipt_sha256, error)
+    broker_pin = json.loads(runtime_raw)["broker_sha256"]
+    _need(_match(SHA, broker_pin), error)
+    broker = ROOT / "broker" / "config.json"
+    backup = journal / "generation-1-broker-config.json"
+    manifest = journal / "runtime-paths-intent.json"
+    parent = RUN / "ingress"
+    _directory(parent, 0, private=False)
+    parent_info = parent.lstat()
+
+    def assert_absent(path):
+        _need(not os.path.lexists(path), error)
+
+    with ExitStack() as stack:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, fd)
+        _need(os.path.samestat(os.fstat(fd), parent_info), error)
+        expected = {"plan_sha256": plan_sha256, "broker_sha256": broker_pin,
+                    "parent": [parent_info.st_dev, parent_info.st_ino]}
+        if os.path.lexists(manifest):
+            intent = json.loads(_read(manifest, 0, {0o400}))
+            dirs = intent["dirs"]
+            _need(intent == expected | {"dirs": dirs} and set(dirs) == SERVICES, error)
+        else:
+            _need(set(os.listdir(fd)) == SERVICES and os.path.lexists(broker), error)
+            dirs = {}
+            for service in sorted(SERVICES):
+                _assert_ingress_dir(parent / service)
+                info = os.stat(service, dir_fd=fd, follow_symlinks=False)
+                dirs[service] = [info.st_dev, info.st_ino]
+            _publish_standby_config(manifest, _json_bytes(expected | {"dirs": dirs}), uid=0,
+                                    gid=journal.lstat().st_gid, assert_current=lambda: assert_absent(manifest))
+
+        if os.path.lexists(broker):
+            guard()
+            before = broker.lstat()
+            broker_raw = _read(broker, 0, {0o444})
+            _need(_digest(broker_raw) == broker_pin, error)
+            if not os.path.lexists(backup):
+                _publish_standby_config(backup, broker_raw, uid=0, gid=journal.lstat().st_gid,
+                                        assert_current=lambda: assert_absent(backup))
+            _need(_read(backup, 0, {0o400}) == broker_raw and stamp(broker.lstat()) == stamp(before), error)
+            broker.unlink()
+            _fsync_directory(broker.parent)
+        _need(_digest(_read(backup, 0, {0o400})) == broker_pin, error)
+        for service in sorted(dirs):
+            guard()
+            _need(os.path.samestat(parent.lstat(), parent_info) and set(os.listdir(fd)) <= SERVICES, error)
+            if service in os.listdir(fd):
+                _assert_ingress_dir(parent / service)
+                info = os.stat(service, dir_fd=fd, follow_symlinks=False)
+                _need([info.st_dev, info.st_ino] == dirs[service], error)
+                os.rmdir(service, dir_fd=fd)
+                os.fsync(fd)
+        _need(os.path.samestat(parent.lstat(), parent_info) and not os.listdir(fd)
+              and not os.path.lexists(broker), error)
+    guard()
+    return {"status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_sha256,
+            "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES)}
+
+
+def _initial_generation_cleanup(pins, postgres, stage, runtime_receipt_sha256, plan_sha256, cleanup_receipt,
+                                assert_no_activation, error):
+    journal, guard = _initial_retired_guard(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, assert_no_activation, error,
+    )
+    guard()
+    prepared = _read(stage / "runtime-prepared.json", 0, {0o600})
+    _need(_digest(prepared) == runtime_receipt_sha256, error)
+    broker_pin = json.loads(prepared)["broker_sha256"]
+    _need(_match(SHA, broker_pin) and cleanup_receipt == {
+        "status": "RUNTIME_PATHS_CLEARED", "node": "B", "plan_sha256": plan_sha256,
+        "broker_backup_sha256": broker_pin, "ingress_count": len(SERVICES),
+    } and _digest(_read(journal / "generation-1-broker-config.json", 0, {0o400})) == broker_pin, error)
+    return journal, guard
+
+
+def plan_initial_standby_generation(pins, postgres, stage, binding, *, runtime_receipt_sha256,
+                                    plan_sha256, cleanup_receipt, assert_no_activation):
+    """Derive B/2 pins for a fresh attempt from validated installed inputs, without writing them."""
+    error = "guest_initial_standby_generation_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(type(binding) is Binding and _match(SHA, plan_sha256), error)
+    binding.fields()
+    stage = Path(stage)
+    _need(stage.name == pins.attempt_id and binding.attempt_id != pins.attempt_id
+          and binding.boot("B") == pins.boot_sha256
+          and not os.path.lexists(stage.parent / binding.attempt_id), error)
+    journal, guard = _initial_generation_cleanup(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, cleanup_receipt, assert_no_activation, error,
+    )
+    ingress = RUN / "ingress"
+    _directory(ingress, 0, private=False)
+    _need(not any(ingress.iterdir()), error)
+    candidate = replace(pins, attempt_id=binding.attempt_id, primary_node="B", generation=2)
+    candidate.validate()
+    renderer, spec, _, _, _, haproxy, ownership = _preflight_environment(candidate, stage)
+    digests, _ = _collect_inputs(candidate, renderer, spec, haproxy, ownership)
+    previous_configs = {
+        f"apps/{service}/config.json": _digest(_read(journal / (service + ".generation-1-config.json"), 0, {0o400}))
+        for service in SERVICES
+    }
+    _need(_digest(_json_bytes(digests | previous_configs)) == pins.inputs_sha256, error)
+    candidate = replace(candidate, inputs_sha256=_digest(_json_bytes(digests)))
+    candidate.validate()
+    target_db = replace(postgres, attempt_id=binding.attempt_id)
+    target_db.validate()
+    guard()
+    _need(not any(ingress.iterdir()) and not os.path.lexists(stage.parent / binding.attempt_id), error)
+    return candidate, target_db
+
+
+def initial_standby_generation_record(candidate, postgres, binding):
+    return _json_bytes({"schema_version": 1, "binding": binding.fields(),
+                        "runtime": asdict(candidate), "postgres": asdict(postgres)})
+
+
+def publish_initial_standby_generation(pins, postgres, stage, binding, *, runtime_receipt_sha256,
+                                       plan_sha256, cleanup_receipt, generation_record_sha256,
+                                       assert_no_activation):
+    """Publish an approved B/2 guest spec and its pins under the guest mutation lock."""
+    error = "guest_initial_standby_generation_publication_unconfirmed"
+    _initial_retirement_scope(pins, postgres, runtime_receipt_sha256, assert_no_activation, error)
+    _need(type(binding) is Binding and _match(SHA, plan_sha256) and _match(SHA, generation_record_sha256), error)
+    binding.fields()
+    stage = Path(stage)
+    _directory(stage, 0)
+    _need(stage.name == pins.attempt_id and binding.attempt_id != pins.attempt_id
+          and binding.boot("B") == pins.boot_sha256, error)
+    destination = stage.parent / binding.attempt_id
+    spec = _read(stage / "guest-spec.json", 0, {0o400, 0o600})
+    _need(_digest(spec) == pins.spec_sha256, error)
+    specification_name = "guest-spec.json"
+    record_name = "generation-preflight.json"
+
+    if not os.path.lexists(destination):
+        options = dict(runtime_receipt_sha256=runtime_receipt_sha256, plan_sha256=plan_sha256,
+                       cleanup_receipt=cleanup_receipt, assert_no_activation=assert_no_activation)
+        candidate, db = plan_initial_standby_generation(pins, postgres, stage, binding, **options)
+        record = initial_standby_generation_record(candidate, db, binding)
+        _need(_digest(record) == generation_record_sha256, error)
+        with tempfile.TemporaryDirectory(prefix=".standby-generation-", dir=stage.parent) as directory:
+            pending = Path(directory)
+            _write(pending / specification_name, spec, 0o400)
+            _write(pending / record_name, record, 0o400)
+            _need(_read(pending / specification_name, 0, {0o400}) == spec
+                  and _read(pending / record_name, 0, {0o400}) == record, error)
+            assert_no_activation()
+            _assert_initial_standby_closed(pins, postgres, error)
+            _need(not os.path.lexists(destination) and _digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+            os.rename(pending, destination)
+            _fsync_directory(stage.parent)
+
+    _initial_generation_cleanup(
+        pins, postgres, stage, runtime_receipt_sha256, plan_sha256, cleanup_receipt, assert_no_activation, error,
+    )
+    assert_no_activation()
+    _directory(destination, 0)
+    _need(set(path.name for path in destination.iterdir()) == {specification_name, record_name}
+          and _read(destination / specification_name, 0, {0o400}) == spec, error)
+    record = _read(destination / record_name, 0, {0o400})
+    _need(_digest(record) == generation_record_sha256, error)
+    inputs_sha256 = json.loads(record)["runtime"]["inputs_sha256"]
+    candidate = replace(pins, attempt_id=binding.attempt_id, primary_node="B", generation=2, inputs_sha256=inputs_sha256)
+    candidate.validate()
+    target_db = replace(postgres, attempt_id=binding.attempt_id)
+    target_db.validate()
+    _need(record == initial_standby_generation_record(candidate, target_db, binding), error)
+    _assert_initial_standby_closed(pins, postgres, error)
+    _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    return {"status": "GENERATION_INPUTS_PUBLISHED", "node": "B", "attempt_id": binding.attempt_id,
+            "record_sha256": generation_record_sha256}
+
+
 def observe_runtime_outcome(pins, stage, *, assert_settled):
     """Inspect stopped preparation while the caller excludes mutation through use of the result.
 
@@ -516,6 +986,72 @@ def observe_runtime_outcome(pins, stage, *, assert_settled):
         return {**outcome, "status": "CLEAN", "settlement_sha256": settled}
     except (TransitionBlocked, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         return outcome
+
+
+INITIAL_STANDBY_CLOSED = """
+SELECT json_build_array(current_setting('cluster_name'), system_identifier::text, pg_is_in_recovery(),
+    c.cluster, c.epoch, c.primary_node, c.partner, c.timeline,
+    (SELECT received_tli FROM pg_stat_wal_receiver WHERE status='streaming'
+        AND sender_host='ha-a' AND sender_port=5432 AND latest_end_lsn IS NOT NULL),
+    c.writes_open, c.history_safe,
+    c.expires_at <= clock_timestamp(), pg_last_wal_replay_lsn()::text)
+FROM pg_control_system(), ha.control c WHERE c.singleton=1
+"""
+
+
+GENERATION_CLOSED = """
+SELECT json_build_array(current_setting('cluster_name'), system_identifier::text, pg_is_in_recovery(),
+    c.cluster, c.epoch, c.primary_node, c.partner, c.timeline,
+    CASE WHEN NOT pg_is_in_recovery()
+         THEN ('x'||substring(pg_walfile_name(pg_current_wal_insert_lsn()),1,8))::bit(32)::integer END,
+    c.writes_open, c.history_safe,
+    COALESCE(c.expires_at <= clock_timestamp(), false), pg_current_wal_flush_lsn()::text)
+FROM pg_control_system(), ha.control c WHERE c.singleton=1
+"""
+
+
+def prepare_generation_runtime(pins, postgres, stage, generation, replay_floor, *, assert_windows_rejoin):
+    """Prepare stopped containers only while the exact promoted primary remains closed."""
+    pins.validate()
+    postgres.validate()
+    generation.validate()
+    _need(os.geteuid() == 0 and callable(assert_windows_rejoin)
+          and generation.epoch > 1 and pins.node == pins.primary_node == generation.primary
+          and pins.generation == generation.epoch and type(replay_floor) is int and 0 < replay_floor < 2**64
+          and pins.release["source_commit"] == postgres.source_commit
+          and all(getattr(pins, field) == getattr(postgres, field) for field in (
+              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256",
+              "system_id", "cluster", "postgres_id", "retained_postgres_id", "attempt_id",
+          )), "guest_runtime_generation_unbound")
+    expected = ["ha_" + pins.node, pins.system_id, False, pins.cluster, generation.epoch,
+                generation.primary, generation.partner, generation.timeline, generation.timeline, False, False, True]
+    facts = {key: getattr(pins, key) for key in (
+        "node", "installation_id", "attempt_id", "plan_sha256", "manifest_sha256",
+        "frozen_transfer_sha256", "restore_receipt_sha256", "primary_node", "generation",
+    )}
+    boundary = 0
+
+    def guard():
+        nonlocal boundary
+        boundary += 1
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_runtime_boot_changed")
+        identity = json.loads(_read(INSTALLATION, 0, {0o400, 0o600}))
+        _need(identity["installation_id"] == pins.installation_id and identity["node"] == pins.node
+              and identity["source_commit"] == postgres.source_commit, "guest_runtime_installation_changed")
+        _need(not os.path.lexists(RUN / "ingress" / "portal-web" / "http.sock"),
+              "guest_runtime_frozen_ingress_still_present")
+        proof = assert_windows_rejoin(secrets.token_hex(32), f"prepare_generation:{boundary}")
+        _need(_match(SHA, proof), "guest_runtime_generation_unbound")
+        state = _pg(postgres, GENERATION_CLOSED)
+        _need(type(state) is list and len(state) == len(expected) + 1
+              and all(type(actual) is type(wanted) and actual == wanted
+                      for actual, wanted in zip(state[:-1], expected, strict=True))
+              and _lsn(state[-1]) >= replay_floor, "guest_runtime_generation_not_closed")
+        return facts | {"legacy_writers_closed": True, "target_writes_closed": True,
+                        "frozen_transfer_closed": True, "previous_primary_fenced": True,
+                        "target_replay_verified": True}
+
+    return prepare_runtime(pins, stage, assert_guard=guard)
 
 
 def prepare_runtime(pins, stage, *, assert_guard):

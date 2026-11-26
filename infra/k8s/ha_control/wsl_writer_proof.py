@@ -17,6 +17,7 @@ from ha_runtime import seven_capture
 
 from .caddy_runtime import COMPOSE as CADDY_COMPOSE, DOCKER as CADDY_DOCKER, PLUGIN_DIRS
 from .caddy_runtime import caddy_execution_authorized
+from .transition_execution import assert_published_runtime, authorized as transition_execution_authorized, config_override
 from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
 from .native_wsl_launcher import checked
@@ -328,7 +329,7 @@ def observe_closed(baseline, challenge, deadline, *, assert_external_closed, run
                                     'workloads_closed': True})).hexdigest()
 
 
-def _caddy_config_read(argv):
+def _caddy_config_read(argv, ingress_execution=None):
     if not argv or argv[0] not in CADDY_COMPOSE_EXECUTABLES:
         return False
     prefix_end = len(CADDY_COMPOSE_GLOBALS) + 1
@@ -351,7 +352,12 @@ def _caddy_config_read(argv):
     if env_file != CADDY_ROOT + b'/.env':
         return False
     base = tuple(files)
-    if files and files[-1].endswith(b'/caddy/caddy-ha-compose.json'):
+    if files and files[-1].endswith(b'/main/caddy-ha-compose.json'):
+        if (arguments != [b'config', b'--format', b'json']
+                or files[-1] != config_override(ingress_execution, remaining[0])):
+            return False
+        base = tuple(files[:-1])
+    elif files and files[-1].endswith(b'/caddy/caddy-ha-compose.json'):
         if (arguments != [b'config', b'--format', b'json']
                 or not re.fullmatch(rb'/(?:[a-zA-Z0-9_.-]+/)+caddy/caddy-ha-compose\.json', files[-1])
                 or any(part in {b'.', b'..'} for part in files[-1].split(b'/'))):
@@ -360,13 +366,13 @@ def _caddy_config_read(argv):
     return base in (CADDY_BASE_FILES[:2], CADDY_BASE_FILES)
 
 
-def _recovery_command_reason(argv, executable=None):
+def _recovery_command_reason(argv, executable=None, ingress_execution=None):
     for index, arg in enumerate(argv):
         if b'windows-bootstrap.sh' in arg or b'deploy-n100' in arg:
             if index and argv[index - 1] in {b'-c', b'-lc'}:
                 return 'legacy_recovery_linux_embedded_command'
             return 'legacy_recovery_linux_script_command'
-    if executable is not None and executable == argv[0] and _caddy_config_read(argv):
+    if executable is not None and executable == argv[0] and _caddy_config_read(argv, ingress_execution):
         return None
     if any(RECOVERY_TOOL.search(arg) for arg in argv) and any(RECOVERY_ACTION.fullmatch(arg) for arg in argv):
         return 'legacy_recovery_linux_compose_command' if b'compose' in argv else 'legacy_recovery_linux_tool_command'
@@ -394,21 +400,24 @@ class RecoveryToolObserved(TransitionBlocked):
         self.diagnostic = f'recovery_tool_{family}_{action.decode("ascii")}{suffix}'
 
 
-def _recovery_settled(challenge, deadline, *, runtime=None, plan=None, attempt=None, coordinator=None):
+def _recovery_settled(challenge, deadline, *, runtime=None, plan=None, attempt=None, coordinator=None,
+                      ingress_execution=None):
     for entry in Path('/proc').iterdir():
         _deadline(deadline)
         if not entry.name.isdecimal() or int(entry.name) == os.getpid():
             continue
         try:
             argv = (entry / 'cmdline').read_bytes().removesuffix(b'\0').split(b'\0')
-            executable = os.readlink(os.fsencode(entry / 'exe')) if _caddy_config_read(argv) else None
+            executable = os.readlink(os.fsencode(entry / 'exe')) if _caddy_config_read(argv, ingress_execution) else None
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
             raise TransitionBlocked('legacy_recovery_linux_process_unreadable') from None
-        reason = _recovery_command_reason(argv, executable)
-        if reason and not (runtime is not None and reason == 'legacy_recovery_linux_compose_command'
-                           and caddy_execution_authorized(entry, argv, runtime, plan, attempt, coordinator)):
+        reason = _recovery_command_reason(argv, executable, ingress_execution)
+        if reason and not (
+            runtime is not None and reason == 'legacy_recovery_linux_compose_command'
+            and caddy_execution_authorized(entry, argv, runtime, plan, attempt, coordinator)
+        ) and not transition_execution_authorized(entry, argv, ingress_execution):
             if reason == 'legacy_recovery_linux_tool_command':
                 raise RecoveryToolObserved(entry, argv)
             raise TransitionBlocked(reason)
@@ -428,8 +437,10 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
     runtime = seven_capture.parse(reader.read(descriptor))
     _need(type(runtime) is dict and runtime.get('plan_sha256') == plan and runtime.get('attempt_id') == attempt,
           'legacy_writer_proof_scope_invalid')
+    if 'ingress_execution' in runtime:
+        assert_published_runtime(reader, path, runtime, plan, attempt)
     settled = partial(_recovery_settled, runtime=path, plan=plan, attempt=attempt,
-                      coordinator=runtime.get('coordinator'))
+                      coordinator=runtime.get('coordinator'), ingress_execution=runtime.get('ingress_execution'))
     proof = observe_closed(runtime['writer_baseline'], challenge, deadline,
                            assert_external_closed=settled, runner=runner)
     after = settled(challenge, deadline)

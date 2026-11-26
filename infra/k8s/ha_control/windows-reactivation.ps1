@@ -99,7 +99,9 @@ function Assert-HaReactivationHost($Plan, $Progress = $null) {
     if ($shutdown.Count -ne 0) { throw 'legacy_reactivation_shutdown_unconfirmed' }
 }
 
-function Read-HaReactivationTaskRunnerSnapshot($Plan, [switch]$ClosedObservation, $Progress = $null) {
+function Read-HaReactivationTaskRunnerSnapshot($Plan, [switch]$ClosedObservation, $Progress = $null,
+                                              [switch]$WslOffline) {
+    if ($WslOffline -and -not $ClosedObservation) { throw 'legacy_reactivation_observation_scope' }
     $tasks = @($Plan.tasks)
     if ($tasks.Count -ne 3 -or @($tasks.name | Sort-Object -Unique).Count -ne $tasks.Count -or
         @($tasks | Where-Object { $_.role -ceq 'supervisor' }).Count -ne 1 -or
@@ -119,7 +121,9 @@ function Read-HaReactivationTaskRunnerSnapshot($Plan, [switch]$ClosedObservation
         foreach ($pin in $tasks) { $observed[$pin.role] = Read-HaReactivationTask $pin $folder }
         if ($ClosedObservation) {
             Assert-HaReactivationTaskIdle (@($tasks | Where-Object { $_.role -ceq 'supervisor' })[0]) $folder
-            Assert-HaTaskInstance (@($tasks | Where-Object { $_.role -ceq 'wsl-anchor' })[0]) $folder
+            $anchor = @($tasks | Where-Object { $_.role -ceq 'wsl-anchor' })[0]
+            if ($WslOffline) { Assert-HaReactivationTaskIdle $anchor $folder }
+            else { Assert-HaTaskInstance $anchor $folder }
         }
     } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
     if ($null -ne $Progress) { $Progress.step = 'windows_runner' }
@@ -166,14 +170,31 @@ function Assert-HaTaskInstance($Pin, $Folder = $null) {
     }
 }
 
-function Assert-HaReactivationInfrastructureClosed($Plan, $Progress = $null) {
-    $state = Read-HaReactivationTaskRunnerSnapshot $Plan -ClosedObservation -Progress $Progress
+function Assert-HaReactivationInfrastructureClosed($Plan, $Progress = $null, [switch]$WslOffline) {
+    $state = Read-HaReactivationTaskRunnerSnapshot $Plan -ClosedObservation -Progress $Progress -WslOffline:$WslOffline
+    $anchorStates = if ($WslOffline) { @('Disabled') } else { @('Disabled', 'Running') }
     if (@($state.tasks.Values | Where-Object { $_.Settings.Enabled }).Count -ne 0 -or
         $state.tasks.supervisor.State -ne 'Disabled' -or $state.tasks.emergency.State -ne 'Disabled' -or
-        $state.tasks['wsl-anchor'].State -notin @('Disabled', 'Running') -or
+        $state.tasks['wsl-anchor'].State -notin $anchorStates -or
         $state.runner.StartMode -ne 'Disabled' -or $state.runner.State -ne 'Stopped') {
         throw 'legacy_reactivation_not_closed'
     }
+}
+
+function Assert-HaWslWorkloadsAbsent {
+    # See all Windows sessions. Do not invoke wsl.exe to obtain ordinary process absence.
+    $filter = "Name = 'vmmemWSL' OR Name = 'wslhost.exe' OR Name = 'wslrelay.exe' OR Name = 'wsl.exe' OR Name = 'wslg.exe'"
+    $processes = @(Get-CimInstance Win32_Process -Property ProcessId -Filter $filter -OperationTimeoutSec 5 -ErrorAction Stop)
+    if ($processes.Count -ne 0) { throw 'legacy_reactivation_wsl_process_present' }
+}
+
+function Assert-HaWslOfflineReactivationClosed($Plan) {
+    # Caller must supply the independently pinned post-cutover plan for this Windows boot.
+    Assert-HaReactivationHost $Plan
+    Assert-HaWslWorkloadsAbsent
+    Assert-HaReactivationInfrastructureClosed $Plan -WslOffline
+    Assert-HaReactivationProcessesClosed
+    Assert-HaWslWorkloadsAbsent
 }
 
 function Assert-HaReactivationProcessesClosed {

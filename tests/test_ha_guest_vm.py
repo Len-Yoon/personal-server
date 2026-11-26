@@ -611,6 +611,19 @@ if((Get-GuestVmHash ([IO.File]::ReadAllBytes($journal))) -cne $JournalSha256){th
 +$bad=($good|ConvertTo-Json -Depth 6 -Compress)|ConvertFrom-Json;$bad.schema_version=2;$closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'implicit_legacy_profile_adoption'}
 +$good.node='B';$good.node_image.filename='node-B.vhdx';$good.peer_prepared_receipt_sha256='6'*64;$good.peer_source_commit='8'*40;$closed=$false;try{$null=Assert-GuestVmSpec $good}catch{$closed=$true};if(-not $closed){throw 'peer_profile_without_receipt'}
 +$good.peer_config_profile_receipt_sha256='7'*64;$null=Assert-GuestVmSpec $good
++$replacement=($good|ConvertTo-Json -Depth 6 -Compress)|ConvertFrom-Json
++$replacement|Add-Member -NotePropertyName replacement_topology -NotePropertyValue 'standalone-isolated-b-v1'
++foreach($field in @('peer_prepared_receipt_sha256','peer_config_profile_receipt_sha256','peer_source_commit')){$replacement.$field=''}
++$raw=[Text.Encoding]::UTF8.GetBytes(($replacement|ConvertTo-Json -Depth 6 -Compress))
++$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw
++$standalone=Read-GuestVmSpec
++if(-not (Test-GuestVmOwnSwitch $standalone) -or (Test-GuestVmOwnSwitch $good)){throw 'replacement_switch_ownership_wrong'}
++foreach($row in @(@('node','A'),@('optional_egress_nic',$true),@('peer_prepared_receipt_sha256',('6'*64)),@('replacement_topology','unknown'))){
++ $bad=($replacement|ConvertTo-Json -Depth 6 -Compress)|ConvertFrom-Json;$bad.($row[0])=$row[1]
++ $closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'unsafe_standalone_b_accepted'}
++}
++$replacement.config_profile.acceptance_scope='production';$closed=$false
++try{$null=Assert-GuestVmSpec $replacement}catch{$closed=$true};if(-not $closed){throw 'production_standalone_b_accepted'}
 +Get-GuestVmConfigProfileHash $good.config_profile
 +'''.replace('\n+','\n'),VM_MANAGED_SPEC=json.dumps(spec))
         expected=hashlib.sha256(json.dumps(profile,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -648,7 +661,7 @@ while($startBranch -and $startBranch -isnot [Management.Automation.Language.IfSt
 if(-not $startBranch.Extent.Text.StartsWith("if(`$Mode -ceq 'start')")){throw 'start_in_prepare'}
 $switches=@($ast.FindAll({param($a)$a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq 'New-VMSwitch'},$true));if($switches.Count -ne 1){throw 'multiple_switch_creators'}
 $branch=$switches[0].Parent;while($branch -and $branch -isnot [Management.Automation.Language.IfStatementAst]){$branch=$branch.Parent}
-if(-not $branch.Extent.Text.StartsWith("if(`$spec.node -ceq 'A')")){throw 'b_can_create_switch'}
+if(-not $branch.Extent.Text.StartsWith('if(Test-GuestVmOwnSwitch $spec)')){throw 'switch_ownership_gate_missing'}
 $peer=$ast.Find({param($a)$a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -ceq 'Get-GuestVmPeer'},$true)
 if(@($peer.FindAll({param($a)$a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -match '^(Set|New|Start|Stop|Grant|Remove|Add)-'},$true)).Count){throw 'peer_mutation'}
 $text=[IO.File]::ReadAllText($env:GUEST_VM_SOURCE)

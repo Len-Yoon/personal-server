@@ -1,0 +1,335 @@
+"""Bind the same-boot coordinator to the native stopped-host and app operations."""
+
+import hashlib
+import json
+import time
+
+from .controller import TransitionBlocked
+from .initial_postboot import saved_reboot, scope as postboot_scope
+from .initial_unpublished import derive_predecessor
+from .native_saved_reboot import WindowsSavedReboot
+from .native_saved_observers import WindowsSavedObservers
+from .native_saved_site_material import WindowsSavedSiteMaterial
+from .native_sameboot_successor import WindowsSamebootHost
+from .native_guest_ssh import GuestSshDispatcher
+from .native_stdio_bridge import GUEST_QUIESCE_SAMEBOOT_SUCCESSOR, RECOVERY_START_ORDER, VERSION, Request, _bytes as _wire_bytes
+from .sameboot_transition import ROLLBACK_RESUME_FIELD, SAVED_STAGES, _closed, _expects_reboot, _pin, _sameboot_recovery
+
+ERROR = 'sameboot_native_driver_unconfirmed'
+PRE_PUBLISH_CLOSED = {'quiesce_apps', 'replace_provider', 'restore_provider', 'carryover', 'fallback_carryover', 'stage_runtime',
+                      'connect_rollback_held', 'arm_host', 'publish'}
+
+
+def _need(condition):
+    if not condition:
+        raise TransitionBlocked(ERROR)
+
+
+def _decoded(request, receipts):
+    _need(type(request) is bytes and type(receipts) is bytes)
+    return json.loads(request), json.loads(receipts)
+
+
+def _reply(request, evidence, *, status='PASS'):
+    return {'issued_sha256': hashlib.sha256(request).hexdigest(), 'status': status, 'evidence': evidence}
+
+
+class NativeSamebootDriver:
+    """Coordinate native commands with signed site-specific preparation and readback.
+
+    Platform operations install the verified provider and Windows material and
+    obtain authenticated live receipts. Native start/arm must not be delegated
+    to these operations. The independent pair observer authenticates both
+    databases after either initial publication or a lost publication reply.
+    """
+
+    def __init__(self, *, release, platform, windows, successor_options, paired_publication, apps_factory,
+                 saved_boot=None):
+        self.release = release
+        self.platform = platform
+        self.windows = windows
+        self.successor_options = dict(successor_options)
+        self.paired_publication = paired_publication
+        self.apps_factory = apps_factory
+        _need(saved_boot is None or (type(saved_boot) is WindowsSavedReboot and saved_boot.pair is release.pair))
+        self.saved_boot = saved_boot
+
+    def guard(self, request, receipts, deadline, *, observe_only):
+        operation, chain = _decoded(request, receipts)
+        phase = operation['stage']
+        if phase == 'preflight' and operation['scope'].get('saved_reboot') is True:
+            _need(type(self.saved_boot) is WindowsSavedReboot
+                  and callable(getattr(self.platform, 'quiesce_operation', None))
+                  and callable(getattr(self.platform, 'saved_observers', None))
+                  and callable(getattr(self.platform, 'saved_material', None))
+                  and callable(getattr(self.platform, 'prepare_material', None))
+                  and callable(getattr(self.platform, 'successor_options', None)))
+            if operation['scope'].get(ROLLBACK_RESUME_FIELD) is True:
+                _need(all(callable(getattr(self.platform, name, None)) for name in
+                          ('verify_restored_provider', 'capture_before_save', 'seal_before_reboot')))
+            self.saved_boot.verify_boot_task(deadline)
+            self.release.check_predecessor_ready(deadline)
+        if phase in (*SAVED_STAGES, 'restore_saved_guests'):
+            _need(type(self.saved_boot) is WindowsSavedReboot and operation['scope'].get('saved_reboot') is True)
+            # A suspended VM cannot answer app or DB queries. The native
+            # boundary has an exact stopped Windows witness for those phases.
+            if phase not in {'save_guests', 'rebind_observers'} or (phase == 'save_guests' and observe_only):
+                return time.monotonic() < deadline
+        _need(time.monotonic() < deadline and self.platform.guard(
+            operation, chain, deadline, observe_only=observe_only) is True)
+        if phase in PRE_PUBLISH_CLOSED and not (observe_only and phase == 'publish'):
+            original = chain['close_pair']
+            after_arm = phase == 'publish' or (observe_only and phase == 'arm_host')
+            reboot = _expects_reboot(operation['scope'], chain)
+            if after_arm or (reboot and phase == 'arm_host'):
+                host = self._host(operation, chain, deadline)
+                expected = (chain['arm_host']['plan_sha256'] if phase == 'publish'
+                            else operation['plan_material_sha256'])
+                _need(host.checked['plan_sha256'] == expected)
+                if after_arm:
+                    boot = {'resumed_windows_boot': host.config['boot_pin']} if reboot else {}
+                    closed = self.release.pair.closed_pair_after_arm(
+                        original['terminal_sha256'], host.config['image_path_pin'],
+                        host.checked['successor_image_sha256'], deadline, **boot)
+                else:
+                    closed = self.release.pair.closed_pair_after_reboot(
+                        original['terminal_sha256'], host.config['boot_pin'], deadline)
+                if phase == 'arm_host' and not observe_only and operation['scope'].get('saved_reboot') is True:
+                    _need(host.observe_seal(deadline) == chain['seal_material']['acceptance_sha256'])
+            else:
+                closed = self.release.observe_closed(operation, chain, deadline)
+                if phase == 'arm_host' and operation['scope'].get('saved_reboot') is True:
+                    host = self._host(operation, chain, deadline)
+                    _need(host.observe_seal(deadline) == chain['seal_material']['acceptance_sha256'])
+            _need(closed['terminal_sha256'] == original['terminal_sha256']
+                  and closed['revision'] == original['revision']
+                  and closed['closed_nodes'] == ['A', 'B']
+                  and all(closed[field] is True for field in ('synchronous', 'same_expiry',
+                                                           'replay_verified', 'effects_isolated')))
+        return time.monotonic() < deadline
+
+    def arm_material(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        material = self.platform.read_arm_material(operation, chain, deadline)
+        _need(operation['stage'] == 'arm_host')
+        return material
+
+    def _host(self, operation, chain, deadline):
+        material = self.platform.read_arm_material(operation, chain, deadline)
+        reboot = saved_reboot(postboot_scope(material['candidate']))
+        _need(reboot == _expects_reboot(operation['scope'], chain))
+        recovery = _sameboot_recovery(chain)
+        if recovery is not None:
+            _need(material['candidate']['windows_initial_observer']['windows_boot_sha256']
+                  == recovery['windows_boot_sha256'])
+        bridge = {'reboot_pair': self.release.pair} if reboot else {}
+        options = self.successor_options
+        if operation['scope'].get('saved_reboot') is True:
+            options = self.platform.successor_options(operation, chain, material, deadline)
+        return WindowsSamebootHost(self.windows, material=material, **options, **bridge)
+
+    def _publication(self, host, published, operation, chain, deadline):
+        armed = chain['arm_host']
+        _need(host.checked['plan_sha256'] == armed['plan_sha256'])
+        terminal = self.platform.read_terminal(operation, chain, deadline)
+        terminal_sha256 = chain['retire_provider']['terminal_sha256']
+        closed, opened, _ = derive_predecessor(terminal, terminal_sha256, published=True)
+        _need(closed == chain['close_pair']['revision'] and opened == operation['scope']['previous_revision'] + 2)
+        observed = self.paired_publication(published, terminal, operation, chain, deadline)
+        _need(observed == {'plan_sha256': armed['plan_sha256'], 'revision': opened,
+                          'writers': ['A'], 'standby_node': 'B', 'synchronous': True,
+                          'instance_sha256': published['service_instance_sha256'],
+                          'predecessor_instance_stopped': True})
+        return observed | {'publication_sha256': published['first_write_proof_sha256']}
+
+    def _apps(self, operation, chain, deadline, *, observe_only):
+        host = self._host(operation, chain, deadline)
+        published = host.observe_publication(deadline)
+        previous = chain['publish']
+        _need(published['service_instance_sha256'] == previous['instance_sha256'] and
+              published['first_write_proof_sha256'] == previous['publication_sha256'])
+        _need(self._publication(host, published, operation, chain, deadline) == previous)
+        if observe_only and operation['scope'].get('saved_reboot') is True:
+            app = self.apps_factory(operation, chain, published, deadline)
+            arguments = self.platform.read_app_operation(operation, chain, deadline)
+            _need(type(arguments) is dict and set(arguments) == {
+                'request', 'authorization', 'assert_guard', 'prior_resume', 'expected_receipt_sha256'}
+                and arguments['request'].nonce == operation['nonce'])
+            verified = app.reconcile(deadline=deadline, **arguments)
+            receipt = {'instance_sha256': verified['service_instance_sha256'],
+                       'startup_sha256': verified['receipt_sha256'], 'ready': list(RECOVERY_START_ORDER)}
+        elif observe_only:
+            # The platform watches the already-issued guest nonce and mTLS
+            # readiness. Another dispatcher never receives the same start.
+            receipt = self.platform.observe_apps(operation, chain, deadline)
+        else:
+            app = self.apps_factory(operation, chain, published, deadline)
+            arguments = self.platform.app_operation(operation, chain, deadline)
+            _need(type(arguments) is dict and set(arguments) == {'request', 'assert_guard', 'issued', 'record'}
+                  and arguments['request'].nonce == operation['nonce'])
+            startup = app.start(arguments['request'], deadline, assert_guard=arguments['assert_guard'],
+                                issued=arguments['issued'], record=arguments['record'])
+            receipt = {'instance_sha256': published['service_instance_sha256'], 'startup_sha256': startup,
+                       'ready': list(RECOVERY_START_ORDER)}
+        _need(type(receipt) is dict and set(receipt) == {'instance_sha256', 'ready', 'startup_sha256'}
+              and receipt['instance_sha256'] == published['service_instance_sha256']
+              and receipt['ready'] == list(RECOVERY_START_ORDER))
+        return receipt
+
+    def _quiesce_apps(self, operation, chain, deadline, *, observe_only):
+        _need(operation['scope'].get('saved_reboot') is True and 'close_pair' in chain)
+        material = self.platform.quiesce_operation(operation, chain, deadline, observe_only=observe_only)
+        _need(type(material) is dict and set(material) == {
+            'dispatcher', 'request', 'assert_windows_closed', 'observe_stopped'})
+        dispatcher, request = material['dispatcher'], material['request']
+        scope, closed = operation['scope'], chain['close_pair']
+        _need(type(dispatcher) is GuestSshDispatcher and type(request) is Request
+              and request.binding == dispatcher.binding and request.node == 'A'
+              and request.verb == GUEST_QUIESCE_SAMEBOOT_SUCCESSOR and request.nonce == operation['nonce']
+              and request.args.get('predecessor_plan_sha256') == scope['previous_plan_sha256']
+              and request.args.get('predecessor_terminal_sha256') == closed['terminal_sha256']
+              and request.args.get('postboot_attempt_id') == scope['attempt_sha256']
+              and callable(material['assert_windows_closed']) and callable(material['observe_stopped']))
+        pin = None
+        if not observe_only:
+            stopped = dispatcher.quiesce_sameboot_successor(
+                request, deadline, assert_windows_closed=material['assert_windows_closed'])
+            _need(stopped.status == 'PASS')
+            pin = stopped.receipt_sha256
+        result = material['observe_stopped'](request, pin, deadline)
+        scope = {'version': VERSION, 'binding': request.binding.fields(), 'node': request.node,
+                 'boot_sha256': request.binding.boot(request.node), 'verb': request.verb,
+                 'sequence': request.sequence, 'nonce': request.nonce, 'args': request.args}
+        _need(time.monotonic() < deadline and type(result) is dict
+              and result.get('request_sha256') == hashlib.sha256(_wire_bytes(scope)).hexdigest()
+              and (pin is None or result.get('stop_receipt_sha256') == pin))
+        return result
+
+    def _rebind_observers(self, operation, chain, deadline, *, observe_only):
+        scope, resumed = operation['scope'], chain['resume_guests']
+        _need(scope.get('saved_reboot') is True)
+        observer = self.platform.saved_observers(operation, chain, deadline)
+        _need(type(observer) is WindowsSavedObservers and observer.windows is self.release.pair.windows)
+        expected = {'plan_sha256': scope['previous_plan_sha256'],
+                    'binding_sha256': scope['previous_instance_sha256'],
+                    'terminal_sha256': resumed['terminal_sha256'],
+                    'previous_windows_boot_sha256': scope['previous_windows_boot_sha256'],
+                    'windows_boot_sha256': resumed['windows_boot_sha256'],
+                    'vm_id_sha256': resumed['vm_id_sha256']}
+        _need(all(observer.writer[key] == value for key, value in expected.items()))
+        closed = self.release.pair.closed_pair_after_reboot(
+            resumed['terminal_sha256'], resumed['windows_boot_sha256'], deadline)
+        _need(_closed(closed, scope['previous_revision'] + 1, resumed['terminal_sha256']))
+        endpoints = (observer.observe if observe_only else observer.apply)(deadline)
+        return {'windows_boot_sha256': resumed['windows_boot_sha256'], 'observers': endpoints}
+
+    def _publish_material(self, operation, chain, deadline, *, mode):
+        _need(operation['scope'].get('saved_reboot') is True and operation['stage'] == 'publish_material')
+        publisher = self.platform.saved_material(operation, chain, deadline)
+        _need(type(publisher) is WindowsSavedSiteMaterial and publisher.pair is self.release.pair)
+        result = publisher.verify(deadline, mode=mode)
+        return {field: result[field] for field in ('plan_sha256', 'approval_sha256', 'authority_issued')}
+
+    def prepare_material(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(operation['scope'].get('saved_reboot') is True and operation['stage'] == 'publish_material')
+        return self.platform.prepare_material(operation, chain, deadline) is True
+
+    def reconcile_metadata(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(operation['scope'].get('saved_reboot') is True
+              and operation['stage'] in {'publish_material', 'seal_material'})
+        if operation['stage'] == 'publish_material':
+            evidence = self._publish_material(operation, chain, deadline, mode='reconcile')
+        else:
+            evidence = self._seal_material(operation, chain, deadline, observe_only=False, allow_existing=True)
+        return _reply(request, evidence)
+
+    def _seal_material(self, operation, chain, deadline, *, observe_only, allow_existing=False):
+        host = self._host(operation, chain, deadline)
+        published = chain['publish_material']
+        _need(host.checked['plan_sha256'] == published['plan_sha256']
+              and host.config['parameters']['ApprovalSha256'] == published['approval_sha256'])
+        if not _expects_reboot(operation['scope'], chain):
+            previous = chain['close_pair']
+            closed = self.release.pair.closed_pair(previous['terminal_sha256'], deadline)
+            _need(_closed(closed, previous['revision'], previous['terminal_sha256']))
+        if observe_only:
+            seal = host.observe_seal(deadline)
+        else:
+            seal = host.seal(deadline, allow_existing=allow_existing)
+            _need(host.observe_seal(deadline) == seal)
+        return {'plan_sha256': published['plan_sha256'], 'acceptance_sha256': seal}
+
+    def _dispatch(self, request, receipts, deadline, *, observe_only):
+        operation, chain = _decoded(request, receipts)
+        phase = operation['stage']
+        if phase == 'retire_provider':
+            evidence = (self.release.observe_retired if observe_only else self.release.retire_provider)(
+                operation, chain, deadline)
+        elif phase == 'release_writer':
+            evidence = self.release.release_writer(operation, chain, deadline, observe_only=observe_only)
+        elif phase == 'close_pair':
+            evidence = self.release.observe_closed(operation, chain, deadline)
+        elif phase == 'quiesce_apps':
+            evidence = self._quiesce_apps(operation, chain, deadline, observe_only=observe_only)
+        elif phase == 'rebind_observers':
+            evidence = self._rebind_observers(operation, chain, deadline, observe_only=observe_only)
+        elif phase == 'publish_material':
+            evidence = self._publish_material(operation, chain, deadline, mode='observe' if observe_only else 'apply')
+        elif phase == 'seal_material':
+            evidence = self._seal_material(operation, chain, deadline, observe_only=observe_only)
+        elif phase in (*SAVED_STAGES, 'restore_saved_guests', 'verify_restored_pair'):
+            _need(type(self.saved_boot) is WindowsSavedReboot)
+            if phase == 'verify_restored_pair':
+                _need(observe_only)
+                _need(self.platform.verify_restored_provider(operation, chain, deadline) is True)
+            verified_inputs = operation['scope'].get(ROLLBACK_RESUME_FIELD) is True
+            if verified_inputs and not observe_only:
+                if phase == 'save_guests':
+                    _need(_pin(self.platform.capture_before_save(operation, chain, deadline)))
+                elif phase == 'reboot_windows':
+                    _need(_pin(self.platform.seal_before_reboot(operation, chain, deadline)))
+            evidence = self.saved_boot.run(operation, chain, deadline, observe_only=observe_only)
+            if phase == 'save_guests' and observe_only and evidence['states'] != {'A':'Saved','B':'Saved'}:
+                return _reply(request, evidence, status='REJECTED')
+        elif phase == 'arm_host':
+            host = self._host(operation, chain, deadline)
+            _need(host.checked['plan_sha256'] == operation['plan_material_sha256'])
+            evidence = (host.observe_armed if observe_only else host.arm)(deadline)
+        elif phase == 'publish':
+            host = self._host(operation, chain, deadline)
+            _need(host.checked['plan_sha256'] == chain['arm_host']['plan_sha256'])
+            published = (host.observe_publication if observe_only else host.start)(deadline)
+            evidence = self._publication(host, published, operation, chain, deadline)
+        elif phase == 'start_apps':
+            evidence = self._apps(operation, chain, deadline, observe_only=observe_only)
+        else:
+            _need(phase in {'preflight', 'replace_provider', 'restore_provider', 'carryover',
+                            'fallback_carryover', 'connect_rollback_held', 'stage_runtime'})
+            result = (self.platform.observe if observe_only else self.platform.apply)(operation, chain, deadline)
+            _need(type(result) is dict and set(result) == {'status', 'evidence'})
+            return _reply(request, result['evidence'], status=result['status'])
+        return _reply(request, evidence)
+
+    def apply(self, request, receipts, deadline):
+        return self._dispatch(request, receipts, deadline, observe_only=False)
+
+    def cancel_unissued_reboot(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(type(self.saved_boot) is WindowsSavedReboot)
+        evidence = self.saved_boot.cancel_unissued(operation, chain, deadline)
+        return _reply(request, evidence, status='REJECTED')
+
+    def observe(self, request, receipts, deadline):
+        return self._dispatch(request, receipts, deadline, observe_only=True)
+
+    def reconcile_provider_restore(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        _need(operation['stage'] == 'restore_provider' and operation['scope'].get('saved_reboot') is True)
+        evidence = self.platform.resume_provider_restore(operation, chain, deadline)
+        return _reply(request, evidence)
+
+    def reconcile_provider_retirement(self, request, receipts, deadline):
+        operation, chain = _decoded(request, receipts)
+        return _reply(request, self.release.resume_retirement(operation, chain, deadline))

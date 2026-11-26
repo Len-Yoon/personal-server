@@ -1,9 +1,12 @@
-"""Read back the running A containers, their mTLS routes, and current PostgreSQL lease."""
+"""Read back running primary containers, their mTLS routes and PostgreSQL lease."""
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import partial
 import http.client
+import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,6 +21,7 @@ from ha_runtime.seven_capture import parse
 from ha_runtime.seven_migration import MigrationRejected
 
 from . import native_guest_restore as restore, native_guest_runtime as runtime
+from .initial_pg_lease import RECOVERY_OPEN_REVISION
 from .legacy_writers import TransitionBlocked, _need
 
 
@@ -48,7 +52,8 @@ SELECT json_build_object(
         FROM ha_effects.binding),
     'peers', (SELECT COALESCE(json_agg(json_build_array(host(r.client_addr),r.replay_lsn::text)), '[]'::json)
         FROM pg_stat_replication r JOIN pg_stat_ssl tls USING (pid)
-        WHERE r.application_name='ha_b' AND r.usename='ha_repl' AND r.state='streaming'
+        WHERE r.application_name='ha_' || lower((SELECT partner FROM ha.control WHERE singleton=1))
+          AND r.usename='ha_repl' AND r.state='streaming'
           AND r.sync_state='sync' AND tls.ssl AND r.replay_lsn IS NOT NULL))
 FROM pg_control_system(), sampled
 """
@@ -68,15 +73,51 @@ def _clock(value):
     return parsed
 
 
-def _lease(pins, postgres):
-    observed = restore._pg(postgres, OPEN_STATE)
-    identity = ["postgres", "ha", "ha_A", False, pins.system_id, "on", "remote_apply", "FIRST1(ha_b)", "on", "on", 1]
-    authority = [pins.cluster, 1, 2, "A", "B", 1, ["A"], "A", "AS", True, True]
+def _lease(pins, postgres, generation=None, *, recovery_deadline=None, rearmed=False, postboot=False, unpublished=False, postboot_after_unpublished=False, postboot_resume=False, predecessor_terminal=None, predecessor_sha256=None):
+    _need(sum(bool(v) for v in (rearmed,postboot,unpublished,postboot_after_unpublished,postboot_resume))<=1
+          and (not (unpublished or postboot_after_unpublished or postboot_resume) or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
+    _need(not (rearmed and postboot) and (not postboot or (recovery_deadline is not None and generation is None)), "guest_live_pg_binding_unconfirmed")
+    _need(not rearmed or (recovery_deadline is not None and generation is None), "guest_live_pg_binding_unconfirmed")
+    _need(recovery_deadline is None or generation is None, "guest_live_pg_binding_unconfirmed")
+    if generation is None:
+        primary, partner, epoch, timeline = "A", "B", 1, 1
+        if postboot or unpublished or postboot_after_unpublished or postboot_resume:
+            from .initial_unpublished import derive_predecessor
+            revision=derive_predecessor(predecessor_terminal,predecessor_sha256,published=not unpublished)[1]
+            if not unpublished:
+                kind=json.loads(predecessor_terminal)['kind']
+                if postboot_resume:
+                    from .initial_postboot import RESUME_KIND
+                    _need(kind in {'initial-wsl-cutover-postboot','initial-wsl-cutover-postboot-unpublished',RESUME_KIND},'guest_live_pg_binding_unconfirmed')
+                else:
+                    _need(kind==('initial-wsl-cutover-unpublished' if postboot_after_unpublished else 'initial-wsl-cutover-rearm'),
+                        'guest_live_pg_binding_unconfirmed')
+        else:
+            _need(predecessor_terminal is None and predecessor_sha256 is None,"guest_live_pg_binding_unconfirmed")
+            revision=6 if rearmed else (RECOVERY_OPEN_REVISION if recovery_deadline is not None else 2)
+    else:
+        generation.validate()
+        primary, partner = generation.primary, generation.partner
+        epoch, revision, timeline = generation.epoch, generation.revision, generation.timeline
+        _need(pins.node == primary, "guest_live_pg_binding_unconfirmed")
+    if recovery_deadline is None:
+        observed = restore._pg(postgres, OPEN_STATE)
+    else:
+        remaining = recovery_deadline - time.monotonic()
+        _need(remaining > 0, "guest_live_recovery_lease_unconfirmed")
+        try:
+            observed = restore._pg(postgres, OPEN_STATE, timeout=min(10, remaining))
+        except subprocess.TimeoutExpired:
+            raise TransitionBlocked("guest_live_recovery_lease_unconfirmed") from None
+    identity = ["postgres", "ha", "ha_" + primary, False, pins.system_id,
+                "on", "remote_apply", f"FIRST1(ha_{partner.lower()})", "on", "on", timeline]
+    authority = [pins.cluster, epoch, revision, primary, partner, timeline, [primary], primary, "AS", True, True]
     binding = [[pins.cluster, pins.system_id, pins.release["source_commit"], pins.plan_sha256, runtime.config.BROKER_ROLE]]
     _need(type(observed) is dict and set(observed) == {"identity", "authority", "lease_clock", "binding", "peers"}
           and _matches(observed["identity"], identity) and _matches(observed["authority"], authority)
           and _matches(observed["binding"], binding), "guest_live_pg_binding_unconfirmed")
-    peer, = observed["peers"]
+    _need(type(observed["peers"]) is list and len(observed["peers"]) == 1, "guest_live_pg_peer_unconfirmed")
+    peer = observed["peers"][0]
     _need(type(peer) is list and len(peer) == 2 and peer[0] == postgres.peer_ipv4,
           "guest_live_pg_peer_unconfirmed")
     replay = restore._lsn(peer[1])
@@ -84,6 +125,144 @@ def _lease(pins, postgres):
     _need(0 < (expires - sampled).total_seconds() <= 5 and datetime.now(timezone.utc) < expires,
           "guest_live_pg_lease_expired")
     return observed, sampled, expires, replay
+
+
+def observe_recovered_a_lease(pins, postgres, *, recovery_attempt_id, challenge_sha256, deadline,
+                              minimum_remaining_seconds=0):
+    """Read the recovered lease through the same guest-local PostgreSQL connection."""
+    error = "guest_live_recovery_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 0, error)
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A"
+          and type(pins.generation) is int and pins.generation == 1
+          and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release["source_commit"]
+          and runtime._match(runtime.SHA, recovery_attempt_id) and recovery_attempt_id != pins.attempt_id
+          and runtime._match(runtime.SHA, challenge_sha256) and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256
+          and replay > 0 and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({
+        **runtime._runtime_identity(pins), "recovery_attempt_id": recovery_attempt_id,
+        "challenge_sha256": challenge_sha256, "postgres": observed,
+    }))
+
+
+def observe_rearmed_a_lease(pins, postgres, *, recovery_attempt_id, rearm, rearm_plan_sha256,
+                            challenge_sha256, deadline, minimum_remaining_seconds=1):
+    """Read exact revision six after the separately authenticated native rearm proof."""
+    from .initial_pg_lease import rearm_scope
+    checked = rearm_scope({'initial_recovery_rearm': rearm,
+                           'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
+                           'initial_cutover_handoff': {'attempt_id': pins.attempt_id}})
+    error = "guest_live_rearm_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A" and type(pins.generation) is int
+          and pins.generation == 1 and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release['source_commit']
+          and all(runtime._match(runtime.SHA, value) for value in (
+              recovery_attempt_id, rearm_plan_sha256, challenge_sha256))
+          and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, rearmed=True)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
+          and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({**runtime._runtime_identity(pins), 'rearm': checked,
+        'rearm_plan_sha256': rearm_plan_sha256, 'recovery_attempt_id': recovery_attempt_id,
+        'challenge_sha256': challenge_sha256, 'postgres': observed}))
+
+
+def _predecessor_terminal(envelope,pins,recovery_attempt_id):
+    """Existing operator stages two independent ROOT-owned files, never links."""
+    from .native_guest_worker import ROOT
+    pin=envelope['predecessor_terminal_sha256']
+    _need(runtime._match(runtime.SHA,pin),'guest_live_pg_binding_unconfirmed')
+    path=ROOT/('predecessor-terminal-'+pin+'.json')
+    raw=runtime._read(path,0,{0o400},limit=65536)
+    from .initial_unpublished import derive_predecessor
+    derive_predecessor(raw,pin,published='predecessor_binding_sha256' in envelope)
+    prior=json.loads(raw)
+    _need(prior['recovery']['attempt_id']==recovery_attempt_id
+          and prior['attempt_id']==pins.attempt_id and prior['legacy_plan_sha256']==pins.plan_sha256
+          and ('predecessor_plan_sha256' not in envelope
+               or prior['controller_plan_sha256']==envelope['predecessor_plan_sha256']),
+          'guest_live_pg_binding_unconfirmed')
+    return raw
+
+
+def observe_unpublished_a_lease(pins, postgres, *, recovery_attempt_id, unpublished, unpublished_plan_sha256,
+                            challenge_sha256, deadline, minimum_remaining_seconds=1):
+    """Read the raw-terminal-derived stamp after native unpublished proof."""
+    from .initial_unpublished import scope as unpublished_scope
+    checked = unpublished_scope({'initial_unpublished_recovery': unpublished,
+                           'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
+                           'initial_cutover_handoff': {'attempt_id': pins.attempt_id}})
+    error = "guest_live_unpublished_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A" and type(pins.generation) is int
+          and pins.generation == 1 and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release['source_commit']
+          and all(runtime._match(runtime.SHA, value) for value in (
+              recovery_attempt_id, unpublished_plan_sha256, challenge_sha256))
+          and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline, unpublished=True,
+        predecessor_terminal=_predecessor_terminal(checked,pins,recovery_attempt_id),predecessor_sha256=checked['predecessor_terminal_sha256'])
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
+          and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({**runtime._runtime_identity(pins), 'unpublished': checked,
+        'unpublished_plan_sha256': unpublished_plan_sha256, 'recovery_attempt_id': recovery_attempt_id,
+        'challenge_sha256': challenge_sha256, 'postgres': observed}))
+
+
+def observe_postboot_a_lease(pins, postgres, *, recovery_attempt_id, postboot, postboot_plan_sha256,
+                            challenge_sha256, deadline, minimum_remaining_seconds=1):
+    """Read the raw-terminal-derived stamp after native postboot proof."""
+    from .initial_postboot import scope
+    checked = scope({'initial_recovery_postboot': postboot,
+                           'initial_cutover_recovery': {'attempt_id': recovery_attempt_id},
+                           'initial_cutover_handoff': {'attempt_id': pins.attempt_id}})
+    error = "guest_live_postboot_lease_unconfirmed"
+    pins.validate()
+    postgres.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == "A" and type(pins.generation) is int
+          and pins.generation == 1 and pins.postgres_id == postgres.postgres_id
+          and all(getattr(postgres, key) == getattr(pins, key) for key in (
+              "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
+          and postgres.source_commit == pins.release['source_commit']
+          and all(runtime._match(runtime.SHA, value) for value in (
+              recovery_attempt_id, postboot_plan_sha256, challenge_sha256))
+          and type(minimum_remaining_seconds) in (int, float) and math.isfinite(minimum_remaining_seconds)
+          and minimum_remaining_seconds >= 1 and time.monotonic() < deadline, error)
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, error)
+    from .initial_postboot import after_unpublished, published_postboot
+    retry_predecessor=after_unpublished(checked)
+    resuming=published_postboot(checked)
+    observed, _, expires, replay = _lease(pins, postgres, recovery_deadline=deadline,
+        postboot=not (retry_predecessor or resuming),postboot_after_unpublished=retry_predecessor,postboot_resume=resuming,
+        predecessor_terminal=_predecessor_terminal(checked,pins,recovery_attempt_id),predecessor_sha256=checked['predecessor_terminal_sha256'])
+    _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256 and replay > 0
+          and (expires - datetime.now(timezone.utc)).total_seconds() > minimum_remaining_seconds
+          and time.monotonic() < deadline, error)
+    return runtime._digest(runtime._json_bytes({**runtime._runtime_identity(pins), 'postboot': checked,
+        'postboot_plan_sha256': postboot_plan_sha256, 'recovery_attempt_id': recovery_attempt_id,
+        'challenge_sha256': challenge_sha256, 'postgres': observed}))
 
 
 def _authority_paths():
@@ -100,7 +279,7 @@ def _installed_authorities(digests):
           "guest_live_installed_authority_changed")
 
 
-def _receipts(pins, activation, stage, activation_receipt_sha256):
+def _receipts(pins, activation, stage, activation_receipt_sha256, generation=None):
     identity = runtime._runtime_identity(pins)
     _need(runtime._read(stage / "runtime-intent.json", 0, {0o600}) == runtime._json_bytes(runtime._runtime_intent(pins)),
           "guest_live_preparation_intent_unconfirmed")
@@ -125,6 +304,8 @@ def _receipts(pins, activation, stage, activation_receipt_sha256):
     intent = parse(intent_raw)
     files = result["authority_files"]
     common = {"schema_version": 1, **identity, **asdict(activation), "authority_files": files, "containers": containers}
+    if generation is not None:
+        common["serving_generation"] = asdict(generation)
     expected_intent = {**common, "status": "INTENT", "activation_order": order, "lease_sha256": intent["lease_sha256"]}
     expected_done = {**common, "status": "STARTED", "guest_intent_sha256": runtime._digest(intent_raw),
                      "lease_sha256": result["lease_sha256"], "automatic_retry_permitted": False}
@@ -138,12 +319,13 @@ def _receipts(pins, activation, stage, activation_receipt_sha256):
 def _layout(pins, postgres, stage, prepared):
     _need(runtime._digest(runtime.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_live_boot_changed")
     identity = parse(runtime._read(runtime.INSTALLATION, 0, {0o400, 0o600}))
-    _need(identity["node"] == "A" and identity["installation_id"] == pins.installation_id,
+    _need(identity["node"] == pins.node and identity["installation_id"] == pins.installation_id,
           "guest_live_installation_changed")
     raw = runtime._read(stage / "guest-spec.json", 0, {0o400, 0o600})
     _need(runtime._digest(raw) == pins.spec_sha256, "guest_live_spec_unbound")
     spec = parse(raw)
-    _need(spec["node"] == "A" and spec["guest_ip"] == spec["pg_a"] and spec["pg_b"] == postgres.peer_ipv4
+    primary_key, peer_key = ("pg_a", "pg_b") if pins.node == "A" else ("pg_b", "pg_a")
+    _need(spec["node"] == pins.node and spec["guest_ip"] == spec[primary_key] and spec[peer_key] == postgres.peer_ipv4
           and spec["installation_id"] == pins.installation_id and spec["source_commit"] == pins.release["source_commit"],
           "guest_live_spec_unbound")
     renderer = runtime._renderer(pins)
@@ -209,7 +391,7 @@ def _tls(prepared):
     return context, leaf
 
 
-def _probe(context, leaf, ip, service, deadline):
+def _probe(context, leaf, ip, service, deadline, *, expected_node="A"):
     host, path = service + ".ha.internal", PATHS[service]
     boundary = "connect"
 
@@ -247,27 +429,50 @@ def _probe(context, leaf, ip, service, deadline):
         _need(content_type == "application/json" and type(data) is dict and data.get("service") == service
               and data.get("status") == ("ready" if path == "/ready" else "ok"), "guest_live_route_unready")
         if service in {"portal-web", "system-agent"}:
-            _need(data.get("node_id") == "A", "guest_live_route_wrong_node")
+            _need(data.get("node_id") == expected_node, "guest_live_route_wrong_node")
         if service == "system-agent":
-            _need(node_header == ["A"], "guest_live_route_wrong_node")
+            _need(node_header == [expected_node], "guest_live_route_wrong_node")
     return runtime._digest(body)
 
 
-def _probe_route(context, leaf, ip, service, deadline):
+def _probe_route(context, leaf, ip, service, deadline, *, expected_node=None):
+    probe = _probe if expected_node is None else partial(_probe, expected_node=expected_node)
     try:
-        return _probe(context, leaf, ip, service, deadline)
+        return probe(context, leaf, ip, service, deadline)
     except RouteTimeout:
         if deadline - time.monotonic() < SOCKET_SECONDS:
             raise
     # Retry only this read-only route, with fresh TLS and the same live
     # observation deadline. Response, identity and lease rejections propagate.
-    return _probe(context, leaf, ip, service, deadline)
+    return probe(context, leaf, ip, service, deadline)
 
 
 def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha256, authority_sha256,
                    windows_generation, windows_generation_sha256, live_lease_sha256, live_authority_sha256):
     """Return a digest only after fresh A runtime, mTLS and database observations."""
-    _need(os.geteuid() == 0 and pins.node == "A", "guest_live_a_root_required")
+    _need(os.geteuid() == 0 and pins.node == "A" and pins.primary_node == "A" and pins.generation == 1,
+          "guest_live_a_root_required")
+    return _observe_live(pins, activation, postgres, stage, activation_receipt_sha256=activation_receipt_sha256,
+                         authority_sha256=authority_sha256, windows_generation=windows_generation,
+                         windows_generation_sha256=windows_generation_sha256, live_lease_sha256=live_lease_sha256,
+                         live_authority_sha256=live_authority_sha256)
+
+
+def observe_live_generation(pins, activation, postgres, stage, generation, **authority):
+    from .native_guest_activation import ServingGeneration
+
+    _need(type(generation) is ServingGeneration, "guest_live_observation_unbound")
+    generation.validate()
+    _need(os.geteuid() == 0 and pins.node == generation.primary and generation.epoch > 1
+          and pins.primary_node == generation.primary and pins.generation == generation.epoch
+          and type(authority.get("windows_generation")) is int and authority["windows_generation"] == generation.epoch,
+          "guest_live_observation_unbound")
+    return _observe_live(pins, activation, postgres, stage, generation=generation, **authority)
+
+
+def _observe_live(pins, activation, postgres, stage, *, activation_receipt_sha256, authority_sha256,
+                  windows_generation, windows_generation_sha256, live_lease_sha256, live_authority_sha256,
+                  generation=None):
     pins.validate()
     activation.validate()
     postgres.validate()
@@ -279,29 +484,57 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
           and all(getattr(postgres, key) == getattr(pins, key) for key in (
               "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
           and postgres.source_commit == pins.release["source_commit"], "guest_live_observation_unbound")
+    return _observe_runtime(pins, activation, postgres, stage, generation, activation_receipt_sha256,
+                            bindings | {"windows_generation": windows_generation})
+
+
+def observe_current_generation(pins, activation, postgres, stage, generation, *,
+                               activation_receipt_sha256, target_sha256, replay_floor):
+    pins.validate()
+    activation.validate()
+    postgres.validate()
+    generation.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == generation.primary
+          and pins.generation == generation.epoch and generation.epoch > 1
+          and all(runtime._match(runtime.SHA, value) for value in (activation_receipt_sha256, target_sha256))
+          and type(replay_floor) is int and 0 < replay_floor < 2**64,
+          "guest_live_observation_unbound")
+    return _observe_runtime(
+        pins, activation, postgres, stage, generation, activation_receipt_sha256,
+        {"activation_receipt_sha256": activation_receipt_sha256, "target_sha256": target_sha256,
+         "serving_generation": asdict(generation), "replay_floor": replay_floor},
+        target_sha256=target_sha256, replay_floor=replay_floor, persist_failure=False,
+    )
+
+
+def _observe_runtime(pins, activation, postgres, stage, generation, activation_receipt_sha256, bindings, *,
+                     target_sha256=None, replay_floor=0, persist_failure=True):
     stage = Path(stage)
     started = time.monotonic()
     deadline = started + LIVE_SECONDS
     phase = service = None
+    probe = _probe_route if generation is None else partial(_probe_route, expected_node=generation.primary)
     try:
         runtime._directory(stage, 0)
         phase = "activation_receipts"
-        prepared, files, activated_at = _receipts(pins, activation, stage, activation_receipt_sha256)
+        prepared, files, activated_at = _receipts(pins, activation, stage, activation_receipt_sha256, generation)
         phase = "runtime_layout"
         ip, layouts, images = _layout(pins, postgres, stage, prepared)
+        if target_sha256 is not None:
+            _need(runtime._digest(str(ip).encode("ascii")) == target_sha256, "guest_live_target_unconfirmed")
         phase = "containers_before"
         before = _running(pins, postgres, prepared, layouts, images, activated_at)
         phase = "ingress_tls"
         context, leaf = _tls(prepared)
         phase = "postgres_before"
-        first, sampled, expires, replay = _lease(pins, postgres)
+        first, sampled, expires, replay = _lease(pins, postgres, generation)
         phase = "application_routes"
         # Portal readiness queries several backends through the same guest.
         # Keep its request out of the burst from the remaining ingress probes.
         service = PORTAL_SERVICE
-        routes = {service: _probe_route(context, leaf, ip, service, deadline)}
+        routes = {service: probe(context, leaf, ip, service, deadline)}
         with ThreadPoolExecutor(max_workers=len(PATHS) - 1) as pool:
-            pending = {name: pool.submit(_probe_route, context, leaf, ip, name, deadline)
+            pending = {name: pool.submit(probe, context, leaf, ip, name, deadline)
                        for name in PATHS if name != PORTAL_SERVICE}
             for service, task in pending.items():
                 routes[service] = task.result()
@@ -312,12 +545,12 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         phase = "containers_after"
         after = _running(pins, postgres, prepared, layouts, images, activated_at)
         phase = "postgres_after"
-        last, sampled_after, expires_after, replay_after = _lease(pins, postgres)
+        last, sampled_after, expires_after, replay_after = _lease(pins, postgres, generation)
         phase = "freshness"
         _need(before == after and sampled_after >= sampled and expires_after >= expires and replay_after >= replay
-              and time.monotonic() < deadline, "guest_live_observation_stale")
+              and replay >= replay_floor and time.monotonic() < deadline, "guest_live_observation_stale")
         return runtime._digest(runtime._json_bytes({
-            **runtime._runtime_identity(pins), **bindings, "windows_generation": windows_generation,
+            **runtime._runtime_identity(pins), **bindings,
             "containers": after, "routes": routes, "ingress_leaf_sha256": leaf, "postgres_before": first,
             "postgres_after": last,
         }))
@@ -326,7 +559,7 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         reason = str(error) if isinstance(error, (TransitionBlocked, RouteTimeout)) else ""
         if not re.fullmatch(r"guest_(?:live|runtime|restore)_[a-z0-9_]{1,72}", reason):
             reason = type(error).__name__
-        if phase is not None:
+        if persist_failure and phase is not None:
             try:
                 runtime._write(stage / "runtime-live-failure.json", runtime._json_bytes({
                     "schema_version": 1,

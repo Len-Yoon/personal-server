@@ -24,7 +24,9 @@ from types import MappingProxyType
 
 
 VERSION = 1
+INITIAL_RECOVERY_HOLD = "initial-recovery-hold.json"
 FRAME_BYTES = 4096
+GENERATION_HANDOFF_FRAME_BYTES = 8192
 # Each boundary opens a Windows SSH check before the guest samples its own
 # database clock. Budget the transport and framing separately from sample age.
 ACTIVATION_BOUNDARY_SECONDS = 6
@@ -40,7 +42,47 @@ TRANSFER_BYTES = 8 * 1024**3
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 NODES = ("A", "B")
 GUEST_RESTORE_READBACK = "read_restore_receipt"
+GUEST_PREFLIGHT_REPLACEMENT = "preflight_replacement_standby"
+GUEST_PUBLISH_REPLACEMENT = "publish_replacement_standby"
+GUEST_START_REPLACEMENT = "start_replacement_standby"
+GUEST_OBSERVE_REPLACEMENT = "observe_replacement_standby"
+GUEST_PREPARE_GENERATION = "prepare_generation_runtime"
+GUEST_OBSERVE_PREPARATION = "observe_generation_preparation"
+GUEST_PUBLISH_GENERATION = "publish_generation_handoff"
+GUEST_ACTIVATE_GENERATION = "activate_generation"
+GUEST_OBSERVE_GENERATION = "observe_generation_activation"
+GUEST_VERIFY_GENERATION = "verify_live_generation"
+GUEST_VERIFY_PREPARED_GENERATION = "verify_prepared_generation"
+GUEST_TRANSITION_TARGET = "verify_transition_target"
+GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT = "observe_initial_standby_retirement"
+GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS = "retire_initial_standby_containers"
+GUEST_QUIESCE_INITIAL_RECOVERY = "quiesce_initial_recovery"
+GUEST_OBSERVE_INITIAL_RECOVERY_HOLD = "observe_initial_recovery_hold"
+GUEST_OBSERVE_CAR_ISOLATION = "observe_car_isolation"
+GUEST_START_INITIAL_RECOVERY = "start_initial_recovery"
+GUEST_START_INITIAL_REARM = "start_initial_recovery_rearm"
+GUEST_START_INITIAL_POSTBOOT = "start_initial_recovery_postboot"
+GUEST_START_INITIAL_UNPUBLISHED = "start_initial_unpublished_recovery"
+GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR = "observe_unpublished_predecessor"
+GUEST_QUIESCE_POSTBOOT_UNPUBLISHED = "quiesce_postboot_unpublished"
+GUEST_QUIESCE_INITIAL_POSTBOOT = "quiesce_initial_postboot"
+GUEST_QUIESCE_SAMEBOOT_SUCCESSOR = "quiesce_sameboot_successor"
+GUEST_OBSERVE_INITIAL_POSTBOOT = "observe_initial_postboot"
+POSTBOOT_STOP_VERBS = frozenset((GUEST_QUIESCE_INITIAL_POSTBOOT, GUEST_QUIESCE_POSTBOOT_UNPUBLISHED,
+                                GUEST_QUIESCE_SAMEBOOT_SUCCESSOR))
+POSTBOOT_STOP_BOUNDARIES = ("postboot_stop_intent", "postboot_broker_stopped", "postboot_all_stopped")
+RECOVERY_START_ORDER = ("ha-broker", "book-memo", "car-care-worker", "crawler-worker", "homeops-executor", "portal-web", "system-agent", "youtube-memo")
+RECOVERY_START_BOUNDARIES = ("recovery_start_intent", *(boundary + role for role in RECOVERY_START_ORDER for boundary in ("recovery_before:", "recovery_after:", "recovery_ready:")), "recovery_started")
+ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
+DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | POSTBOOT_STOP_VERBS | {GUEST_PREPARE_GENERATION, GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED}
+QUIESCENCE_BOUNDARIES = ("recovery_hold", "recovery_stop_broker", "recovery_stop_apps", "recovery_stopped")
+PREPARATION_OBSERVATION_BOUNDARIES = ("observe_preparation:before", "observe_preparation:after")
+PREPARATION_BOUNDARIES = tuple(f"prepare_generation:{index}" for index in range(1, 5))
+PREPARATION_BOUNDARY_SECONDS = 24
+REPLACEMENT_ARGS = ("bootstrap_manifest_sha256", "rejoin_stage_sha256")
 RESTORE_ARGS = ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")
+INITIAL_RECOVERY_ARGS = ("recovery_attempt_id", "installation_id", "runtime_receipt_sha256",
+                         "activation_receipt_sha256", "protected_inventory_sha256", "car_route_release_sha256")
 VERBS = {
     # allowed nodes, maximum seconds, mutation, additional typed request fields
     "preflight": ("AB", 45, False, ("target_system_id_sha256",)),
@@ -48,6 +90,10 @@ VERBS = {
     "finish_receive": ("A", 615, False, ("manifest_sha256", "receiver_sha256", "transfer_proof_sha256")),
     "restore": ("A", 1845, True, RESTORE_ARGS),
     GUEST_RESTORE_READBACK: ("A", 60, False, RESTORE_ARGS),
+    GUEST_PREFLIGHT_REPLACEMENT: ("AB", 45, False, ("bootstrap_manifest_sha256", "installation_id")),
+    GUEST_PUBLISH_REPLACEMENT: ("AB", 35, True, (*REPLACEMENT_ARGS, "installation_id")),
+    GUEST_START_REPLACEMENT: ("AB", 90, True, REPLACEMENT_ARGS),
+    GUEST_OBSERVE_REPLACEMENT: ("AB", 90, False, REPLACEMENT_ARGS),
     "prepare_runtime": ("AB", 295, True, ("manifest_sha256", "restore_receipt_sha256", "transfer_receipt_sha256",
                                           "target_receipt_sha256")),
     "verify_closed": ("AB", 45, False, ("manifest_sha256", "restore_receipt_sha256", "prepared_receipt_sha256")),
@@ -55,6 +101,32 @@ VERBS = {
                                                   "closed_a_sha256", "closed_b_sha256")),
     # Includes Windows service start and seven serial application readiness waits.
     "activate": ("A", 300, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
+    GUEST_PREPARE_GENERATION: ("AB", 240, True, ("runtime", "postgres", "generation",
+                                               "rejoin_stage_sha256")),
+    GUEST_OBSERVE_PREPARATION: ("AB", 45, False, ("runtime", "postgres", "generation",
+                                                 "rejoin_stage_sha256")),
+    GUEST_PUBLISH_GENERATION: ("AB", 30, True, ("handoff", "generation_handoff_sha256", "effects_plan_sha256")),
+    GUEST_ACTIVATE_GENERATION: ("AB", 300, True, ("generation_handoff_sha256", "effects_plan_sha256")),
+    GUEST_OBSERVE_GENERATION: ("AB", 30, False, ("generation_handoff_sha256", "effects_plan_sha256")),
+    GUEST_VERIFY_GENERATION: ("AB", 30, False, ("generation_handoff_sha256", "effects_plan_sha256",
+                                                "activation_receipt_sha256", "target_sha256")),
+    GUEST_VERIFY_PREPARED_GENERATION: ("AB", 45, False, ("runtime", "runtime_receipt_sha256", "target_sha256")),
+    GUEST_TRANSITION_TARGET: ("AB", 30, False, ("installation_id",)),
+    GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT: ("B", 45, False, ("verify_closed_sha256",)),
+    GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS: ("B", 180, True, ("verify_closed_sha256", "retirement_plan_sha256")),
+    GUEST_QUIESCE_INITIAL_RECOVERY: ("A", 95, True, INITIAL_RECOVERY_ARGS),
+    GUEST_OBSERVE_INITIAL_RECOVERY_HOLD: ("A", 20, False, INITIAL_RECOVERY_ARGS),
+    GUEST_OBSERVE_CAR_ISOLATION: ("A", 20, False, (*INITIAL_RECOVERY_ARGS, "hold_sha256")),
+    GUEST_START_INITIAL_RECOVERY: ("A", 300, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256")),
+    GUEST_START_INITIAL_REARM: ("A", 300, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "rearm", "rearm_plan_sha256")),
+    GUEST_START_INITIAL_POSTBOOT: ("A", 300, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot", "postboot_plan_sha256", "postboot_stopped_receipt_sha256")),
+    GUEST_START_INITIAL_UNPUBLISHED: ("A",300,True,(*INITIAL_RECOVERY_ARGS,"hold_sha256","unpublished","unpublished_plan_sha256")),
+    GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR: ("A",20,False,(*INITIAL_RECOVERY_ARGS,"hold_sha256","predecessor_rearm_attempt_id","predecessor_plan_sha256","unpublished_attempt_id")),
+    GUEST_QUIESCE_POSTBOOT_UNPUBLISHED: ("A",90,True,(*INITIAL_RECOVERY_ARGS,"hold_sha256","postboot_attempt_id","predecessor_plan_sha256","predecessor_unpublished_attempt_id")),
+    GUEST_QUIESCE_INITIAL_POSTBOOT: ("A", 90, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot_attempt_id", "predecessor_plan_sha256", "predecessor_rearm_attempt_id")),
+    GUEST_QUIESCE_SAMEBOOT_SUCCESSOR: ("A", 90, True, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot_attempt_id",
+        "predecessor_plan_sha256", "predecessor_terminal_sha256", "predecessor_postboot_attempt_id")),
+    GUEST_OBSERVE_INITIAL_POSTBOOT: ("A", 20, False, (*INITIAL_RECOVERY_ARGS, "hold_sha256", "postboot_attempt_id", "postboot_stopped_receipt_sha256")),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
     "observe_restore": ("A", 60, False, ("manifest_sha256", "restore_intent_sha256")),
@@ -93,6 +165,24 @@ def _bytes(value):
 
 def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+REJOIN_WAL_KEYS = frozenset({"source_fence_wal", "replica_fence_wal"})
+
+
+def rejoin_wal_evidence(value, error, *, optional=False):
+    keys = REJOIN_WAL_KEYS & value.keys()
+    if not keys and optional:
+        return {}
+    _need(len(keys) == 1, error)
+    key, = keys
+    wal = value[key]
+    _need(_wal_pin(wal), error)
+    return {key: wal}
+
+
+def _wal_pin(value):
+    return type(value) is str and re.fullmatch(r"[a-f0-9]{16}", value) is not None and value != "0" * 16
 
 
 def _matches(actual, expected):
@@ -188,21 +278,28 @@ class Stdio:
                     raise BridgeRejected("bridge_noncanonical_frame") from None
                 return value
             _need(len(self.buffer) < FRAME_BYTES, "bridge_frame_limit")
-            readable, _, _ = select.select([self.read_fd], [], [], _remaining(deadline))
-            _need(readable, "bridge_deadline_exceeded")
-            try:
-                data = os.read(self.read_fd, FRAME_BYTES - len(self.buffer))
-            except BlockingIOError:
-                continue
+            data = self._read(FRAME_BYTES - len(self.buffer), deadline)
             if not data:
                 if self.buffer:
                     raise BridgeRejected("bridge_truncated_frame")
                 raise _End("bridge_channel_closed")
             self.buffer.extend(data)
 
+    def _read(self, size, deadline):
+        while True:
+            readable, _, _ = select.select([self.read_fd], [], [], _remaining(deadline))
+            _need(readable, "bridge_deadline_exceeded")
+            try:
+                return os.read(self.read_fd, size)
+            except BlockingIOError:
+                continue
+
     def write(self, value, deadline):
         raw = _bytes(value)
         _need(0 < len(raw) <= FRAME_BYTES, "bridge_frame_limit")
+        self._write(raw, deadline)
+
+    def _write(self, raw, deadline):
         remaining = memoryview(raw)
         while remaining:
             _, writable, _ = select.select([], [self.write_fd], [], _remaining(deadline))
@@ -219,9 +316,48 @@ def _args(verb, node, args):
     _need(type(verb) is str and verb in VERBS and type(node) is str and node in NODES,
           "bridge_verb_rejected")
     nodes, _, _, keys = VERBS[verb]
-    _need(node in nodes and type(args) is dict and set(args) == set(keys), "bridge_args_rejected")
+    _need(node in nodes and type(args) is dict, "bridge_args_rejected")
+    if verb in {GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION}:
+        keys = (*keys, *rejoin_wal_evidence(args, "bridge_args_rejected"))
+    if verb == GUEST_OBSERVE_INITIAL_POSTBOOT and "postboot_carryover_receipt_sha256" in args:
+        keys = (*keys, "postboot_carryover_receipt_sha256")
+    _need(set(args) == set(keys), "bridge_args_rejected")
+    if verb == GUEST_START_INITIAL_REARM:
+        from .initial_pg_lease import rearm_scope
+        from .controller import TransitionBlocked
+        try:
+            rearm_scope({'initial_recovery_rearm': args['rearm'],
+                         'initial_cutover_recovery': {'attempt_id': args['recovery_attempt_id']}})
+        except TransitionBlocked:
+            _need(False, 'bridge_args_rejected')
+    if verb == GUEST_START_INITIAL_POSTBOOT:
+        from .initial_postboot import scope
+        from .controller import TransitionBlocked
+        try:
+            scope({'initial_recovery_postboot': args['postboot'],
+                         'initial_cutover_recovery': {'attempt_id': args['recovery_attempt_id']}})
+        except TransitionBlocked:
+            _need(False, 'bridge_args_rejected')
+    if verb == GUEST_START_INITIAL_UNPUBLISHED:
+        from .initial_unpublished import scope as unpublished_scope
+        from .controller import TransitionBlocked
+        try:
+            unpublished_scope({'initial_unpublished_recovery':args['unpublished'],
+                'initial_cutover_recovery':{'attempt_id':args['recovery_attempt_id']}})
+        except TransitionBlocked:
+            _need(False,'bridge_args_rejected')
     for key, value in args.items():
-        if key == "max_bytes":
+        if key in {"runtime", "postgres", "generation", "rearm", "postboot", "unpublished"}:
+            valid = type(value) is dict and 0 < len(_bytes(value)) <= FRAME_BYTES
+        elif key == "handoff":
+            valid = type(value) is dict and 0 < len(_bytes(value)) <= GENERATION_HANDOFF_FRAME_BYTES
+        elif key == "runtime_receipt_sha256" and verb == GUEST_VERIFY_PREPARED_GENERATION:
+            valid = value is None or _hash(value)
+        elif key == "car_route_release_sha256" and verb == GUEST_QUIESCE_INITIAL_RECOVERY:
+            valid = value is None or _hash(value)
+        elif key in REJOIN_WAL_KEYS:
+            valid = _wal_pin(value)
+        elif key == "max_bytes":
             valid = type(value) is int and 0 < value <= TRANSFER_BYTES
         elif key == "windows_generation":
             valid = type(value) is int and 0 < value < 2**63
@@ -246,7 +382,12 @@ class _Chain:
         self.recovery = False
 
     def check(self, verb, node, args):
-        _need(verb != GUEST_RESTORE_READBACK, "bridge_guest_only_request")
+        _need(verb not in POSTBOOT_STOP_VERBS, "bridge_guest_only_request")
+        _need(verb not in {GUEST_RESTORE_READBACK, GUEST_PREFLIGHT_REPLACEMENT, GUEST_PUBLISH_REPLACEMENT, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
+                          GUEST_PREPARE_GENERATION, GUEST_OBSERVE_PREPARATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET,
+                          GUEST_OBSERVE_INITIAL_STANDBY_RETIREMENT, GUEST_RETIRE_INITIAL_STANDBY_CONTAINERS,
+                          GUEST_QUIESCE_INITIAL_RECOVERY, GUEST_OBSERVE_INITIAL_RECOVERY_HOLD, GUEST_OBSERVE_CAR_ISOLATION, GUEST_START_INITIAL_RECOVERY, GUEST_START_INITIAL_REARM, GUEST_START_INITIAL_POSTBOOT, GUEST_OBSERVE_INITIAL_POSTBOOT, GUEST_START_INITIAL_UNPUBLISHED, GUEST_OBSERVE_UNPUBLISHED_PREDECESSOR},
+              "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":
             _need(verb in OBSERVE, "bridge_reconciliation_read_only")

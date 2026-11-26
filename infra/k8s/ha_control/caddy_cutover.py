@@ -56,3 +56,14 @@ def render(source, expected_sha256, active_ip):
     if any(replaced[key] != count for key, (_, count) in UPSTREAMS.items()):
         raise TransitionBlocked("caddy_cutover_route_set_changed")
     return (candidate.replace("\n", "\r\n") if crlf else candidate).encode("utf-8")
+
+
+def retarget(source, expected_sha256, current, previous_ip, next_ip):
+    """Render a replacement only from an exact, currently installed HA route."""
+    previous = render(source, expected_sha256, previous_ip)
+    if type(current) is not bytes or current != previous:
+        raise TransitionBlocked("caddy_failover_active_routes_changed")
+    candidate = render(source, expected_sha256, next_ip)
+    if candidate == previous:
+        raise TransitionBlocked("caddy_failover_target_unchanged")
+    return candidate
