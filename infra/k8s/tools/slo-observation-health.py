@@ -6,6 +6,7 @@ search series is not evidence of full sample coverage or a calculated SLO.
 """
 import argparse
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib.util
@@ -27,7 +28,19 @@ SPEC.loader.exec_module(ARCHIVE)
 PREFIX = 'slo_observation_archive_'
 FIELDS = frozenset(('present_days', 'stored_bytes', 'filesystem_available_bytes',
                     'latest_preserved_day_timestamp_seconds', 'partial_replica_days',
-                    'search_series_unobserved_days', 'news_series_unobserved_days', 'required_days', 'missing_required_days'))
+                    'search_series_unobserved_days', 'news_series_unobserved_days', 'required_days',
+                    'missing_required_days', 'unacknowledged_missing_required_days'))
+
+
+def acknowledged_days(window, required_from, today):
+    if window is None:
+        return frozenset()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}', window):
+        raise ValueError('invalid_acknowledged_window')
+    start, end = map(date.fromisoformat, window.split('..'))
+    if not required_from <= start <= end < today or (end - start).days >= ARCHIVE.RETENTION_DAYS:
+        raise ValueError('invalid_acknowledged_window')
+    return frozenset(start + timedelta(days=offset) for offset in range((end - start).days + 1))
 
 
 class ConcurrentChange(RuntimeError):
@@ -83,7 +96,7 @@ def pending_publication(directory):
         raise ConcurrentChange()
 
 
-def snapshot(path, *, required_from, today=None, now=None):
+def snapshot(path, *, required_from, acknowledged_window=None, today=None, now=None):
     now = now or (datetime.combine(today, datetime.min.time(), timezone.utc) + timedelta(hours=12)
                   if today else datetime.now(timezone.utc))
     if now.tzinfo is None or now.utcoffset() != timedelta(0):
@@ -91,6 +104,7 @@ def snapshot(path, *, required_from, today=None, now=None):
     today = now.date()
     if type(required_from) is not date or required_from > today:
         raise ValueError('invalid_retention_start')
+    acknowledged = acknowledged_days(acknowledged_window, required_from, today)
     directory, lock = open_readonly(path)
     try:
         before = fingerprint(directory, path)
@@ -115,22 +129,27 @@ def snapshot(path, *, required_from, today=None, now=None):
         last = (now - timedelta(seconds=2700)).date() - timedelta(days=1)
         wanted = {first + timedelta(days=i) for i in range(max(0, (last - first).days + 1))}
         observed = {r['date'] for r in rows}
+        missing = wanted - observed
         return {'present_days': len(rows), 'stored_bytes': sum(r['bytes'] for r in rows),
                 'filesystem_available_bytes': fs.f_bavail * fs.f_frsize,
                 'latest_preserved_day_timestamp_seconds': latest,
                 'partial_replica_days': sum(bool(r['summary']['samples']['unknown']) for r in rows),
                 'search_series_unobserved_days': sum(r['summary']['search_archive']['status'] != 'preserved' for r in rows),
                 'news_series_unobserved_days': sum(r['summary']['news_archive']['status'] != 'preserved' for r in rows),
-                'required_days': len(wanted), 'missing_required_days': len(wanted - observed)}
+                'required_days': len(wanted), 'missing_required_days': len(missing),
+                'unacknowledged_missing_required_days': len(missing - acknowledged)}
     finally:
         os.close(lock)
         os.close(directory)
 
 
-def worker(path, required_from):
+def worker(path, required_from, *, acknowledged_window=None):
     try:
-        result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
-                                 '--snapshot', '--directory', str(path), '--required-from', required_from.isoformat()],
+        command = [sys.executable, '-B', str(Path(__file__).resolve()),
+                   '--snapshot', '--directory', str(path), '--required-from', required_from.isoformat()]
+        if acknowledged_window is not None:
+            command.extend(('--acknowledged-missing-window', acknowledged_window))
+        result = subprocess.run(command,
                                 capture_output=True, timeout=25, check=False)
         if len(result.stdout) > 4096 or result.stderr or result.returncode not in (0, 3):
             return 'invalid', None
@@ -181,8 +200,8 @@ class Collector:
                        for key, value in sorted(values.items())).encode('ascii')
 
 
-def serve(path, required_from, port=9091):
-    collector = Collector(path, required_from)
+def serve(path, required_from, port=9091, *, acknowledged_window=None):
+    collector = Collector(path, required_from, reader=partial(worker, acknowledged_window=acknowledged_window))
     stopped = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -225,14 +244,16 @@ def serve(path, required_from, port=9091):
         server.server_close()
 
 
-def render(image, required_from):
+def render(image, required_from, *, acknowledged_window=None):
     # Source-bound immutable code CM keeps the already scanned collector image
     # unchanged. No workflow/build allowlist or production CronJob is edited.
     import yaml
     if not re.fullmatch(r'docker\.io/library/personal-server-slo-observation-archive@sha256:[a-f0-9]{64}', image):
         raise ValueError('immutable_archive_image_required')
-    if type(required_from) is not date or required_from > datetime.now(timezone.utc).date():
+    today = datetime.now(timezone.utc).date()
+    if type(required_from) is not date or required_from > today:
         raise ValueError('invalid_retention_start')
+    acknowledged_days(acknowledged_window, required_from, today)
     source = Path(__file__).read_text(encoding='utf-8')
     sha = hashlib.sha256(source.encode('utf-8')).hexdigest()
     name = 'slo-observation-health-code-' + sha[:16]
@@ -243,6 +264,8 @@ def render(image, required_from):
     pod = template['spec']
     pod['containers'][0]['image'] = image
     pod['containers'][0]['args'] = ['--directory', '/archive/observations', '--required-from', required_from.isoformat()]
+    if acknowledged_window is not None:
+        pod['containers'][0]['args'].extend(('--acknowledged-missing-window', acknowledged_window))
     pod['containers'][0]['volumeMounts'].append({'name': 'health-code', 'mountPath': '/opt/observations/slo-observation-health.py', 'subPath': 'slo-observation-health.py', 'readOnly': True})
     pod['volumes'].append({'name': 'health-code', 'configMap': {'name': name, 'defaultMode': 0o444}})
     code = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'immutable': True,
@@ -258,6 +281,7 @@ def main(argv=None):
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--image')
     parser.add_argument('--required-from', required=True)
+    parser.add_argument('--acknowledged-missing-window', metavar='YYYY-MM-DD..YYYY-MM-DD')
     args = parser.parse_args(argv)
     try:
         required_from = date.fromisoformat(args.required_from)
@@ -266,14 +290,18 @@ def main(argv=None):
         if args.render:
             if args.directory or args.snapshot or not args.image:
                 raise ValueError('invalid_arguments')
-            print(json.dumps(render(args.image, required_from), sort_keys=True))
+            print(json.dumps(render(args.image, required_from, acknowledged_window=args.acknowledged_missing_window),
+                             sort_keys=True))
             return 0
         if args.directory is None or args.image:
             raise ValueError('invalid_arguments')
         if args.snapshot:
-            print(json.dumps(snapshot(args.directory, required_from=required_from), separators=(',', ':'), allow_nan=False))
+            result = snapshot(args.directory, required_from=required_from,
+                              acknowledged_window=args.acknowledged_missing_window)
+            print(json.dumps(result, separators=(',', ':'), allow_nan=False))
         else:
-            serve(args.directory, required_from)
+            acknowledged_days(args.acknowledged_missing_window, required_from, datetime.now(timezone.utc).date())
+            serve(args.directory, required_from, acknowledged_window=args.acknowledged_missing_window)
         return 0
     except ConcurrentChange:
         print('{"status":"busy"}')

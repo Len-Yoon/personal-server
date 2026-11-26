@@ -1112,6 +1112,31 @@ class SloObservationHealthTests(unittest.TestCase):
             self.assertEqual(after['latest_preserved_day_timestamp_seconds'], out['latest_preserved_day_timestamp_seconds'])
             self.assertEqual((after['required_days'], after['missing_required_days']), (2, 1))
 
+    def test_acknowledgment_applies_to_dates_without_hiding_later_gaps_or_recovery(self):
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            options = {'required_from': date(2026, 10, 26), 'acknowledged_window': '2026-10-27..2026-10-27'}
+            known = module.snapshot(folder, **options, today=date(2026, 10, 28))
+            self.assertEqual((known['missing_required_days'], known['unacknowledged_missing_required_days']), (1, 0))
+            later = module.snapshot(folder, **options, today=date(2026, 10, 29))
+            self.assertEqual((later['missing_required_days'], later['unacknowledged_missing_required_days']), (2, 1))
+            module.ARCHIVE.archive(SloObservationArchiveTests().payload('2026-10-27'), folder,
+                                  today=date(2026, 10, 29))
+            backfilled = module.snapshot(folder, **options, today=date(2026, 10, 29))
+            self.assertEqual((backfilled['missing_required_days'], backfilled['unacknowledged_missing_required_days']), (1, 1))
+            expired = module.snapshot(folder, **options, today=date(2026, 12, 10))
+            self.assertEqual((expired['missing_required_days'], expired['unacknowledged_missing_required_days']), (35, 35))
+
+    def test_acknowledged_window_is_bounded_and_only_accepts_completed_utc_days(self):
+        module = self.module()
+        arguments = (date(2026, 10, 26), date(2026, 11, 26))
+        for invalid in ('2026-11-19', '2026-11-20..2026-11-19',
+                        '2026-10-25..2026-11-19', '2026-11-19..2026-11-26'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                module.acknowledged_days(invalid, *arguments)
+        dates = module.acknowledged_days('2026-11-19..2026-11-25', *arguments)
+        self.assertEqual(len(dates), 7)
+
     def test_required_window_has_no_invented_initial_history_and_honors_grace_and_retention(self):
         from datetime import datetime, timezone
         with tempfile.TemporaryDirectory() as root:
@@ -1224,6 +1249,10 @@ class SloObservationHealthTests(unittest.TestCase):
         self.assertTrue(all(m['readOnly'] for m in pod['spec']['containers'][0]['volumeMounts']))
         self.assertEqual(pod['spec']['volumes'][1]['configMap']['name'], code['metadata']['name'])
         self.assertEqual(pod['spec']['containers'][0]['args'][-2:], ['--required-from', '2026-10-26'])
+        configured = module.render(image, date(2026, 10, 26), acknowledged_window='2026-10-26..2026-10-27')
+        deployment = next(d for d in configured['items'] if d['kind'] == 'Deployment')
+        self.assertEqual(deployment['spec']['template']['spec']['containers'][0]['args'][-2:],
+                         ['--acknowledged-missing-window', '2026-10-26..2026-10-27'])
         for invalid in ('image:latest', image[:-1], image.replace('archive', 'other')):
             with self.assertRaises(ValueError):
                 module.render(invalid, date(2026, 10, 26))

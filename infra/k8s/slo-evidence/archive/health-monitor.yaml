@@ -115,7 +115,11 @@ spec:
             description: "읽기 전용 무결성 검증이 실패했거나 최근 성공이 15분보다 오래된 상태가 10분 지속됨. 잠금 경합은 별도 지표로 구분함."
         - alert: ObservationArchiveDayMissing
           expr: >-
-            (slo_observation_archive_missing_required_days > 0)
+            (
+              (slo_observation_archive_unacknowledged_missing_required_days > 0)
+              or ((slo_observation_archive_missing_required_days > 0)
+                  unless on(namespace,pod) slo_observation_archive_unacknowledged_missing_required_days)
+            )
             and on(namespace,pod) (slo_observation_archive_verification_success == 1)
           for: 15m
           labels:
@@ -123,7 +127,7 @@ spec:
             sre_telegram: "true"
           annotations:
             summary: "보존 의무 일자의 관측 파일 누락"
-            description: "고정 시작일 이후 최대 35일에서 누락된 파일 또는 지연 허용 후 전일 파일 부재를 15분 확인함. 09:10 KST 수집에 09:45까지 허용하며 시작 전 미보유 기간을 실패로 채우지 않음."
+            description: "고정 시작일 이후 최대 35일의 미확인 누락을 15분 감시함. 09:10 KST 수집에 09:45까지 허용함. 확인 처리한 과거 누락은 원본 누락 수에 유지함."
         - alert: ObservationArchiveQuotaNearFull
           expr: slo_observation_archive_stored_bytes / slo_observation_archive_quota_bytes > 0.90
           for: 10m
