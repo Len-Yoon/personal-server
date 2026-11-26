@@ -1,5 +1,5 @@
 """Windows custody policy, handle semantics and coordinator integration."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import base64
 import ctypes
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'infra/k8s'))
 from ha_control import native_windows_local as local
+from ha_control import native_windows_boot_identity as boot_key
 from ha_control import sameboot_transition as transition
 from ha_control import windows_protected_io as io
 
@@ -23,6 +24,13 @@ class AclTests(unittest.TestCase):
 
     def test_private_tcb_only(self):
         self.check([(0,0,0x1f01ff,'S-1-5-18'),(0,0,0x1f01ff,'S-1-5-32-544')])
+
+    def test_private_creation_rejects_readable_inherit_only_file_ace(self):
+        acl = [(0, 0, 0x1f01ff, 'S-1-5-18'), (0, 9, 0x80000000, 'S-1-1-0')]
+        self.check(acl)
+        with self.assertRaises(io.TransitionBlocked):
+            io.validate_acl('S-1-5-18', acl, depth=0, private=True, allowed=io.TRUSTED,
+                            private_child_creation=True)
 
     def test_untrusted_read_or_write_and_null_acl_denied(self):
         for entries in ([],[(0,0,1,'S-1-1-0')],[(0,0,0x40000000,'S-1-1-0')],
@@ -119,6 +127,65 @@ class LocalSystemPowerShellTests(unittest.TestCase):
             with self.assertRaisesRegex(local.wire.BridgeRejected, 'local_recovery_authority_session_closed'):
                 query('sample', 1e11)
             observe.assert_called_once_with('sample', 1e11)
+
+
+class BootIdentityTests(unittest.TestCase):
+    directory = PureWindowsPath(r'C:\Windows\N100-Recovery\identity')
+    public = b'ssh-ed25519 ' + base64.b64encode(boot_key.ED25519_PREFIX + b'x'*32)
+
+    def setUp(self):
+        native = Mock(spec=io.WindowsProtectedIO, owner_sid='S-1-5-18')
+        native.system_directory_path.return_value = PureWindowsPath(r'C:\Windows\System32')
+        native.system_executable_stamp.return_value = (b'keygen', 'exe')
+        native.same_file.return_value = True
+        native.exclusive.return_value = nullcontext()
+        expected = local.wire._bytes({'schema_version': 1, 'keygen_sha256': local.wire._digest(b'keygen'),
+                                     'key_name': boot_key.KEY_NAME})
+        native.read_stamp.side_effect = [(expected, 'issued'), (b'host-local private bytes', 'key'),
+                                         (self.public + b' comment', 'pub')]
+        factory = patch.object(boot_key, 'WindowsProtectedIO', return_value=native)
+        factory.start()
+        self.addCleanup(factory.stop)
+        self.native = native
+        self.pin = local.wire._digest(b'keygen')
+
+    def provision(self):
+        return boot_key.prepare_system_boot_key(self.directory, keygen_sha256=self.pin, deadline=1e12)
+
+    def test_fresh_identity_returns_only_the_verified_public_key(self):
+        with patch.object(boot_key, 'Path', return_value=self.directory), \
+             patch.object(boot_key.WindowsGuestLink, '_path', return_value='key'), \
+             patch.object(boot_key.os.path, 'lexists', side_effect=[False, False, False]), \
+             patch.object(boot_key, 'exchange_direct', side_effect=[b'', self.public]) as exchange:
+            result = self.provision()
+        self.assertEqual(result['public_key'], self.public.decode())
+        self.assertTrue(result['fingerprint'].startswith('SHA256:'))
+        commands = [call.args[0][1:] for call in exchange.call_args_list]
+        self.assertEqual(commands, [
+            ('-q', '-t', 'ed25519', '-N', '', '-C', boot_key.KEY_NAME, '-f', 'key'),
+            ('-y', '-P', '', '-f', 'key'),
+        ])
+
+    def test_reuses_valid_pair_and_leaves_partial_pair_untouched(self):
+        with patch.object(boot_key, 'Path', return_value=self.directory), \
+             patch.object(boot_key.WindowsGuestLink, '_path', return_value='key'), \
+             patch.object(boot_key.os.path, 'lexists', side_effect=[True, False, True, True]), \
+             patch.object(boot_key, 'exchange_direct', return_value=self.public) as exchange:
+            with self.assertRaisesRegex(local.wire.BridgeRejected, boot_key.ERROR):
+                self.provision()
+            exchange.assert_not_called()
+            self.assertEqual(self.provision()['public_key'], self.public.decode())
+            self.assertEqual(exchange.call_args.args[0][1:], ('-y', '-P', '', '-f', 'key'))
+
+    def test_issued_identity_with_no_files_is_not_reissued(self):
+        with patch.object(boot_key, 'Path', return_value=self.directory), \
+             patch.object(boot_key.WindowsGuestLink, '_path', return_value='key'), \
+             patch.object(boot_key.os.path, 'lexists', side_effect=[False, False, True]), \
+             patch.object(boot_key, 'exchange_direct') as exchange:
+            with self.assertRaisesRegex(local.wire.BridgeRejected, boot_key.ERROR):
+                self.provision()
+            self.native.write_new.assert_not_called()
+            exchange.assert_not_called()
 
 
 @dataclass

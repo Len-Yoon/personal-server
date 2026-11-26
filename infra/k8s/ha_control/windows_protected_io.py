@@ -32,7 +32,7 @@ def _identity(info,directory):
 
 
 def validate_acl(owner, entries, *, depth, private, allowed, drive_root=False, protected=True,
-                 checked_os_child=False):
+                 checked_os_child=False, private_child_creation=False):
     """Conservative effective-access check; denies never mask unsafe allows."""
     _need(owner in allowed or (depth>1 and drive_root and owner==gate.TRUSTED_INSTALLER))
     _need(bool(entries) and (depth!=0 or protected))
@@ -48,6 +48,8 @@ def validate_acl(owner, entries, *, depth, private, allowed, drive_root=False, p
         if (depth<=1 or not inherited_only) and mask&(gate.LEAF_WRITE if depth<=1 else gate.ANCESTOR_REPLACE):
             _need(sid in allowed)
         if private and depth<=1 and not inherited_only and mask&gate.PRIVATE_READ:
+            _need(sid in allowed)
+        if private_child_creation and depth == 0 and flags & 1 and mask & gate.PRIVATE_READ:
             _need(sid in allowed)
 
 
@@ -66,10 +68,12 @@ class _SecurityAttributes(ctypes.Structure):
 
 
 class WindowsProtectedIO:
-    def __init__(self, *, admin_only=False, _native=None):
+    def __init__(self, *, admin_only=False, private_child_creation=False, _native=None):
         _need(type(admin_only) is bool and (sys.platform=='win32' or _native is not None))
+        _need(type(private_child_creation) is bool and (admin_only or not private_child_creation))
         self.native=gate._Native() if _native is None else _native
         self.admin_only=admin_only
+        self.private_child_creation=private_child_creation
         if _native is not None:
             self.allowed=TRUSTED|{_native.owner_sid}
             self.owner_sid=_native.owner_sid
@@ -128,7 +132,8 @@ class WindowsProtectedIO:
             validate_acl(native._sid(owner.value),entries,depth=depth,private=private,allowed=self.allowed,
                          drive_root=str(path).casefold()==native.os_root,
                          protected=not self.admin_only or bool(control.value&0x1000),
-                         checked_os_child=getattr(self,'_checked_os_child',False))
+                         checked_os_child=getattr(self,'_checked_os_child',False),
+                         private_child_creation=self.private_child_creation)
             length=self.sd_length(descriptor);_need(0<length<=65536)
             return hashlib.sha256(ctypes.string_at(descriptor,length)).hexdigest()
         finally:

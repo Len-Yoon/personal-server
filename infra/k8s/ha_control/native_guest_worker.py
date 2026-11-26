@@ -109,10 +109,20 @@ def _scope(request):
             "sequence": request.sequence, "nonce": request.nonce}
 
 
-def read_request(stream):
-    raw = stream.readline(GENERATION_HANDOFF_FRAME_BYTES + 1)
-    _need(0 < len(raw) <= GENERATION_HANDOFF_FRAME_BYTES and raw.endswith(b"\n"), "guest_worker_request_size")
+def read_request(stream, *, allow_boot_app=False):
+    if allow_boot_app:
+        from . import native_guest_app_operation as boot_app
+
+        maximum = boot_app.MAX_REQUEST_BYTES
+    else:
+        maximum = GENERATION_HANDOFF_FRAME_BYTES
+    raw = stream.readline(maximum + 1)
+    _need(0 < len(raw) <= maximum and raw.endswith(b"\n"), "guest_worker_request_size")
     value = json.loads(raw.decode("ascii"), object_pairs_hook=_pairs, parse_constant=_reject_constant)
+    if allow_boot_app and type(value) is dict and value.get("kind") == boot_app.KIND:
+        _need(not stream.read(1), "guest_worker_request_size")
+        return boot_app.decode_request(raw)
+    _need(len(raw) <= GENERATION_HANDOFF_FRAME_BYTES, "guest_worker_request_size")
     _need(type(value) is dict and _bytes(value) == raw and type(value["binding"]) is dict,
           "guest_worker_request_encoding")
     _need(len(raw) <= FRAME_BYTES or value.get("verb") == GUEST_PUBLISH_GENERATION, "guest_worker_request_size")
@@ -1480,15 +1490,29 @@ def handle(request, assert_windows_current=None, *, provider_inventory=None):
 
 
 def main(*, authorize=None):
+    if authorize is not None:
+        from . import native_guest_app_operation as boot_app
+
     try:
         signal.alarm(10)
-        request = read_request(sys.stdin.buffer)
+        request = read_request(sys.stdin.buffer, allow_boot_app=authorize is not None)
+        operation = request if authorize is not None and type(request) is boot_app.Operation else None
+        if operation is not None:
+            request = operation.request
         if authorize is not None:
             _need(authorize(request) is True, "guest_worker_request_scope")
     except (TransitionBlocked, BridgeRejected, OSError, KeyError, TypeError, ValueError, RecursionError):
         return 1
     finally:
         signal.alarm(0)
+    if operation is not None:
+        try:
+            raw = boot_app.reply(operation)
+            sys.stdout.buffer.write(raw)
+            sys.stdout.buffer.flush()
+        except (TransitionBlocked, BridgeRejected, OSError, KeyError, TypeError, ValueError, RecursionError):
+            return 1
+        return 0
     if request.verb in DUPLEX_GUEST_VERBS:
         channel = Stdio(sys.stdin.fileno(), sys.stdout.fileno())
 

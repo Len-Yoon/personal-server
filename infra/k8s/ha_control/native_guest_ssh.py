@@ -759,13 +759,29 @@ class GuestSshDispatcher:
         return bridge._bytes(envelope | receipt.fields('restore'))
 
     def exchange_direct_script(self, node, code, payload, deadline):
-        bridge._need(self.direct_link is not None and node in self.guests, 'guest_windows_ssh_scope_rejected')
+        bridge._need(self.direct_link is not None and not self.uses_scoped_boot_key and node in self.guests,
+                     'guest_windows_ssh_scope_rejected')
         raw = code.encode('utf-8')
         bridge._need(0 < len(raw) <= 131072, 'guest_windows_ssh_script_size')
         worker = shlex.join(('/usr/bin/python3', '-I', '-B', '-S', '-c', STDIN_SCRIPT,
                              str(len(raw)), bridge._digest(raw)))
         with self.direct_link.connection(self.guests[node], self.known_hosts[node], worker, deadline) as command:
             return self.direct_link.exchange(command, raw + payload, deadline)
+
+    @property
+    def uses_scoped_boot_key(self):
+        return getattr(self.direct_link, 'scoped_boot_key', False) is True
+
+    def exchange_boot_app_operation(self, name, request, inputs, deadline):
+        from . import native_guest_app_operation as boot_app
+
+        bridge._need(self.uses_scoped_boot_key and type(request) is bridge.Request
+                     and request.binding == self.binding and request.node == 'A', 'guest_windows_ssh_scope_rejected')
+        payload = boot_app.encode_request(name, request, inputs)
+        with self.direct_link.connection(self.guests['A'], self.known_hosts['A'], self.command, deadline) as command:
+            output = self.direct_link.exchange(command, payload, deadline)
+        bridge._remaining(deadline)
+        return boot_app.decode_reply(output, name, payload)
 
     @staticmethod
     def _live_exchange(command, payload, limit, request, verify, *, direct_start=None):

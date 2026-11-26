@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 
-from . import native_guest_ssh as ssh, native_stdio_bridge as wire
+from . import native_guest_app_operation as boot_app, native_guest_ssh as ssh, native_stdio_bridge as wire
 from .controller import TransitionBlocked
 from .initial_postboot import scope, published_postboot, TRANSITION_FIELDS
 from .initial_unpublished import derive_predecessor
@@ -351,17 +351,22 @@ def guest_attest(dispatcher, request, launcher, manifest_sha256, service_instanc
             'sequence': request.sequence, 'nonce': request.nonce, 'args': request.args,
             'instance': service_instance_sha256, 'intent': prior_intent_sha256, 'progress': prior_progress_sha256,
             'prior_resume': prior_resume}
-    code = 'import json\nCFG=' + repr(data) + '\n' + launcher.split(marker)[0].decode() + """
+    assert_guard()
+    wire._remaining(deadline)
+    if dispatcher.uses_scoped_boot_key:
+        result = dispatcher.exchange_boot_app_operation(boot_app.ATTEST, request, {
+            'instance': data['instance'], 'intent': data['intent'], 'progress': data['progress'],
+            'prior_resume': prior_resume}, deadline)
+    else:
+        code = 'import json\nCFG=' + repr(data) + '\n' + launcher.split(marker)[0].decode() + """
 from ha_control import native_stdio_bridge as wire
 from ha_control.initial_app_resume import attest
 request=wire.Request(wire.Binding(**CFG['binding']),CFG['node'],CFG['verb'],CFG['sequence'],CFG['nonce'],CFG['args'])
 result=attest(request,service_instance_sha256=CFG['instance'],prior_intent_sha256=CFG['intent'],prior_progress_sha256=CFG['progress'],**({} if CFG['prior_resume'] is None else {'prior_resume':CFG['prior_resume']}))
 print(json.dumps(result,sort_keys=True,separators=(',',':')))
 """
-    compile(code, '<successor-app-attestation>', 'exec')
-    assert_guard()
-    wire._remaining(deadline)
-    result = _guest_script(dispatcher, code, deadline)
+        compile(code, '<successor-app-attestation>', 'exec')
+        result = _guest_script(dispatcher, code, deadline)
     assert_guard()
     wire._remaining(deadline)
     fields = {'schema_version', 'authorization_sha256', 'request_nonce', 'baseline_sha256', 'prior_intent_sha256',
@@ -375,100 +380,6 @@ print(json.dumps(result,sort_keys=True,separators=(',',':')))
          and wire._hash(result['authorization_sha256']) and wire._hash(result['baseline_sha256']))
     return result
 
-
-_COMPLETION_READ = r'''
-import os,time
-from ha_control import native_guest_worker as w,initial_app_resume as resume,native_stdio_bridge as wire
-deadline=time.monotonic()+CFG['budget']
-request=wire.Request(wire.Binding(**CFG['binding']),CFG['node'],CFG['verb'],CFG['sequence'],CFG['nonce'],CFG['args'])
-def require(value):
-    if not value:raise ValueError('successor_app_completion_unverified')
-require(os.geteuid()==0 and request.node=='A' and request.verb==wire.GUEST_START_INITIAL_POSTBOOT)
-wire._args(request.verb,request.node,request.args)
-require(wire._digest(w.runtime.BOOT_ID.read_bytes())==request.binding.boot('A'))
-with w._guest_mutation_descriptor(wait=2):
-    raw,hold,prepared,active=w._read_initial_recovery_hold(request)
-    stage=w.ROOT/request.binding.attempt_id
-    numbered=resume.latest_attempt(request)
-    continuation=bool(numbered) or resume.path(request,partial=True,prestart=True,continuation=True).exists()
-    prestart=continuation or resume.path(request,partial=True,prestart=True).exists()
-    partial=prestart or resume.path(request,partial=True).exists()
-    target=resume.path(request,partial=partial,prestart=prestart,continuation=continuation,numbered_attempt=numbered)
-    authorization_raw=w.runtime._read(target,0,{0o400},limit=131072)
-    authorization=resume.decode(authorization_raw)
-    require(wire._digest(authorization_raw)==CFG['authorization']['authorization_sha256'])
-    require(authorization['request']==w._scope(request) and authorization['args']==request.args
-        and authorization['service_instance_sha256']==CFG['instance']
-        and authorization['prior_intent_sha256']==CFG['authorization']['prior_intent_sha256']
-        and authorization['prior_progress_sha256']==CFG['authorization']['prior_progress_sha256']
-        and authorization.get('prior_resume')==CFG['prior_resume'])
-    base=resume.prefix(request)
-    stem=(resume._numbered_stem(base,numbered) if numbered else base+'resume-'+
-          ('partial-' if partial else '')+('prestart-' if prestart else '')+('continuation-' if continuation else ''))
-    order=w.RECOVERY_START_ORDER
-    names=['intent.json','done.json']+['progress-'+role+'.json' for role in order]
-    journals={name:w.runtime._read(stage/(stem+name),0,{0o600},limit=131072) for name in names}
-    history={'authorization_sha256':wire._digest(authorization_raw),
-             'intent_sha256':wire._digest(journals['intent.json']),'done_sha256':wire._digest(journals['done.json']),
-             'progress_sha256':{name:wire._digest(journals[name]) for name in names if name.startswith('progress-')}}
-    require(CFG['expected'] is None or history['done_sha256']==CFG['expected'])
-    require(resume._latest_history(request,raw,hold,active,history)==authorization)
-    worker=w.GuestWorker(request)
-    postgres,pins,_=worker._prepared_pins(prepared['manifest_sha256'])
-    require(pins.installation_id==request.args['installation_id'] and pins.node=='A'
-        and pins.attempt_id==request.binding.attempt_id)
-    authorities={w.runtime.ROOT/name:pin for name,pin in active['authority_files'].items()}
-    require(set(authorities)==set(w.live._authority_paths().values()))
-    def inventory():
-        require(time.monotonic()<deadline)
-        objects=w.restore._observer_inventory(deadline)
-        contracts,protected=w._initial_recovery_inventory(request.binding,hold['containers'],
-            request.args['protected_inventory_sha256'],None,
-            (authorization['container_contracts'],authorization['protected_inventory_sha256']),inventory=lambda:objects)
-        require(protected==authorization['protected_inventory_sha256']
-            and all(row['running'] is True and row['started_at']!=authorization['container_contracts'][role]['started_at']
-                    for role,row in contracts.items()))
-        instances={}
-        for role,pin in hold['containers'].items():
-            item=objects[pin['container_id']];state=item['State']
-            require(item['Id']==pin['container_id'] and item['Image']==pin['image_id']
-                and type(state['Pid']) is int and state['Pid']>0)
-            instances[role]=[pin['container_id'],pin['image_id'],state['Pid'],state['StartedAt']]
-        w._assert_car_route_blocked(request,raw,prepared,active)
-        require(all(wire._digest(w.runtime._read(path,0,{0o444}))==pin for path,pin in authorities.items()))
-        return contracts,instances
-    def lease(boundary):
-        challenge=wire._digest(wire._bytes({'request':w._scope(request),'history':history,'boundary':boundary}))
-        proof=w.live.observe_postboot_a_lease(pins,postgres,recovery_attempt_id=request.args['recovery_attempt_id'],
-            postboot=request.args['postboot'],postboot_plan_sha256=request.args['postboot_plan_sha256'],
-            challenge_sha256=challenge,deadline=min(deadline,time.monotonic()+.5),minimum_remaining_seconds=1)
-        require(wire._hash(proof) and time.monotonic()<deadline)
-        return proof
-    before=inventory();lease('completion_before')
-    context,leaf=w.activation._tls(prepared)
-    spec_raw=w.runtime._read(stage/'guest-spec.json',0,{0o400,0o600})
-    require(wire._digest(spec_raw)==pins.spec_sha256)
-    spec=resume.decode(spec_raw)
-    require(spec['node']=='A' and spec['guest_ip']==spec['pg_a'])
-    readiness={role:w.activation._probe(context,leaf,spec['guest_ip'],role,deadline,expected_node='A')
-               for role in order if role!='ha-broker'}
-    require(len(readiness)==7 and all(wire._hash(pin) for pin in readiness.values()))
-    require(w.activation._tls(prepared)[1]==leaf)
-    require(inventory()==before)
-    require(w._read_initial_recovery_hold(request)==(raw,hold,prepared,active)
-        and w.runtime._read(stage/'guest-spec.json',0,{0o400,0o600})==spec_raw
-        and w.runtime._read(target,0,{0o400},limit=131072)==authorization_raw
-        and all(w.runtime._read(stage/(stem+name),0,{0o600},limit=131072)==body for name,body in journals.items()))
-    require(resume._latest_history(request,raw,hold,active,history)==authorization)
-    final_lease=lease('completion_after')
-    require(time.monotonic()<deadline)
-    result={'status':'STARTED_VERIFIED','receipt_sha256':history['done_sha256'],
-        'authorization_sha256':history['authorization_sha256'],'history':history,
-        'request_sha256':wire._digest(wire._bytes(w._scope(request)|{'args':request.args})),
-        'service_instance_sha256':CFG['instance'],'instances_sha256':wire._digest(wire._bytes(before[1])),
-        'readiness':readiness,'guest_lease_sha256':final_lease,'container_count':len(order),'mutations':False}
-print(json.dumps(result,sort_keys=True,separators=(',',':')))
-'''
 
 
 def guest_completion(dispatcher, request, launcher, manifest_sha256, authorization, deadline, *,
@@ -484,11 +395,23 @@ def guest_completion(dispatcher, request, launcher, manifest_sha256, authorizati
             'instance': authorization['service_instance_sha256'], 'authorization': authorization,
             'prior_resume': prior_resume, 'expected': expected_receipt_sha256,
             'budget': min(120, wire._remaining(deadline))}
-    code = 'import json\nCFG=' + repr(data) + '\n' + launcher.split(marker)[0].decode() + _COMPLETION_READ
-    need(len(code.encode()) <= 131072)
-    compile(code, '<successor-app-completion>', 'exec')
     assert_guard()
-    result = _guest_script(dispatcher, code, deadline)
+    if dispatcher.uses_scoped_boot_key:
+        result = dispatcher.exchange_boot_app_operation(boot_app.COMPLETE, request, {
+            'instance': data['instance'], 'authorization': {
+                key: authorization[key] for key in boot_app.AUTH_FIELDS},
+            'prior_resume': prior_resume, 'expected': expected_receipt_sha256, 'budget': data['budget']}, deadline)
+    else:
+        code = ('import json\nCFG=' + repr(data) + '\n' + launcher.split(marker)[0].decode()
+                + inspect.getsource(boot_app.observe_completion) + """
+from ha_control import native_stdio_bridge as wire
+request=wire.Request(wire.Binding(**CFG['binding']),CFG['node'],CFG['verb'],CFG['sequence'],CFG['nonce'],CFG['args'])
+result=observe_completion(request,**{key:CFG[key] for key in ('instance','authorization','prior_resume','expected','budget')})
+print(json.dumps(result,sort_keys=True,separators=(',',':')))
+""")
+        need(len(code.encode()) <= 131072)
+        compile(code, '<successor-app-completion>', 'exec')
+        result = _guest_script(dispatcher, code, deadline)
     assert_guard()
     wire._remaining(deadline)
     return result

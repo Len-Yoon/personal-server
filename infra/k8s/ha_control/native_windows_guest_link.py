@@ -17,8 +17,9 @@ from .native_pipe_process import exchange_direct, start_direct
 class WindowsGuestLink:
     """Consume existing authorized key files. Never create or import identities."""
 
-    def __init__(self, directory, *, ssh_sha256, keygen_sha256):
-        bridge._need(sys.platform == 'win32' and bridge._hash(ssh_sha256) and bridge._hash(keygen_sha256),
+    def __init__(self, directory, *, ssh_sha256, keygen_sha256, scoped_boot_key=False):
+        bridge._need(sys.platform == 'win32' and bridge._hash(ssh_sha256) and bridge._hash(keygen_sha256)
+                     and type(scoped_boot_key) is bool,
                      'guest_windows_ssh_scope_rejected')
         from .windows_protected_io import WindowsProtectedIO
 
@@ -30,6 +31,7 @@ class WindowsGuestLink:
         root = self.system / 'OpenSSH'
         self.ssh, self.keygen = root / 'ssh.exe', root / 'ssh-keygen.exe'
         self.pins = {self.ssh: ssh_sha256, self.keygen: keygen_sha256}
+        self.scoped_boot_key = scoped_boot_key
         self.directory = Path(directory)
         self.local = WindowsProtectedIO()
         self.local.assert_directory(self.directory, private=True)

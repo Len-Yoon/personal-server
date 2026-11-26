@@ -283,6 +283,17 @@ class SavedSiteApps:
             'closed_revision': self.closed_revision, 'expected': expected}
         if action == 'authorization':
             _need(type(self.app) is SuccessorAppStage)
+            if self.dispatcher.uses_scoped_boot_key:
+                from . import native_guest_app_operation as boot_app
+
+                self.guard()
+                wire._remaining(deadline)
+                result = self.dispatcher.exchange_boot_app_operation(boot_app.READ_AUTH, request, {
+                    'instance': self.app.lease.service_instance_sha256, 'intent': self.app.prior_intent,
+                    'progress': self.app.prior_progress, 'prior_resume': None}, deadline)
+                self.guard()
+                wire._remaining(deadline)
+                return result
             data.update(instance=self.app.lease.service_instance_sha256, prior_intent=self.app.prior_intent,
                         prior_progress=self.app.prior_progress)
         return self._exchange_guest(data, _GUEST, b'', deadline)

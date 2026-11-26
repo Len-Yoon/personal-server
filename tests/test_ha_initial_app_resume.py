@@ -792,6 +792,52 @@ class InitialAppResumeTests(unittest.TestCase):
         with self.assertRaises(TransitionBlocked):
             w.start_initial_recovery(self.request, self.windows)
 
+    def test_typed_completion_matches_both_observations_to_full_authorization(self):
+        from ha_control import native_guest_app_operation as app_operation
+
+        boot = self.root / 'boot-id'
+        boot.write_bytes(b'current guest boot')
+        self.request = replace(self.request, binding=replace(
+            self.request.binding, boot_a_sha256=wire._digest(boot.read_bytes())))
+        self.prepare_successor_carryover()
+        persisted = self.attest_successor()
+        projected = {name: persisted[name] for name in app_operation.AUTH_FIELDS}
+        record, full, _ = self.load()
+        self.assertNotEqual(full, projected)
+        self.assertEqual(wire._digest(record), projected['authorization_sha256'])
+        done = w.start_initial_recovery(self.request, self.windows)
+        self.assertEqual(done.status, 'PASS')
+
+        objects = {
+            pin['container_id']: {'Id': pin['container_id'], 'Image': pin['image_id'],
+                                  'State': {'Pid': index, 'StartedAt': self.contracts[role]['started_at']}}
+            for index, (role, pin) in enumerate(self.containers.items(), 1)
+        }
+        inputs = {'instance': persisted['service_instance_sha256'], 'authorization': projected,
+                  'prior_resume': None, 'expected': done.receipt_sha256, 'budget': 10}
+        frame = app_operation.encode_request(app_operation.COMPLETE, self.request, inputs)
+        operation = app_operation.decode_request(frame)
+        files_before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        commands_before = self.commands.copy()
+        with patch.object(w.os, 'geteuid', return_value=0), patch.object(w.runtime, 'BOOT_ID', boot), \
+             patch.object(w, '_guest_mutation_descriptor', return_value=ExitStack()), \
+             patch.object(w.restore, '_observer_inventory', return_value=objects), \
+             patch.object(w.activation, '_probe', return_value='a' * 64) as probe, \
+             patch.object(w.live, 'observe_postboot_a_lease', wraps=w.live.observe_postboot_a_lease) as lease, \
+             patch.object(resume, '_latest_history', wraps=resume._latest_history) as history:
+            response = app_operation.reply(operation)
+            result = app_operation.decode_reply(response, app_operation.COMPLETE, frame)
+        self.assertEqual(result['status'], 'STARTED_VERIFIED')
+        self.assertEqual(result['receipt_sha256'], done.receipt_sha256)
+        self.assertEqual(result['authorization_sha256'], projected['authorization_sha256'])
+        self.assertEqual(result['container_count'], 8)
+        self.assertIs(result['mutations'], False)
+        self.assertEqual(probe.call_count, 7)
+        self.assertEqual(lease.call_count, 2)
+        self.assertEqual(sum(call.args[0] == self.request for call in history.call_args_list), 2)
+        self.assertEqual(self.commands, commands_before)
+        self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, files_before)
+
     def test_successor_carryover_checks_only_one_inventory_and_preserves_without_rescan(self):
         postboot = self.prepare_successor_carryover()
         with patch.object(postboot, 'current', wraps=postboot.current) as current:
