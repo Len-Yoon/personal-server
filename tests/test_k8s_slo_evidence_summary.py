@@ -73,6 +73,41 @@ class SloEvidenceSummaryTests(unittest.TestCase):
         self.assertIsNone(result['sources']['public_health']['observed_ok_percent'])
         self.assertIsNone(result['http']['window_weighted_error_ratio'])
 
+    def test_daily_status_distinguishes_collection_and_failed_checks(self):
+        module = self.module()
+        day = date(2026, 11, 27)
+        summary = module.summarize_records([
+            record(day.isoformat(), portal_ready='failed', crawler_freshness='failed'),
+        ], day, 1)
+        report = module.render_daily_status(summary)
+        self.assertIn('수집 기록 — 수집 완료\n점검 항목 — 이상 감지\n', report)
+        self.assertIn('공개 Portal 접속 — 정상', report)
+        self.assertIn('Portal 준비 상태 (직전 24시간) — 이상', report)
+        self.assertIn('뉴스 수집 최신성 (직전 24시간) — 이상', report)
+
+    def test_daily_status_preserves_known_failures_and_unknown_checks(self):
+        module = self.module()
+        day = date(2026, 11, 27)
+        summary = module.summarize_records([
+            record(day.isoformat(), overall='unobservable', portal_ready='failed',
+                   crawler_freshness='unobservable', portal_http=None, missing=['crawler_freshness', 'portal_http']),
+        ], day, 1)
+        report = module.render_daily_status(summary)
+        self.assertIn('수집 기록 — 부분 수집\n점검 항목 — 이상 감지 · 일부 확인 필요', report)
+        self.assertIn('뉴스 수집 최신성 (직전 24시간) — 확인 필요', report)
+        self.assertIn('Portal HTTP 지표 — 확인 필요', report)
+
+    def test_daily_status_does_not_substitute_yesterday_or_hide_missing_http(self):
+        module = self.module()
+        day = date(2026, 11, 27)
+        previous = module.summarize_records([record('2026-11-26', public_health='failed')], day, 1)
+        self.assertEqual(module.render_daily_status(previous).splitlines()[1:],
+                         ['수집 기록 — 없음', '점검 항목 — 확인 필요'])
+        http_missing = module.summarize_records([
+            record(day.isoformat(), overall='unobservable', portal_http=None, missing=['portal_http']),
+        ], day, 1)
+        self.assertIn('수집 기록 — 부분 수집\n점검 항목 — 확인 필요\n', module.render_daily_status(http_missing))
+
     def test_http_uses_request_weights_not_average_of_ratios_or_p95(self):
         result = self.module().summarize_records([
             record('2026-10-03'),
@@ -151,6 +186,10 @@ class SloEvidenceSummaryTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout)['present_days'], 1)
                 self.assertEqual(path.read_text(), raw)
+                daily = subprocess.run([sys.executable, str(SCRIPT), '--input', str(path),
+                    '--end-date', '2026-10-04', '--daily-status'], capture_output=True, text=True)
+                self.assertEqual(daily.returncode, 0, daily.stderr)
+                self.assertIn('수집 기록 — 수집 완료\n점검 항목 — 정상\n', daily.stdout)
 
     def test_cli_invalid_input_does_not_echo_raw_data(self):
         self.module()

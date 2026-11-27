@@ -104,11 +104,44 @@ def summarize_records(records, end_date, days=30):
     }
 
 
+def render_daily_status(summary):
+    """Describe the saved record for a single requested day."""
+    if summary['period']['days'] != 1:
+        raise ValueError('invalid_daily_period')
+    lines = [f"일일 점검 · {summary['period']['end_date']} (한국시간)"]
+    if not summary['present_days']:
+        return '\n'.join([*lines, '수집 기록 — 없음', '점검 항목 — 확인 필요'])
+
+    labels = {
+        'public_health': '공개 Portal 접속',
+        'portal_ready': 'Portal 준비 상태 (직전 24시간)',
+        'crawler_freshness': '뉴스 수집 최신성 (직전 24시간)',
+    }
+    source_status = {
+        name: '이상' if source['failed_days'] else '확인 필요' if source['unobservable_days'] else '정상'
+        for name, source in summary['sources'].items()
+    }
+    partial = bool(summary['collection']['unobservable_days'])
+    outcome = '이상 감지' if '이상' in source_status.values() else '정상'
+    if partial:
+        outcome = '이상 감지 · 일부 확인 필요' if outcome == '이상 감지' else '확인 필요'
+    lines.extend([
+        '수집 기록 — ' + ('부분 수집' if partial else '수집 완료'),
+        '점검 항목 — ' + outcome,
+        *(f"- {labels[name]} — {source_status[name]}" for name in _SOURCES),
+    ])
+    if summary['http']['unobservable_days']:
+        lines.append('- Portal HTTP 지표 — 확인 필요')
+    return '\n'.join(lines)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', required=True)
     parser.add_argument('--end-date', required=True)
-    parser.add_argument('--days', type=int, default=30)
+    presentation = parser.add_mutually_exclusive_group()
+    presentation.add_argument('--days', type=int, default=30)
+    presentation.add_argument('--daily-status', action='store_true', help='요청한 날짜의 수집과 점검 항목 상태 표시')
     args = parser.parse_args(argv)
     try:
         end_date = date.fromisoformat(args.end_date)
@@ -121,8 +154,9 @@ def main(argv=None):
         payload = json.loads(raw)
         if isinstance(payload, dict):
             payload = json.loads(payload['data']['records.json'])
-        output = summarize_records(payload, end_date, args.days)
-        print(json.dumps(output, ensure_ascii=False, sort_keys=True, allow_nan=False))
+        output = summarize_records(payload, end_date, 1 if args.daily_status else args.days)
+        print(render_daily_status(output) if args.daily_status
+              else json.dumps(output, ensure_ascii=False, sort_keys=True, allow_nan=False))
         return 0
     except (OSError, TypeError, ValueError, KeyError, AttributeError, OverflowError):
         print('slo_evidence_summary=FAIL reason=invalid_input', file=sys.stderr)
